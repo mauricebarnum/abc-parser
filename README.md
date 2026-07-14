@@ -11,6 +11,7 @@ streams without first converting them to `&str`.
 
 ```sh
 cargo run -p abc-parser --example kitchen_sink -- test_kitchen_sink.abc
+cargo run -p abc-parser --example transpose_kitchen_sink
 cargo test --workspace
 ```
 
