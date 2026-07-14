@@ -24,11 +24,13 @@ use super::ChordMember;
 use super::Decoration;
 use super::Directive;
 use super::Document;
+use super::DocumentItem;
 use super::EndingSelector;
 use super::Field;
 use super::FieldParameter;
 use super::FieldValue;
 use super::Fraction;
+use super::FreeText;
 use super::GraceGroup;
 use super::KeyAccidental;
 use super::KeySignature;
@@ -54,6 +56,7 @@ use super::Tempo;
 use super::Tie;
 use super::Tune;
 use super::Tuplet;
+use super::TypesetText;
 use super::VariantEnding;
 use super::VoiceDefinition;
 use std::fmt;
@@ -111,12 +114,64 @@ where
         for line in &self.header {
             write_line_with_separator(&line.value, output, &mut needs_separator)?;
         }
-        for tune in &self.tunes {
-            for line in &tune.lines {
-                write_line_with_separator(&line.value, output, &mut needs_separator)?;
+        for item in &self.items {
+            if needs_separator {
+                output.write_str("\n\n")?;
             }
+            item.value.write_abc(output)?;
+            needs_separator = true;
         }
         Ok(())
+    }
+}
+
+impl<S, T> ToAbc for DocumentItem<S, T>
+where
+    T: AsRef<str>,
+{
+    fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
+        match self {
+            Self::Tune(tune) => tune.write_abc(output),
+            Self::FreeText(text) => text.write_abc(output),
+            Self::TypesetText(text) => text.write_abc(output),
+            Self::Comment(text) => write!(output, "%{}", text.as_ref()),
+            Self::Directive(value) => value.write_abc(output),
+        }
+    }
+}
+
+impl<T> ToAbc for FreeText<T>
+where
+    T: AsRef<str>,
+{
+    fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
+        for (index, line) in self.lines.iter().enumerate() {
+            if index > 0 {
+                output.write_char('\n')?;
+            }
+            output.write_str(line.as_ref())?;
+        }
+        Ok(())
+    }
+}
+
+impl<T> ToAbc for TypesetText<T>
+where
+    T: AsRef<str>,
+{
+    fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
+        match self {
+            Self::Text(text) => write!(output, "%%text {}", text.as_ref()),
+            Self::Centered(text) => write!(output, "%%center {}", text.as_ref()),
+            Self::Block(lines) => {
+                output.write_str("%%begintext")?;
+                for line in lines {
+                    output.write_char('\n')?;
+                    write!(output, "%%{}", line.as_ref())?;
+                }
+                output.write_str("\n%%endtext")
+            }
+        }
     }
 }
 
@@ -165,6 +220,8 @@ where
                 }
                 Ok(())
             }
+            Self::TypesetText(text) => text.write_abc(output),
+            Self::DirectiveText(text) => write!(output, "%%{}", text.as_ref()),
         }
     }
 }

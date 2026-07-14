@@ -15,6 +15,8 @@ The primary complete-document APIs are:
   other Chumsky parsers.
 - [`parse_input`] runs that parser and returns Chumsky's native `ParseResult`
   with `Rich<char, I::Span>` errors.
+- [`document_parser_with_options`] and [`parse_input_with_options`] accept
+  [`ParserOptions`] controlling independent free- and typeset-text retention.
 
 - [`parse_recovering`] always returns a [`ParseReport<OwnedDocument>`]. Its
   [`ParseReport::output`] contains everything recovered after faults and
@@ -49,8 +51,10 @@ flowchart TD
     elements --> ast[Spanned AST nodes]
     field_value --> ast
     directive --> ast
-    ast --> group[Group lines at X: tune boundaries]
-    group --> parsed[ParsedDocument with SourceText spans]
+    ast --> group[Split sections at empty lines]
+    group --> ordered[Classify header, tunes, free text, and typeset text]
+    ordered --> filter[Apply ParserOptions retention]
+    filter --> parsed[ParsedDocument with SourceText spans]
     parsed -->|IntoOwnedAst + source| owned[OwnedDocument with strings]
     parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
 ```
@@ -63,20 +67,44 @@ contains the same information for plain rustdoc viewers.
 
 [`document_parser`] composes the source at physical-line granularity:
 
-1. `line_parser().separated_by(newline())` identifies physical lines.
+1. A non-reporting line candidate parser separated by `newline()` identifies
+   physical lines without treating prose letters as malformed music.
 2. A `choice` combinator classifies each line by its prefix. `%%` selects a directive,
    `%` selects a comment, and an ASCII letter followed by `:` selects an
    information field. Other non-blank lines are music code.
 3. `map_with` wraps a successful or recovered line in [`Spanned<Line>`] using
    `MapExtra::span`. Newline tokens are not part of the line span.
-4. An `X:` field starts a new [`Tune`]. Lines before the first `X:` remain in
-   [`Document::header`].
-5. Chumsky returns diagnostics and the [`Document`] together in `ParseResult`.
+4. Empty lines terminate tunes and divide the initial file header, tunes, free
+   text, and file-level typeset annotations.
+5. An `X:` block becomes a [`Tune`]. Other blocks become ordered
+   [`DocumentItem`] values, with text directives represented by
+   [`TypesetText`].
+6. Music-token errors are emitted only inside tunes; information fields are
+   diagnosed inside free text.
+7. Chumsky returns diagnostics and the [`Document`] together in `ParseResult`.
 
 Physical lines are intentional recovery boundaries. ABC fields, directives,
 comments, and most music layout constructs cannot consume an arbitrary following
 line, so the next line is a dependable place to resume after an unclosed chord,
 grace group, decoration, or annotation.
+
+## Free text and typeset text
+
+[`Document::items`] preserves the order of tunes, [`FreeText`] blocks,
+file-level [`TypesetText`], comments, and stylesheet directives after the
+optional initial header. A tune ends at an empty line or EOF. This prevents
+letters in inter-tune prose from being interpreted as notes.
+
+`%%text` and `%%center` become typed text nodes. `%%begintext` through
+`%%endtext` becomes one block node; each standard body line must begin with
+`%%`. The same nodes may occur in tune headers and bodies through
+[`Line::TypesetText`].
+
+[`ParserOptions`] retains both text categories by default. Its
+[`ParserOptions::retain_free_text`] and
+[`ParserOptions::retain_typeset_text`] builders independently omit the
+corresponding AST nodes. Parsing and validation still occur before omission, so
+retention choices never hide diagnostics.
 
 ## Information-field flow
 
@@ -191,13 +219,17 @@ semantic children such as [`Pitch`] do not repeat their parent's span.
 
 ```mermaid
 classDiagram
-    Document *-- Tune
+    Document *-- DocumentItem
+    DocumentItem *-- Tune
+    DocumentItem *-- FreeText
+    DocumentItem *-- TypesetText
     Document *-- SpannedLine : header
     Tune *-- SpannedLine : lines
     SpannedLine *-- Line
     Line <|-- DirectiveLine
     Line <|-- FieldLine
     Line <|-- MusicLine
+    Line <|-- TypesetText
     FieldLine *-- Field
     Field *-- FieldKind
     Field *-- FieldValue

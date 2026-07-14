@@ -28,3 +28,8 @@ standalone strings using the original source or conspicuous placeholders when
 the source is unavailable. Owned AST nodes implement `ToAbc`, allowing complete
 documents or individual fields and music elements to be emitted as canonical
 ABC notation after inspection or transformation.
+
+At file level, tunes, free-text blocks, and typed `%%text`, `%%center`, and
+`%%begintext` annotations are retained in source order. `ParserOptions` can
+independently discard free text or typeset text while continuing to parse and
+validate it.

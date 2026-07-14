@@ -18,9 +18,11 @@ use super::Annotation;
 use super::BarLine;
 use super::Directive;
 use super::Document;
+use super::DocumentItem;
 use super::Field;
 use super::FieldParameter;
 use super::FieldValue;
+use super::FreeText;
 use super::KeySignature;
 use super::Line;
 use super::MacroDefinition;
@@ -31,6 +33,7 @@ use super::Spanned;
 use super::SymbolDefinition;
 use super::Tempo;
 use super::Tune;
+use super::TypesetText;
 use super::VoiceDefinition;
 use chumsky::span::SimpleSpan;
 use std::borrow::Cow;
@@ -205,6 +208,8 @@ impl<S> IntoOwnedAst<S> for Directive<SourceText<S>> {
         Ok(Directive {
             name: self.name.into_owned(resolver)?,
             arguments: self.arguments.into_owned(resolver)?,
+            kind: self.kind,
+            body: self.body.into_owned(resolver)?,
         })
     }
 }
@@ -478,6 +483,62 @@ impl<S> IntoOwnedAst<S> for Line<S, SourceText<S>> {
                     .map(|value| value.into_owned(resolver))
                     .collect::<Result<_, _>>()?,
             ),
+            Self::TypesetText(value) => Line::TypesetText(value.into_owned(resolver)?),
+            Self::DirectiveText(value) => Line::DirectiveText(value.into_owned(resolver)?),
+        })
+    }
+}
+
+impl<S> IntoOwnedAst<S> for FreeText<SourceText<S>> {
+    type Owned = FreeText<String>;
+
+    fn into_owned<R>(self, resolver: &R) -> Result<Self::Owned, R::Error>
+    where
+        R: SourceResolver<S> + ?Sized,
+    {
+        Ok(FreeText {
+            lines: self
+                .lines
+                .into_iter()
+                .map(|line| line.into_owned(resolver))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl<S> IntoOwnedAst<S> for TypesetText<SourceText<S>> {
+    type Owned = TypesetText<String>;
+
+    fn into_owned<R>(self, resolver: &R) -> Result<Self::Owned, R::Error>
+    where
+        R: SourceResolver<S> + ?Sized,
+    {
+        Ok(match self {
+            Self::Text(text) => TypesetText::Text(text.into_owned(resolver)?),
+            Self::Centered(text) => TypesetText::Centered(text.into_owned(resolver)?),
+            Self::Block(lines) => TypesetText::Block(
+                lines
+                    .into_iter()
+                    .map(|line| line.into_owned(resolver))
+                    .collect::<Result<_, _>>()?,
+            ),
+        })
+    }
+}
+
+impl<S> IntoOwnedAst<S> for DocumentItem<S, SourceText<S>> {
+    type Owned = DocumentItem<S, String>;
+
+    fn into_owned<R>(self, resolver: &R) -> Result<Self::Owned, R::Error>
+    where
+        R: SourceResolver<S> + ?Sized,
+    {
+        Ok(match self {
+            Self::Tune(tune) => DocumentItem::Tune(tune.into_owned(resolver)?),
+            Self::FreeText(text) => DocumentItem::FreeText(text.into_owned(resolver)?),
+            Self::TypesetText(text) => DocumentItem::TypesetText(text.into_owned(resolver)?),
+            Self::Comment(text) => DocumentItem::Comment(text.into_owned(resolver)?),
+            Self::Directive(value) => DocumentItem::Directive(value.into_owned(resolver)?),
         })
     }
 }
@@ -512,10 +573,10 @@ impl<S> IntoOwnedAst<S> for Document<S, SourceText<S>> {
                 .into_iter()
                 .map(|line| line.into_owned(resolver))
                 .collect::<Result<_, _>>()?,
-            tunes: self
-                .tunes
+            items: self
+                .items
                 .into_iter()
-                .map(|tune| tune.into_owned(resolver))
+                .map(|item| item.into_owned(resolver))
                 .collect::<Result<_, _>>()?,
         })
     }

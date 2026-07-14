@@ -34,9 +34,12 @@ fn erase_source_locations(document: &mut OwnedDocument<SimpleSpan<usize>>) {
     for line in &mut document.header {
         erase_line_locations(line);
     }
-    for tune in &mut document.tunes {
-        for line in &mut tune.lines {
-            erase_line_locations(line);
+    for item in &mut document.items {
+        item.span = SimpleSpan::from(0..0);
+        if let abc_parser::DocumentItem::Tune(tune) = &mut item.value {
+            for line in &mut tune.lines {
+                erase_line_locations(line);
+            }
         }
     }
 }
@@ -55,12 +58,12 @@ fn erase_line_locations(line: &mut OwnedLine) {
 fn parses_kitchen_sink_with_spans() {
     let report = parse_recovering(KITCHEN_SINK);
     assert!(report.errors.is_empty(), "{:#?}", report.errors);
-    assert_eq!(report.output.tunes.len(), 2);
+    assert_eq!(report.output.tunes().count(), 2);
     for line in report
         .output
         .header
         .iter()
-        .chain(report.output.tunes.iter().flat_map(|tune| &tune.lines))
+        .chain(report.output.tunes().flat_map(|tune| &tune.lines))
     {
         assert!(line.span.end <= KITCHEN_SINK.len());
         assert!(line.span.start <= line.span.end);
@@ -78,7 +81,7 @@ fn mutations_report_bounded_faults_and_keep_later_tunes() {
             !report.errors.is_empty(),
             "mutation of {needle} was accepted"
         );
-        assert_eq!(report.output.tunes.len(), 2);
+        assert_eq!(report.output.tunes().count(), 2);
         assert!(
             report
                 .errors
@@ -96,13 +99,13 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
         "{:#?}",
         string_result.errors().collect::<Vec<_>>()
     );
-    assert_eq!(string_result.output().unwrap().tunes.len(), 2);
+    assert_eq!(string_result.output().unwrap().tunes().count(), 2);
     let string_owned = string_result
         .into_output()
         .unwrap()
         .into_owned(KITCHEN_SINK)
         .unwrap();
-    assert_eq!(string_owned.tunes.len(), 2);
+    assert_eq!(string_owned.tunes().count(), 2);
 
     let characters: Vec<char> = KITCHEN_SINK.chars().collect();
     let character_result = parse_input(characters.as_slice());
@@ -111,20 +114,23 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
         "{:#?}",
         character_result.errors().collect::<Vec<_>>()
     );
-    assert_eq!(character_result.output().unwrap().tunes.len(), 2);
+    assert_eq!(character_result.output().unwrap().tunes().count(), 2);
     let character_owned = character_result
         .into_output()
         .unwrap()
         .into_owned(characters.as_slice())
         .unwrap();
-    assert_eq!(character_owned.tunes.len(), 2);
+    assert_eq!(character_owned.tunes().count(), 2);
 }
 
 #[test]
 fn document_can_be_detached_without_retaining_the_source() {
     let parsed = parse_input(KITCHEN_SINK).into_output().unwrap();
     let detached = parsed.into_owned(&PlaceholderResolver).unwrap();
-    let first_title = detached.tunes[0]
+    let first_title = detached
+        .tunes()
+        .next()
+        .unwrap()
         .lines
         .iter()
         .find_map(|line| match &line.value {

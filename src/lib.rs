@@ -32,11 +32,13 @@ mod source;
 pub use combinators::chord_parser;
 pub use combinators::directive_parser;
 pub use combinators::document_parser;
+pub use combinators::document_parser_with_options;
 pub use combinators::field_parser;
 pub use combinators::line_parser;
 pub use combinators::music_element_parser;
 pub use combinators::music_line_parser;
 pub use combinators::parse_input;
+pub use combinators::parse_input_with_options;
 pub use emit::ToAbc;
 pub use source::IntoOwnedAst;
 pub use source::PlaceholderResolver;
@@ -62,10 +64,65 @@ pub struct Spanned<T, S = Span> {
 /// A parsed ABC file, including file header material and tunes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Document<S = Span, T = SourceText<S>> {
-    /// Lines before the first `X:` reference field.
+    /// Optional initial file-header lines, excluding its terminating blank.
     pub header: Vec<Spanned<Line<S, T>, S>>,
-    /// Tunes found in the file.
-    pub tunes: Vec<Tune<S, T>>,
+    /// Tunes and text annotations in source order after the file header.
+    pub items: Vec<Spanned<DocumentItem<S, T>, S>>,
+}
+
+impl<S, T> Document<S, T> {
+    /// Iterates over tunes in file order.
+    pub fn tunes(&self) -> impl Iterator<Item = &Tune<S, T>> {
+        self.items.iter().filter_map(|item| match &item.value {
+            DocumentItem::Tune(tune) => Some(tune),
+            _ => None,
+        })
+    }
+
+    /// Iterates mutably over tunes in file order.
+    pub fn tunes_mut(&mut self) -> impl Iterator<Item = &mut Tune<S, T>> {
+        self.items
+            .iter_mut()
+            .filter_map(|item| match &mut item.value {
+                DocumentItem::Tune(tune) => Some(tune),
+                _ => None,
+            })
+    }
+}
+
+/// One ordered, file-level section after the optional file header.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DocumentItem<S = Span, T = SourceText<S>> {
+    /// An ABC tune terminated by an empty line or end of file.
+    Tune(Tune<S, T>),
+    /// One or more lines of non-typeset annotation text.
+    FreeText(FreeText<T>),
+    /// Text introduced by standard typesetting directives.
+    TypesetText(TypesetText<T>),
+    /// A file-level comment outside the file header and tunes.
+    Comment(T),
+    /// A file-level stylesheet directive outside a tune.
+    Directive(Directive<T>),
+}
+
+/// A contiguous free-text block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FreeText<T = String> {
+    /// Physical text lines in source order.
+    pub lines: Vec<T>,
+}
+
+/// Typeset text introduced by ABC text directives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TypesetText<T = String> {
+    /// A `%%text` text string.
+    Text(T),
+    /// A centered `%%center` text string.
+    Centered(T),
+    /// A `%%begintext` through `%%endtext` block.
+    Block(Vec<T>),
 }
 
 /// A parser output whose source-derived text is represented by spans.
@@ -95,6 +152,10 @@ pub enum Line<S = Span, T = SourceText<S>> {
     Field(Field<T>),
     /// Music code represented as parsed elements.
     Music(Vec<Spanned<MusicElement<T>, S>>),
+    /// Tune-local typeset text.
+    TypesetText(TypesetText<T>),
+    /// Raw text following `%%` when it is not a valid directive.
+    DirectiveText(T),
 }
 
 /// An ABC information field.
@@ -323,6 +384,72 @@ pub struct Directive<T = String> {
     pub name: T,
     /// Remaining directive arguments.
     pub arguments: T,
+    /// Standard semantic category when this is a text directive.
+    pub kind: DirectiveKind,
+    /// Exact directive body following the leading `%%`.
+    pub body: T,
+}
+
+/// Semantic category of a stylesheet directive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectiveKind {
+    /// `%%text`.
+    Text,
+    /// `%%center`.
+    Center,
+    /// `%%begintext`.
+    BeginText,
+    /// `%%endtext`.
+    EndText,
+    /// Any other stylesheet directive.
+    Other,
+}
+
+/// Controls optional document text retained in parser output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParserOptions {
+    retain_free_text: bool,
+    retain_typeset_text: bool,
+}
+
+impl ParserOptions {
+    /// Creates options retaining both free and typeset text.
+    pub const fn new() -> Self {
+        Self {
+            retain_free_text: true,
+            retain_typeset_text: true,
+        }
+    }
+
+    /// Selects whether free-text blocks are retained in the AST.
+    #[must_use]
+    pub const fn retain_free_text(mut self, retain: bool) -> Self {
+        self.retain_free_text = retain;
+        self
+    }
+
+    /// Selects whether file- and tune-level typeset text is retained.
+    #[must_use]
+    pub const fn retain_typeset_text(mut self, retain: bool) -> Self {
+        self.retain_typeset_text = retain;
+        self
+    }
+
+    /// Returns whether free text is retained.
+    pub const fn keeps_free_text(self) -> bool {
+        self.retain_free_text
+    }
+
+    /// Returns whether typeset text is retained.
+    pub const fn keeps_typeset_text(self) -> bool {
+        self.retain_typeset_text
+    }
+}
+
+impl Default for ParserOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A recognized element on a music-code line.
@@ -701,7 +828,15 @@ impl<T> ParseReport<T> {
 /// Source spans are always recorded. Callers that do not need them can ignore
 /// the [`Spanned::span`] fields.
 pub fn parse_recovering(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>> {
-    let (output, faults) = parse_input(source).into_output_errors();
+    parse_recovering_with_options(source, ParserOptions::default())
+}
+
+/// Parses a complete document with explicit text-retention behavior.
+pub fn parse_recovering_with_options(
+    source: &str,
+    options: ParserOptions,
+) -> ParseReport<OwnedDocument<SimpleSpan<usize>>> {
+    let (output, faults) = parse_input_with_options(source, options).into_output_errors();
     let output = output
         .and_then(|document| document.into_owned(source).ok())
         .unwrap_or_default();
@@ -714,7 +849,18 @@ pub fn parse_recovering(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<us
 /// # Errors
 /// Returns all syntax errors found while recovering through the document.
 pub fn parse(source: &str) -> Result<OwnedDocument<SimpleSpan<usize>>, Vec<ParseError>> {
-    let report = parse_recovering(source);
+    parse_with_options(source, ParserOptions::default())
+}
+
+/// Parses a complete document with explicit text-retention behavior.
+///
+/// # Errors
+/// Returns all syntax errors found while recovering through the document.
+pub fn parse_with_options(
+    source: &str,
+    options: ParserOptions,
+) -> Result<OwnedDocument<SimpleSpan<usize>>, Vec<ParseError>> {
+    let report = parse_recovering_with_options(source, options);
     if report.errors.is_empty() {
         Ok(report.output)
     } else {
@@ -887,6 +1033,10 @@ mod tests {
     fn parses_public_partial_entries() {
         assert_eq!(parse_field("K:G mixolydian").unwrap().key, 'K');
         assert_eq!(parse_directive("%%staves (1 2)").unwrap().name, "staves");
+        assert_eq!(
+            parse_directive("%%textual value").unwrap().kind,
+            DirectiveKind::Other
+        );
         assert!(parse_field("V:1 name=\"Soprano\" snm=\"S\" clef=treble").is_ok());
         assert_eq!(parse_chord("[CEG]4").unwrap().length.numerator, 4);
         assert!(parse_music_line("|: CDEF [CEG]2 :|").is_valid());
@@ -1001,11 +1151,9 @@ mod tests {
     fn recovers_on_the_next_line() {
         let report = parse_recovering("X:1\nK:C\n[CEG\nCDEF |\n");
         assert_eq!(report.errors.len(), 1);
-        assert_eq!(report.output.tunes[0].lines.len(), 4);
-        assert!(matches!(
-            report.output.tunes[0].lines[3].value,
-            Line::Music(_)
-        ));
+        let tune = report.output.tunes().next().unwrap();
+        assert_eq!(tune.lines.len(), 4);
+        assert!(matches!(tune.lines[3].value, Line::Music(_)));
     }
 
     #[test]

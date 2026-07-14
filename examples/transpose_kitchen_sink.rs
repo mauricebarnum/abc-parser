@@ -62,7 +62,7 @@ fn transpose_document<S>(document: &mut Document<S, String>) {
     for line in &mut document.header {
         transpose_line(&mut line.value);
     }
-    for tune in &mut document.tunes {
+    for tune in document.tunes_mut() {
         transpose_tune(tune);
     }
 }
