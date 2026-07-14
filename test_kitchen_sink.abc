@@ -1,0 +1,47 @@
+%abc-2.1
+%%titlefont Helvetica 20
+%%subtitlefont Helvetica 14
+
+X:1
+T:Test Tune 1: File Separation Boundary
+C:Traditional
+M:4/4
+L:1/8
+Q:1/4=120
+K:C
+|: CDEF GABc | cBAG FEDC :|
+
+X:2
+T:Test Tune 2: The ABC 2.1 Kitchen Sink
+C:Maurice Barnum & AI
+M:4/4
+L:1/8
+Q:1/4=100 "Majestic"
+P:A.B.A
+V:1 name="Soprano" snm="S" clef=treble
+V:2 name="Bass" snm="B" clef=bass
+%%staves (1 2)
+K:G mixolydian
+I:abc-charset utf-8
+
+% --- Begin Voice 1 ---
+V:1
+% 1. Octaves, Accidentals, and Note Durations
+_B,2 =C2 ^D/2E/2 F3 | G3/2A/4B/4 c>d e<<f g2 | g' a'' b' c'' z4 |
+w: Ho-ly Mo-ly! Yes, here is a long string of lyr-ics. O-ver the top
+% 2. Chords, Unisons, and Variant Endings
+[CEG]4 [G,B,D]2 [CEG]/2[FAc]/2 z | [1 [GBd]2 c2 d2 e2 :| [2 [GBd]4 g4 |]
+% 3. Grace Notes, Tuplets, Slurs, and Ties
+{g}A2 {GAG}B2 (3A B C D2 | (2de (4fgab c'-c' | (A B (C D) E) F3 |
+% 4. Inline Field Changes and Extended Decorations
+[M:3/4] [K:D] [L:1/16] !trill!A4 !turn!!>!B4 .C4 | !ppp!D12- | D12 |]
+
+% --- Begin Voice 2 ---
+V:2
+[K:G mixolydian clef=bass]
+G,,4 D,,4 | G,,2 A,,2 B,,2 C,2 | D,4 G,4 | G,4 z4 |
+[CEG]4 G,,4 | [1 D,,4 G,,4 :| [2 D,,4 G,,4 |]
+D,,4 G,,4 | D,,4 G,,4 | D,,4 G,,4 |
+[M:3/4] [K:D] [L:1/16] D12 | D12- | D12 |]
+W: This is an unaligned lyric line at the very end of the tune
+W: containing extra structural text or verses.
