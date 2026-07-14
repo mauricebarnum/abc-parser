@@ -15,12 +15,41 @@
 //! End-to-end tests using the repository's ABC 2.1 fixture.
 
 use abc_parser::IntoOwnedAst;
+use abc_parser::Line;
+use abc_parser::OwnedDocument;
 use abc_parser::PlaceholderResolver;
+use abc_parser::Spanned;
+use abc_parser::ToAbc;
 use abc_parser::is_source_reference_placeholder;
 use abc_parser::parse_input;
 use abc_parser::parse_recovering;
+use chumsky::span::SimpleSpan;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
+
+type OwnedLine = Spanned<Line<SimpleSpan<usize>, String>, SimpleSpan<usize>>;
+
+/// Replaces physical-line and music-element locations with a common sentinel.
+fn erase_source_locations(document: &mut OwnedDocument<SimpleSpan<usize>>) {
+    for line in &mut document.header {
+        erase_line_locations(line);
+    }
+    for tune in &mut document.tunes {
+        for line in &mut tune.lines {
+            erase_line_locations(line);
+        }
+    }
+}
+
+/// Replaces locations belonging to one physical line and its music elements.
+fn erase_line_locations(line: &mut OwnedLine) {
+    line.span = SimpleSpan::from(0..0);
+    if let Line::Music(elements) = &mut line.value {
+        for element in elements {
+            element.span = SimpleSpan::from(0..0);
+        }
+    }
+}
 
 #[test]
 fn parses_kitchen_sink_with_spans() {
@@ -108,4 +137,24 @@ fn document_can_be_detached_without_retaining_the_source() {
         })
         .unwrap();
     assert!(is_source_reference_placeholder(first_title));
+}
+
+#[test]
+fn emitted_kitchen_sink_parses_as_a_complete_document() {
+    let parsed = parse_recovering(KITCHEN_SINK);
+    assert!(parsed.is_valid());
+
+    let emitted = parsed.output.to_abc();
+    let reparsed = parse_recovering(&emitted);
+
+    assert!(reparsed.errors.is_empty(), "{:#?}", reparsed.errors);
+    assert!(emitted.contains("M:4/4"));
+    assert!(emitted.contains("[CEG]4"));
+    assert!(emitted.contains("|: CDEF GABc | cBAG FEDC :|"));
+
+    let mut expected = parsed.output;
+    let mut actual = reparsed.output;
+    erase_source_locations(&mut expected);
+    erase_source_locations(&mut actual);
+    assert_eq!(actual, expected);
 }

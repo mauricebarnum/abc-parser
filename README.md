@@ -25,4 +25,6 @@ retained as `FieldValue::Unparsed` and accompanied by a diagnostic. Inherently
 textual metadata and application-defined fields remain lossless source spans in
 `parse_input` results. `IntoOwnedAst::into_owned` resolves those spans to
 standalone strings using the original source or conspicuous placeholders when
-the source is unavailable.
+the source is unavailable. Owned AST nodes implement `ToAbc`, allowing complete
+documents or individual fields and music elements to be emitted as canonical
+ABC notation after inspection or transformation.

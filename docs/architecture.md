@@ -163,7 +163,25 @@ flowchart LR
     parse_input --> parsed[ParsedDocument SourceText spans]
     parsed -->|source resolver| exact[OwnedDocument exact strings]
     parsed -->|PlaceholderResolver| placeholders[OwnedDocument reference placeholders]
+    exact -->|ToAbc| emitted[Canonical ABC source]
 ```
+
+## ABC source emission
+
+[`ToAbc`] writes owned or otherwise `AsRef<str>`-backed AST nodes as canonical
+ABC notation. It is implemented for complete documents and tunes as well as
+individual lines, fields, music elements, pitches, durations, and other public
+semantic nodes. Source positions are ignored. Stored textual values and bar
+spellings are preserved, while normalized syntax such as note lengths,
+accidentals, decorations, and field parameters uses deterministic spellings.
+
+A [`ParsedDocument`] must first be converted with [`IntoOwnedAst::into_owned`]
+and an appropriate resolver. [`OwnedDocument`] can be emitted directly with
+[`ToAbc::to_abc`]. Emission deliberately produces semantic ABC rather than a
+byte-for-byte reconstruction: comments and metadata remain intact, but optional
+spacing, quote choices, shorthand decorations, and similar presentation details
+may be canonicalized. Text inserted programmatically into a quoted AST position
+must not contain an unescaped quote delimiter.
 
 ## AST overview
 

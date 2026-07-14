@@ -27,6 +27,7 @@ use abc_parser::MusicElement;
 use abc_parser::Note;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
+use abc_parser::ToAbc;
 use abc_parser::Tune;
 use abc_parser::parse_recovering;
 use std::process::ExitCode;
@@ -51,6 +52,8 @@ fn main() -> ExitCode {
 
     println!("=== TRANSPOSED UP ONE DIATONIC STEP ===");
     println!("{transposed:#?}");
+    println!("=== TRANSPOSED ABC ===");
+    println!("{}", transposed.to_abc());
     ExitCode::SUCCESS
 }
 

@@ -897,6 +897,13 @@ where
         emitter.emit(Rich::custom(extra.span(), "unrecognized music token"));
         MusicElement::Extension(SourceText::Span(extra.span()))
     });
+    let line_break = choice((
+        just('\\').to(LineBreak::Continue),
+        just("$$").to(LineBreak::Paragraph),
+        just('$').to(LineBreak::Break),
+        just('y').to(LineBreak::Space),
+    ))
+    .map(MusicElement::LineBreak);
     choice((
         inline_field().map(MusicElement::InlineField),
         chord_parser().map(MusicElement::Chord),
@@ -909,6 +916,9 @@ where
         note().map(MusicElement::Note),
         tuplet().map(MusicElement::Tuplet),
         bar().map(MusicElement::Bar),
+        just("(&").to(MusicElement::Overlay(Overlay::Start)),
+        just("&)").to(MusicElement::Overlay(Overlay::End)),
+        just('&').to(MusicElement::Overlay(Overlay::NextVoice)),
         just(".(").to(MusicElement::Slur(Slur {
             opening: true,
             dotted: true,
@@ -927,16 +937,13 @@ where
         })),
         just(".-").to(MusicElement::Tie(Tie { dotted: true })),
         just('-').to(MusicElement::Tie(Tie { dotted: false })),
-        just("(&").to(MusicElement::Overlay(Overlay::Start)),
-        just("&)").to(MusicElement::Overlay(Overlay::End)),
-        just('&').to(MusicElement::Overlay(Overlay::NextVoice)),
         broken_rhythm().map(MusicElement::BrokenRhythm),
         just(char::from(96))
             .repeated()
             .at_least(1)
             .count()
             .map(MusicElement::BeamContinuation),
-        just('\\').to(MusicElement::LineBreak(LineBreak::Continue)),
+        line_break,
         beam_break,
         extension,
     ))

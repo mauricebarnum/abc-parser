@@ -26,6 +26,7 @@ use std::fmt;
 use std::ops::Range;
 
 mod combinators;
+mod emit;
 mod source;
 
 pub use combinators::chord_parser;
@@ -36,6 +37,7 @@ pub use combinators::line_parser;
 pub use combinators::music_element_parser;
 pub use combinators::music_line_parser;
 pub use combinators::parse_input;
+pub use emit::ToAbc;
 pub use source::IntoOwnedAst;
 pub use source::PlaceholderResolver;
 pub use source::ResolveError;
