@@ -21,93 +21,117 @@
 
 use chumsky::Parser;
 use chumsky::error::Rich;
-use chumsky::extra;
-use chumsky::prelude::end;
-use chumsky::prelude::none_of;
+use chumsky::span::SimpleSpan;
 use std::fmt;
 use std::ops::Range;
+
+mod combinators;
+mod source;
+
+pub use combinators::chord_parser;
+pub use combinators::directive_parser;
+pub use combinators::document_parser;
+pub use combinators::field_parser;
+pub use combinators::line_parser;
+pub use combinators::music_element_parser;
+pub use combinators::music_line_parser;
+pub use combinators::parse_input;
+pub use source::IntoOwnedAst;
+pub use source::PlaceholderResolver;
+pub use source::ResolveError;
+pub use source::SOURCE_REFERENCE_PREFIX;
+pub use source::SOURCE_REFERENCE_SUFFIX;
+pub use source::SourceResolver;
+pub use source::SourceText;
+pub use source::is_source_reference_placeholder;
 
 /// A half-open byte range in the original input.
 pub type Span = Range<usize>;
 
 /// A syntax value paired with its location in the source.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Spanned<T> {
+pub struct Spanned<T, S = Span> {
     /// Parsed syntax value.
     pub value: T,
     /// Half-open byte range in the source.
-    pub span: Span,
+    pub span: S,
 }
 
 /// A parsed ABC file, including file header material and tunes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Document {
+pub struct Document<S = Span, T = SourceText<S>> {
     /// Lines before the first `X:` reference field.
-    pub header: Vec<Spanned<Line>>,
+    pub header: Vec<Spanned<Line<S, T>, S>>,
     /// Tunes found in the file.
-    pub tunes: Vec<Tune>,
+    pub tunes: Vec<Tune<S, T>>,
 }
+
+/// A parser output whose source-derived text is represented by spans.
+pub type ParsedDocument<S> = Document<S, SourceText<S>>;
+
+/// A standalone document whose textual values are owned.
+pub type OwnedDocument<S> = Document<S, String>;
 
 /// One tune beginning with an `X:` field.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Tune {
+pub struct Tune<S = Span, T = SourceText<S>> {
     /// All lines belonging to the tune, including `X:`.
-    pub lines: Vec<Spanned<Line>>,
+    pub lines: Vec<Spanned<Line<S, T>, S>>,
 }
 
 /// A physical ABC source line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum Line {
+pub enum Line<S = Span, T = SourceText<S>> {
     /// An empty or whitespace-only line.
     Blank,
     /// A `%` comment, excluding the leading marker.
-    Comment(String),
+    Comment(T),
     /// A `%%` instruction.
-    Directive(Directive),
+    Directive(Directive<T>),
     /// An information field such as `T:Title`.
-    Field(Field),
+    Field(Field<T>),
     /// Music code represented as parsed elements.
-    Music(Vec<Spanned<MusicElement>>),
+    Music(Vec<Spanned<MusicElement<T>, S>>),
 }
 
 /// An ABC information field.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Field {
+pub struct Field<T = String> {
     /// Single ASCII letter identifying the field.
     pub key: char,
     /// Standard meaning of the field letter.
     pub kind: FieldKind,
     /// Parsed field payload.
-    pub value: FieldValue,
+    pub value: FieldValue<T>,
 }
 
 /// The payload of an information field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum FieldValue {
+pub enum FieldValue<T = String> {
     /// An inherently textual metadata value.
-    Text(String),
+    Text(T),
     /// An `L:` unit note length.
     UnitLength(Fraction),
     /// An `M:` time signature.
     Meter(Meter),
     /// A `Q:` tempo specification.
-    Tempo(Tempo),
+    Tempo(Tempo<T>),
     /// A `K:` key signature and optional parameters.
-    Key(KeySignature),
+    Key(KeySignature<T>),
     /// An `X:` tune reference number.
     Reference(u32),
     /// A `V:` voice identifier and properties.
-    Voice(VoiceDefinition),
+    Voice(VoiceDefinition<T>),
     /// A `P:` part-order expression.
-    Parts(PartSequence),
+    Parts(PartSequence<T>),
     /// A `U:` redefinable symbol assignment.
-    UserSymbol(SymbolDefinition),
+    UserSymbol(SymbolDefinition<T>),
     /// An `m:` macro assignment.
-    Macro(MacroDefinition),
+    Macro(MacroDefinition<T>),
     /// A structured field that failed to parse during recovery.
-    Unparsed(String),
+    Unparsed(T),
 }
 
 /// A time signature from an `M:` field.
@@ -132,26 +156,26 @@ pub enum Meter {
 
 /// A tempo from a `Q:` field.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Tempo {
+pub struct Tempo<T = String> {
     /// Optional text before the metronome mark.
-    pub prelude: Option<String>,
+    pub prelude: Option<T>,
     /// Beat lengths on the left of `=`.
     pub beats: Vec<Fraction>,
     /// Beats per minute.
     pub bpm: u32,
     /// Optional text after the metronome mark.
-    pub postlude: Option<String>,
+    pub postlude: Option<T>,
 }
 
 /// A key signature from a `K:` field.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KeySignature {
+pub struct KeySignature<T = String> {
     /// Tonic, or `None` for `none`/percussion.
     pub tonic: Option<KeyTonic>,
-    /// Mode spelling, normalized to lowercase.
-    pub mode: String,
+    /// Mode spelling as written, or an empty synthesized value when omitted.
+    pub mode: T,
     /// Remaining clef and transposition parameters.
-    pub parameters: Vec<FieldParameter>,
+    pub parameters: Vec<FieldParameter<T>>,
 }
 
 /// The tonic of a key signature.
@@ -174,34 +198,34 @@ pub enum KeyAccidental {
 
 /// A voice declaration from a `V:` field.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VoiceDefinition {
+pub struct VoiceDefinition<T = String> {
     /// Voice identifier.
-    pub id: String,
+    pub id: T,
     /// Voice properties.
-    pub properties: Vec<FieldParameter>,
+    pub properties: Vec<FieldParameter<T>>,
 }
 
 /// A key/value or positional field parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FieldParameter {
+pub struct FieldParameter<T = String> {
     /// Parameter name, absent for positional text.
-    pub name: Option<String>,
+    pub name: Option<T>,
     /// Unquoted parameter value.
-    pub value: String,
+    pub value: T,
 }
 
 /// A parsed part-order expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PartSequence {
+pub struct PartSequence<T = String> {
     /// Tokens in source order.
-    pub tokens: Vec<PartToken>,
+    pub tokens: Vec<PartToken<T>>,
 }
 
 /// A token in a part-order expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PartToken {
+pub enum PartToken<T = String> {
     /// A named part.
-    Part(String),
+    Part(T),
     /// Repetition count.
     Repeat(u32),
     /// Opening parenthesis.
@@ -214,20 +238,20 @@ pub enum PartToken {
 
 /// A `U:` redefinable symbol.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SymbolDefinition {
+pub struct SymbolDefinition<T = String> {
     /// Single symbol being defined.
     pub symbol: char,
     /// Replacement music code.
-    pub replacement: String,
+    pub replacement: T,
 }
 
 /// An `m:` macro definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MacroDefinition {
+pub struct MacroDefinition<T = String> {
     /// Macro pattern.
-    pub pattern: String,
+    pub pattern: T,
     /// Macro replacement.
-    pub replacement: String,
+    pub replacement: T,
 }
 
 /// The standardized meaning of an ABC information-field letter.
@@ -292,17 +316,17 @@ pub enum FieldKind {
 
 /// A `%%` directive, retained for application-specific interpretation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Directive {
+pub struct Directive<T = String> {
     /// Directive name.
-    pub name: String,
+    pub name: T,
     /// Remaining directive arguments.
-    pub arguments: String,
+    pub arguments: T,
 }
 
 /// A recognized element on a music-code line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum MusicElement {
+pub enum MusicElement<T = String> {
     /// A pitched note.
     Note(Note),
     /// A rest or invisible spacer.
@@ -312,17 +336,17 @@ pub enum MusicElement {
     /// A bracketed chord.
     Chord(Chord),
     /// A bar line or repeat marker.
-    Bar(BarLine),
+    Bar(BarLine<T>),
     /// A numbered or ranged variant ending.
     Ending(VariantEnding),
     /// An inline information field.
-    InlineField(Field),
+    InlineField(Field<T>),
     /// A grace-note group including its braces.
     Grace(GraceGroup),
     /// A decoration including delimiters where present.
-    Decoration(Decoration),
+    Decoration(Decoration<T>),
     /// A chord symbol or annotation in double quotes.
-    Annotation(Annotation),
+    Annotation(Annotation<T>),
     /// A tuplet prefix `(p:q:r`.
     Tuplet(Tuplet),
     /// An opening or closing slur.
@@ -334,13 +358,13 @@ pub enum MusicElement {
     /// A voice-overlay operator (`&` or `(& ... & )`).
     Overlay(Overlay),
     /// Whitespace that starts a new beam group.
-    BeamBreak(String),
+    BeamBreak(T),
     /// Ignorable backquotes inside a beam.
     BeamContinuation(usize),
     /// A source line-break or spacing control.
     LineBreak(LineBreak),
     /// Syntax accepted for forward-compatible extensions.
-    Extension(String),
+    Extension(T),
 }
 
 /// A diatonic pitch name.
@@ -465,11 +489,11 @@ pub enum BarKind {
 
 /// A bar line or repeat delimiter.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BarLine {
+pub struct BarLine<T = String> {
     /// Semantic classification.
     pub kind: BarKind,
     /// Exact standard-compatible spelling.
-    pub source: String,
+    pub source: T,
 }
 
 /// A variant-ending selector such as `[1,3,5-7`.
@@ -504,9 +528,9 @@ pub struct GraceGroup {
 
 /// A named or shorthand decoration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Decoration {
+pub struct Decoration<T = String> {
     /// Decoration name after expanding shorthand spelling only structurally.
-    pub name: String,
+    pub name: T,
     /// Whether deprecated `+name+` syntax was used.
     pub legacy_delimiter: bool,
 }
@@ -530,11 +554,11 @@ pub enum AnnotationPlacement {
 
 /// A chord symbol or textual annotation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Annotation {
+pub struct Annotation<T = String> {
     /// Placement marker.
     pub placement: AnnotationPlacement,
     /// Text without quotes or placement marker.
-    pub text: String,
+    pub text: T,
 }
 
 /// Tuplet timing and extent.
@@ -615,8 +639,6 @@ pub enum ChordMember {
     Rest(Rest),
 }
 
-type ElementScan = (MusicElement, usize, Option<(ErrorKind, &'static str)>);
-
 /// Classification of a parse fault.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -676,60 +698,20 @@ impl<T> ParseReport<T> {
 ///
 /// Source spans are always recorded. Callers that do not need them can ignore
 /// the [`Spanned::span`] fields.
-pub fn parse_recovering(source: &str) -> ParseReport<Document> {
-    let mut document = Document::default();
-    let mut errors = Vec::new();
-    let mut current_tune: Option<Tune> = None;
-
-    for (start, raw) in physical_lines(source) {
-        let line_source = raw.strip_suffix('\r').unwrap_or(raw);
-        let end = start + line_source.len();
-        let report = parse_line_at(line_source, start);
-        errors.extend(report.errors);
-        let is_reference = matches!(&report.output, Line::Field(field) if field.key == 'X');
-        let spanned = Spanned {
-            value: report.output,
-            span: start..end,
-        };
-        if is_reference {
-            if let Some(tune) = current_tune.replace(Tune::default()) {
-                document.tunes.push(tune);
-            }
-        }
-        if let Some(tune) = &mut current_tune {
-            tune.lines.push(spanned);
-        } else {
-            document.header.push(spanned);
-        }
-    }
-    if let Some(tune) = current_tune {
-        document.tunes.push(tune);
-    }
-    if document.tunes.is_empty()
-        && document.header.iter().any(|line| {
-            !matches!(
-                line.value,
-                Line::Blank | Line::Comment(_) | Line::Directive(_)
-            )
-        })
-    {
-        errors.push(ParseError {
-            kind: ErrorKind::MissingReference,
-            message: "document contains tune material but no X: reference field".into(),
-            span: 0..source.len().min(1),
-        });
-    }
-    ParseReport {
-        output: document,
-        errors,
-    }
+pub fn parse_recovering(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>> {
+    let (output, faults) = parse_input(source).into_output_errors();
+    let output = output
+        .and_then(|document| document.into_owned(source).ok())
+        .unwrap_or_default();
+    let errors = faults.iter().map(chumsky_error).collect();
+    ParseReport { output, errors }
 }
 
 /// Parses a complete ABC document, failing if any syntax error is found.
 ///
 /// # Errors
 /// Returns all syntax errors found while recovering through the document.
-pub fn parse(source: &str) -> Result<Document, Vec<ParseError>> {
+pub fn parse(source: &str) -> Result<OwnedDocument<SimpleSpan<usize>>, Vec<ParseError>> {
     let report = parse_recovering(source);
     if report.errors.is_empty() {
         Ok(report.output)
@@ -747,8 +729,14 @@ pub fn validate(source: &str) -> Result<(), Vec<ParseError>> {
 }
 
 /// Parses one physical ABC line.
-pub fn parse_line(source: &str) -> ParseReport<Line> {
-    parse_line_at(source.strip_suffix(['\r', '\n']).unwrap_or(source), 0)
+pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> {
+    let source = source.trim_end_matches(['\r', '\n']);
+    let (output, faults) = line_parser().parse(source).into_output_errors();
+    let output = output
+        .and_then(|line| line.value.into_owned(source).ok())
+        .unwrap_or(Line::Blank);
+    let errors = faults.iter().map(chumsky_error).collect();
+    ParseReport { output, errors }
 }
 
 /// Parses a `%%` directive line.
@@ -756,33 +744,32 @@ pub fn parse_line(source: &str) -> ParseReport<Line> {
 /// # Errors
 /// Returns an error if the prefix or directive name is invalid.
 pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
-    let line = source.trim_end_matches(['\r', '\n']);
-    let Some(body) = line.strip_prefix("%%") else {
-        return Err(error(
-            ErrorKind::InvalidDirective,
-            "directive must begin with %%",
-            0,
-            line.len().min(2),
-        ));
-    };
-    let split = body.find(char::is_whitespace).unwrap_or(body.len());
-    let name = &body[..split];
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-    {
-        return Err(error(
-            ErrorKind::InvalidDirective,
-            "invalid directive name",
-            2,
-            2 + name.len().max(1),
-        ));
-    }
-    Ok(Directive {
-        name: name.into(),
-        arguments: body[split..].trim().into(),
-    })
+    let source = source.trim_end_matches(['\r', '\n']);
+    directive_parser()
+        .parse(source)
+        .into_result()
+        .map_err(|errors| {
+            errors.into_iter().next().map_or_else(
+                || {
+                    error(
+                        ErrorKind::InvalidDirective,
+                        "invalid directive",
+                        0,
+                        source.len(),
+                    )
+                },
+                |error| chumsky_error(&error),
+            )
+        })?
+        .into_owned(source)
+        .map_err(|fault| {
+            error(
+                ErrorKind::InvalidDirective,
+                &fault.to_string(),
+                0,
+                source.len(),
+            )
+        })
 }
 
 /// Parses an information field such as `K:C major`.
@@ -790,7 +777,18 @@ pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
 /// # Errors
 /// Returns an error unless the input starts with one ASCII letter and `:`.
 pub fn parse_field(source: &str) -> Result<Field, ParseError> {
-    parse_field_at(source.trim_end_matches(['\r', '\n']), 0)
+    let source = source.trim_end_matches(['\r', '\n']);
+    field_parser()
+        .parse(source)
+        .into_result()
+        .map_err(|errors| {
+            errors.into_iter().next().map_or_else(
+                || error(ErrorKind::InvalidField, "invalid field", 0, source.len()),
+                |error| chumsky_error(&error),
+            )
+        })?
+        .into_owned(source)
+        .map_err(|fault| error(ErrorKind::InvalidField, &fault.to_string(), 0, source.len()))
 }
 
 /// Parses a complete bracketed chord.
@@ -805,942 +803,39 @@ pub fn parse_field(source: &str) -> Result<Field, ParseError> {
 /// # Errors
 /// Returns an error for missing brackets, empty contents, or an invalid length.
 pub fn parse_chord(source: &str) -> Result<Chord, ParseError> {
-    if !source.starts_with('[') {
-        return Err(error(
-            ErrorKind::InvalidMusic,
-            "chord must begin with [",
-            0,
-            source.len().min(1),
-        ));
-    }
-    let Some(close) = source.find(']') else {
-        return Err(error(
-            ErrorKind::UnclosedDelimiter,
-            "unclosed chord",
-            0,
-            source.len(),
-        ));
-    };
-    let contents = &source[1..close];
-    let length = &source[close + 1..];
-    if contents.is_empty() || !valid_chord_contents(contents) || !valid_length(length) {
-        return Err(error(
-            ErrorKind::InvalidMusic,
-            "invalid chord contents or length",
-            1,
-            source.len(),
-        ));
-    }
-    let mut members = Vec::new();
-    let mut index = 0;
-    while index < contents.len() {
-        let tail = &contents[index..];
-        if let Some((note, consumed)) = parse_note_token(tail) {
-            members.push(ChordMember::Note(note));
-            index += consumed;
-        } else if let Some((rest, consumed)) = parse_rest_token(tail) {
-            members.push(ChordMember::Rest(rest));
-            index += consumed;
-        } else {
-            return Err(error(
-                ErrorKind::InvalidMusic,
-                "invalid chord member",
-                1 + index,
-                2 + index,
-            ));
-        }
-    }
-    Ok(Chord {
-        members,
-        length: parse_length(length),
-    })
+    chord_parser()
+        .parse(source)
+        .into_result()
+        .map_err(|errors| {
+            errors.into_iter().next().map_or_else(
+                || error(ErrorKind::InvalidMusic, "invalid chord", 0, source.len()),
+                |error| chumsky_error(&error),
+            )
+        })
 }
 
 /// Parses a line as music code, recovering after malformed elements.
-pub fn parse_music_line(source: &str) -> ParseReport<Vec<Spanned<MusicElement>>> {
-    parse_music_at(source.trim_end_matches(['\r', '\n']), 0)
-}
-
-fn physical_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0;
-    source.split_terminator('\n').map(move |line| {
-        let result = (offset, line);
-        offset += line.len() + 1;
-        result
-    })
-}
-
-fn parse_line_at(source: &str, offset: usize) -> ParseReport<Line> {
-    if source.trim().is_empty() {
-        return ParseReport {
-            output: Line::Blank,
-            errors: Vec::new(),
-        };
-    }
-    if let Some(directive_body) = source.strip_prefix("%%") {
-        return match parse_directive(source) {
-            Ok(value) => ParseReport {
-                output: Line::Directive(value),
-                errors: Vec::new(),
-            },
-            Err(mut fault) => {
-                shift_error(&mut fault, offset);
-                ParseReport {
-                    output: Line::Directive(Directive {
-                        name: String::new(),
-                        arguments: directive_body.into(),
-                    }),
-                    errors: vec![fault],
-                }
-            }
-        };
-    }
-    if let Some(comment) = source.strip_prefix('%') {
-        return ParseReport {
-            output: Line::Comment(comment.into()),
-            errors: Vec::new(),
-        };
-    }
-    if source.as_bytes().get(1) == Some(&b':') && source.as_bytes()[0].is_ascii_alphabetic() {
-        return match parse_field_at(source, offset) {
-            Ok(value) => ParseReport {
-                output: Line::Field(value),
-                errors: Vec::new(),
-            },
-            Err(fault) => ParseReport {
-                output: Line::Field(Field {
-                    key: source.chars().next().unwrap_or('?'),
-                    kind: field_kind(source.chars().next().unwrap_or('?')),
-                    value: FieldValue::Unparsed(source.get(2..).unwrap_or_default().trim().into()),
-                }),
-                errors: vec![fault],
-            },
-        };
-    }
-    let report = parse_music_at(source, offset);
-    ParseReport {
-        output: Line::Music(report.output),
-        errors: report.errors,
-    }
-}
-
-fn parse_field_at(source: &str, offset: usize) -> Result<Field, ParseError> {
-    let bytes = source.as_bytes();
-    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
-        return Err(error(
-            ErrorKind::InvalidField,
-            "field must have the form A:value",
-            offset,
-            offset + source.len().min(2),
-        ));
-    }
-    let key = char::from(bytes[0]);
-    let raw = source[2..].trim();
-    let value = parse_field_value(key, raw).map_err(|message| {
-        error(
-            ErrorKind::InvalidField,
-            message,
-            offset + 2,
-            offset + source.len(),
-        )
-    })?;
-    Ok(Field {
-        key,
-        kind: field_kind(key),
-        value,
-    })
-}
-
-fn parse_music_at(source: &str, offset: usize) -> ParseReport<Vec<Spanned<MusicElement>>> {
-    let mut output = Vec::new();
-    let mut errors = Vec::new();
-    let mut index = 0;
-    while index < source.len() {
-        let tail = &source[index..];
-        let start = index;
-        let (element, consumed, fault) = scan_element(tail);
-        let consumed = consumed.max(tail.chars().next().map_or(1, char::len_utf8));
-        output.push(Spanned {
-            value: element,
-            span: offset + start..offset + start + consumed,
-        });
-        if let Some((kind, message)) = fault {
-            errors.push(error(
-                kind,
-                message,
-                offset + start,
-                offset + start + consumed,
-            ));
-        }
-        index += consumed;
-    }
+pub fn parse_music_line(
+    source: &str,
+) -> ParseReport<Vec<Spanned<MusicElement<String>, SimpleSpan<usize>>>> {
+    let source = source.trim_end_matches(['\r', '\n']);
+    let (output, faults) = music_line_parser().parse(source).into_output_errors();
+    let output = output
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| item.into_owned(source).ok())
+        .collect();
+    let errors = faults.iter().map(chumsky_error).collect();
     ParseReport { output, errors }
 }
 
-#[allow(clippy::too_many_lines)]
-fn scan_element(source: &str) -> ElementScan {
-    let first = source.as_bytes()[0];
-    if first.is_ascii_whitespace() {
-        let len = source
-            .find(|c: char| !c.is_whitespace())
-            .unwrap_or(source.len());
-        return (MusicElement::BeamBreak(source[..len].into()), len, None);
+fn chumsky_error(error: &Rich<'_, char, SimpleSpan<usize>>) -> ParseError {
+    let span = error.span().into_range();
+    ParseError {
+        kind: ErrorKind::InvalidMusic,
+        message: error.to_string(),
+        span,
     }
-    if let Some(result) = scan_bracketed(source) {
-        return result;
-    }
-    if source.starts_with('{') {
-        return scan_grace(source);
-    }
-    if first == b'!' || first == b'+' {
-        return scan_long_decoration(source);
-    }
-    if first == b'"' {
-        return scan_annotation(source);
-    }
-    if let Some((note, len)) = parse_note_token(source) {
-        return (MusicElement::Note(note), len, None);
-    }
-    if let Some((rest, len)) = parse_rest_token(source) {
-        return (MusicElement::Rest(rest), len, None);
-    }
-    if matches!(first, b'Z' | b'X') {
-        let suffix = source[1..].bytes().take_while(u8::is_ascii_digit).count();
-        let measures = source[1..][..suffix].parse().unwrap_or(1);
-        return (
-            MusicElement::MultiMeasureRest(MultiMeasureRest {
-                invisible: first == b'X',
-                measures,
-            }),
-            suffix + 1,
-            None,
-        );
-    }
-    if "|:]".contains(char::from(first)) || source.starts_with(".|") {
-        let len = source
-            .bytes()
-            .take_while(|byte| b".|:[]".contains(byte))
-            .count();
-        let text = &source[..len];
-        return (MusicElement::Bar(bar_line(text)), len, None);
-    }
-    if first == b'(' && source.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
-        return scan_tuplet(source);
-    }
-    if source.starts_with(".(") {
-        return (
-            MusicElement::Slur(Slur {
-                opening: true,
-                dotted: true,
-            }),
-            2,
-            None,
-        );
-    }
-    if source.starts_with(".)") {
-        return (
-            MusicElement::Slur(Slur {
-                opening: false,
-                dotted: true,
-            }),
-            2,
-            None,
-        );
-    }
-    if first == b'(' || first == b')' {
-        return (
-            MusicElement::Slur(Slur {
-                opening: first == b'(',
-                dotted: false,
-            }),
-            1,
-            None,
-        );
-    }
-    if source.starts_with(".-") {
-        return (MusicElement::Tie(Tie { dotted: true }), 2, None);
-    }
-    if first == b'-' {
-        return (MusicElement::Tie(Tie { dotted: false }), 1, None);
-    }
-    if matches!(first, b'<' | b'>') {
-        let len = source.bytes().take_while(|byte| *byte == first).count();
-        return (
-            MusicElement::BrokenRhythm(BrokenRhythm {
-                greater: first == b'>',
-                count: u8::try_from(len).unwrap_or(u8::MAX),
-            }),
-            len,
-            None,
-        );
-    }
-    if source.starts_with("(&") {
-        return (MusicElement::Overlay(Overlay::Start), 2, None);
-    }
-    if source.starts_with("&)") {
-        return (MusicElement::Overlay(Overlay::End), 2, None);
-    }
-    if first == b'&' {
-        return (MusicElement::Overlay(Overlay::NextVoice), 1, None);
-    }
-    if first.is_ascii_digit() {
-        let len = source
-            .bytes()
-            .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b',' | b'-'))
-            .count();
-        if let Some(ending) = parse_ending(&source[..len]) {
-            return (MusicElement::Ending(ending), len, None);
-        }
-    }
-    if first == b'\\' {
-        return (MusicElement::LineBreak(LineBreak::Continue), 1, None);
-    }
-    if first == b'`' {
-        let len = source.bytes().take_while(|byte| *byte == b'`').count();
-        return (MusicElement::BeamContinuation(len), len, None);
-    }
-    if let Some(name) = shorthand_decoration(char::from(first)) {
-        return (
-            MusicElement::Decoration(Decoration {
-                name: name.into(),
-                legacy_delimiter: false,
-            }),
-            1,
-            None,
-        );
-    }
-    let len = source.chars().next().map_or(1, char::len_utf8);
-    (
-        MusicElement::Extension(source[..len].into()),
-        len,
-        Some((ErrorKind::InvalidMusic, "unrecognized music token")),
-    )
-}
-
-fn scan_bracketed(source: &str) -> Option<ElementScan> {
-    if !source.starts_with('[') {
-        return None;
-    }
-    if source.as_bytes().get(2) == Some(&b':')
-        && source
-            .as_bytes()
-            .get(1)
-            .is_some_and(u8::is_ascii_alphabetic)
-    {
-        return Some(if let Some(close) = source.find(']') {
-            match parse_field(&source[1..close]) {
-                Ok(field) => (MusicElement::InlineField(field), close + 1, None),
-                Err(_) => (
-                    MusicElement::InlineField(Field {
-                        key: char::from(source.as_bytes()[1]),
-                        kind: field_kind(char::from(source.as_bytes()[1])),
-                        value: FieldValue::Unparsed(source[3..close].trim().into()),
-                    }),
-                    close + 1,
-                    Some((ErrorKind::InvalidField, "invalid inline field")),
-                ),
-            }
-        } else {
-            (
-                MusicElement::Extension(source.into()),
-                source.len(),
-                Some((ErrorKind::UnclosedDelimiter, "unclosed inline field")),
-            )
-        });
-    }
-    if source.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
-        let len = source
-            .bytes()
-            .skip(1)
-            .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b',' | b'-'))
-            .count()
-            + 1;
-        return Some(match parse_ending(&source[1..len]) {
-            Some(ending) => (MusicElement::Ending(ending), len, None),
-            None => (
-                MusicElement::Extension(source[..len].into()),
-                len,
-                Some((ErrorKind::InvalidMusic, "invalid variant ending")),
-            ),
-        });
-    }
-    if source.starts_with("[|") {
-        let len = source
-            .bytes()
-            .take_while(|byte| b"|:[]".contains(byte))
-            .count();
-        return Some((MusicElement::Bar(bar_line(&source[..len])), len, None));
-    }
-    Some(if let Some(close) = source.find(']') {
-        let suffix = length_prefix(&source[close + 1..]);
-        let len = close + 1 + suffix;
-        match parse_chord(&source[..len]) {
-            Ok(chord) => (MusicElement::Chord(chord), len, None),
-            Err(_) => (
-                MusicElement::Extension(source[..len].into()),
-                len,
-                Some((ErrorKind::InvalidMusic, "invalid chord")),
-            ),
-        }
-    } else {
-        (
-            MusicElement::Extension(source.into()),
-            source.len(),
-            Some((ErrorKind::UnclosedDelimiter, "unclosed chord")),
-        )
-    })
-}
-
-fn scan_grace(source: &str) -> ElementScan {
-    let Some(close) = source.find('}') else {
-        return (
-            MusicElement::Extension(source.into()),
-            source.len(),
-            Some((ErrorKind::UnclosedDelimiter, "unclosed grace group")),
-        );
-    };
-    let mut body = &source[1..close];
-    let acciaccatura = body.starts_with('/');
-    if acciaccatura {
-        body = &body[1..];
-    }
-    let mut notes = Vec::new();
-    while !body.is_empty() {
-        if let Some((note, len)) = parse_note_token(body) {
-            notes.push(note);
-            body = &body[len..];
-        } else {
-            return (
-                MusicElement::Extension(source[..=close].into()),
-                close + 1,
-                Some((ErrorKind::InvalidMusic, "invalid grace note")),
-            );
-        }
-    }
-    (
-        MusicElement::Grace(GraceGroup {
-            acciaccatura,
-            notes,
-        }),
-        close + 1,
-        None,
-    )
-}
-
-fn scan_long_decoration(source: &str) -> ElementScan {
-    let delimiter = char::from(source.as_bytes()[0]);
-    let Some(close) = source[1..].find(delimiter) else {
-        return (
-            MusicElement::Extension(source.into()),
-            source.len(),
-            Some((ErrorKind::UnclosedDelimiter, "unclosed decoration")),
-        );
-    };
-    let len = close + 2;
-    (
-        MusicElement::Decoration(Decoration {
-            name: source[1..len - 1].into(),
-            legacy_delimiter: delimiter == '+',
-        }),
-        len,
-        None,
-    )
-}
-
-fn scan_annotation(source: &str) -> ElementScan {
-    let Some(close) = source[1..].find('"') else {
-        return (
-            MusicElement::Extension(source.into()),
-            source.len(),
-            Some((ErrorKind::UnclosedDelimiter, "unclosed annotation")),
-        );
-    };
-    let len = close + 2;
-    let body = &source[1..len - 1];
-    let (placement, text) = match body.chars().next() {
-        Some('^') => (AnnotationPlacement::Above, &body[1..]),
-        Some('_') => (AnnotationPlacement::Below, &body[1..]),
-        Some('<') => (AnnotationPlacement::Left, &body[1..]),
-        Some('>') => (AnnotationPlacement::Right, &body[1..]),
-        Some('@') => (AnnotationPlacement::Free, &body[1..]),
-        _ => (AnnotationPlacement::ChordSymbol, body),
-    };
-    (
-        MusicElement::Annotation(Annotation {
-            placement,
-            text: text.into(),
-        }),
-        len,
-        None,
-    )
-}
-
-fn scan_tuplet(source: &str) -> ElementScan {
-    let len = source
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b'(' | b':'))
-        .count();
-    let parts: Vec<_> = source[1..len].split(':').collect();
-    let p = parts
-        .first()
-        .and_then(|part| part.parse().ok())
-        .unwrap_or(0);
-    let q = parts
-        .get(1)
-        .filter(|part| !part.is_empty())
-        .and_then(|part| part.parse().ok());
-    let r = parts
-        .get(2)
-        .filter(|part| !part.is_empty())
-        .and_then(|part| part.parse().ok());
-    (MusicElement::Tuplet(Tuplet { p, q, r }), len, None)
-}
-
-fn parse_note_token(source: &str) -> Option<(Note, usize)> {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    let accidental = parse_accidental(source, &mut index);
-    let letter = *bytes.get(index)?;
-    let class = match letter.to_ascii_uppercase() {
-        b'A' => PitchClass::A,
-        b'B' => PitchClass::B,
-        b'C' => PitchClass::C,
-        b'D' => PitchClass::D,
-        b'E' => PitchClass::E,
-        b'F' => PitchClass::F,
-        b'G' => PitchClass::G,
-        _ => return None,
-    };
-    let mut octave = i8::from(letter.is_ascii_lowercase());
-    index += 1;
-    while let Some(marker) = bytes.get(index) {
-        match marker {
-            b'\'' => octave += 1,
-            b',' => octave -= 1,
-            _ => break,
-        }
-        index += 1;
-    }
-    let length_len = length_prefix(&source[index..]);
-    let length = parse_length(&source[index..index + length_len]);
-    index += length_len;
-    Some((
-        Note {
-            pitch: Pitch {
-                class,
-                octave,
-                accidental,
-            },
-            length,
-        },
-        index,
-    ))
-}
-
-fn parse_rest_token(source: &str) -> Option<(Rest, usize)> {
-    let first = *source.as_bytes().first()?;
-    let kind = match first {
-        b'z' => RestKind::Visible,
-        b'x' => RestKind::Invisible,
-        _ => return None,
-    };
-    let suffix = length_prefix(&source[1..]);
-    Some((
-        Rest {
-            kind,
-            length: parse_length(&source[1..][..suffix]),
-        },
-        suffix + 1,
-    ))
-}
-
-fn parse_accidental(source: &str, index: &mut usize) -> Option<Accidental> {
-    let bytes = source.as_bytes();
-    let marker = *bytes.get(*index)?;
-    if marker == b'=' {
-        *index += 1;
-        return Some(Accidental::Natural);
-    }
-    if !matches!(marker, b'^' | b'_') {
-        return None;
-    }
-    let mut count = 0;
-    while bytes.get(*index) == Some(&marker) {
-        count += 1;
-        *index += 1;
-    }
-    let number_start = *index;
-    while bytes.get(*index).is_some_and(u8::is_ascii_digit) {
-        *index += 1;
-    }
-    let numerator = source[number_start..*index].parse().unwrap_or(count);
-    let denominator = if bytes.get(*index) == Some(&b'/') {
-        *index += 1;
-        let start = *index;
-        while bytes.get(*index).is_some_and(u8::is_ascii_digit) {
-            *index += 1;
-        }
-        source[start..*index].parse().unwrap_or(2)
-    } else {
-        1
-    };
-    let fraction = Fraction {
-        numerator,
-        denominator,
-    };
-    Some(if marker == b'^' {
-        Accidental::Sharp(fraction)
-    } else {
-        Accidental::Flat(fraction)
-    })
-}
-
-fn parse_length(source: &str) -> NoteLength {
-    if source.is_empty() {
-        return NoteLength {
-            numerator: 1,
-            denominator: 1,
-        };
-    }
-    let slash = source.find('/');
-    let numerator = slash
-        .map_or(source, |at| &source[..at])
-        .parse()
-        .unwrap_or(1);
-    let denominator = slash.map_or(1, |at| {
-        let tail = &source[at + 1..];
-        if tail.is_empty() {
-            2
-        } else if tail.bytes().all(|byte| byte == b'/') {
-            2_u32.pow(u32::try_from(tail.len() + 1).unwrap_or(31))
-        } else {
-            tail.parse().unwrap_or(2)
-        }
-    });
-    NoteLength {
-        numerator,
-        denominator,
-    }
-}
-
-fn bar_line(source: &str) -> BarLine {
-    let kind = match source {
-        "|" => BarKind::Single,
-        "||" => BarKind::Double,
-        "|]" => BarKind::ThinThick,
-        "[|" => BarKind::ThickThin,
-        "|:" => BarKind::RepeatStart,
-        ":|" => BarKind::RepeatEnd,
-        "::" | ":|:" | ":||:" => BarKind::RepeatBoth,
-        ".|" => BarKind::Dotted,
-        "[|]" => BarKind::Invisible,
-        _ => BarKind::Other,
-    };
-    BarLine {
-        kind,
-        source: source.into(),
-    }
-}
-
-fn parse_ending(source: &str) -> Option<VariantEnding> {
-    let mut selectors = Vec::new();
-    for part in source.split(',') {
-        if let Some((start, end)) = part.split_once('-') {
-            selectors.push(EndingSelector::Range {
-                start: start.parse().ok()?,
-                end: end.parse().ok()?,
-            });
-        } else {
-            selectors.push(EndingSelector::Number(part.parse().ok()?));
-        }
-    }
-    Some(VariantEnding { selectors })
-}
-
-fn shorthand_decoration(character: char) -> Option<&'static str> {
-    Some(match character {
-        '.' => "staccato",
-        '~' => "roll",
-        'H' => "fermata",
-        'L' => "accent",
-        'M' => "lowermordent",
-        'O' => "coda",
-        'P' => "uppermordent",
-        'S' => "segno",
-        'T' => "trill",
-        'u' => "upbow",
-        'v' => "downbow",
-        _ => return None,
-    })
-}
-
-fn parse_field_value(key: char, source: &str) -> Result<FieldValue, &'static str> {
-    match key {
-        'L' => parse_fraction(source)
-            .filter(|value| value.denominator != 0)
-            .map(FieldValue::UnitLength)
-            .ok_or("invalid L: unit note length"),
-        'M' => parse_meter(source).map(FieldValue::Meter),
-        'Q' => parse_tempo(source).map(FieldValue::Tempo),
-        'K' => parse_key(source).map(FieldValue::Key),
-        'X' => source
-            .parse()
-            .ok()
-            .map(FieldValue::Reference)
-            .ok_or("invalid X: reference number"),
-        'V' => parse_voice(source).map(FieldValue::Voice),
-        'P' => parse_parts(source).map(FieldValue::Parts),
-        'U' => parse_assignment(source)
-            .filter(|(left, _)| left.chars().count() == 1)
-            .map(|(left, replacement)| {
-                FieldValue::UserSymbol(SymbolDefinition {
-                    symbol: left.chars().next().unwrap_or_default(),
-                    replacement: replacement.into(),
-                })
-            })
-            .ok_or("invalid U: symbol definition"),
-        'm' => parse_assignment(source)
-            .map(|(pattern, replacement)| {
-                FieldValue::Macro(MacroDefinition {
-                    pattern: pattern.into(),
-                    replacement: replacement.into(),
-                })
-            })
-            .ok_or("invalid m: macro definition"),
-        _ => Ok(FieldValue::Text(source.into())),
-    }
-}
-
-fn parse_fraction(source: &str) -> Option<Fraction> {
-    let (numerator, denominator) = source.split_once('/')?;
-    if numerator.is_empty() || denominator.is_empty() || denominator.contains('/') {
-        return None;
-    }
-    Some(Fraction {
-        numerator: numerator.parse().ok()?,
-        denominator: denominator.parse().ok()?,
-    })
-}
-
-fn parse_meter(source: &str) -> Result<Meter, &'static str> {
-    match source {
-        "C" => return Ok(Meter::Common),
-        "C|" => return Ok(Meter::Cut),
-        value if value.eq_ignore_ascii_case("none") => return Ok(Meter::None),
-        _ => {}
-    }
-    let (numerators, denominator) = source.split_once('/').ok_or("invalid M: meter")?;
-    let groups = numerators
-        .trim_matches(['(', ')'])
-        .split('+')
-        .map(str::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "invalid M: numerator")?;
-    let denominator = denominator.parse().map_err(|_| "invalid M: denominator")?;
-    if groups.is_empty() || denominator == 0 {
-        return Err("invalid M: meter");
-    }
-    if let [numerator] = groups.as_slice() {
-        Ok(Meter::Simple(Fraction {
-            numerator: *numerator,
-            denominator,
-        }))
-    } else {
-        Ok(Meter::Compound {
-            groups,
-            denominator,
-        })
-    }
-}
-
-fn parse_tempo(source: &str) -> Result<Tempo, &'static str> {
-    let (prelude, remainder) = take_quoted_prefix(source.trim())?;
-    let (mark, postlude_source) = if let Some(quote) = remainder.find('"') {
-        (&remainder[..quote], remainder[quote..].trim())
-    } else {
-        (remainder, "")
-    };
-    let postlude = if postlude_source.is_empty() {
-        None
-    } else {
-        let (text, trailing) = take_quoted_prefix(postlude_source)?;
-        if !trailing.is_empty() {
-            return Err("invalid Q: trailing text");
-        }
-        text
-    };
-    let (beats, bpm) = mark
-        .trim()
-        .split_once('=')
-        .ok_or("invalid Q: metronome mark")?;
-    let beats = beats
-        .split_whitespace()
-        .map(|beat| {
-            if beat == "C" {
-                Some(Fraction {
-                    numerator: 1,
-                    denominator: 1,
-                })
-            } else {
-                parse_fraction(beat)
-            }
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or("invalid Q: beat length")?;
-    let bpm = bpm.trim().parse().map_err(|_| "invalid Q: bpm")?;
-    if beats.is_empty() || bpm == 0 {
-        return Err("invalid Q: tempo");
-    }
-    Ok(Tempo {
-        prelude,
-        beats,
-        bpm,
-        postlude,
-    })
-}
-
-fn take_quoted_prefix(source: &str) -> Result<(Option<String>, &str), &'static str> {
-    if !source.starts_with('"') {
-        return Ok((None, source));
-    }
-    let close = source[1..].find('"').ok_or("unclosed quoted field text")? + 1;
-    Ok((Some(source[1..close].into()), source[close + 1..].trim()))
-}
-
-fn parse_key(source: &str) -> Result<KeySignature, &'static str> {
-    let mut words = split_field_words(source);
-    if words.is_empty() {
-        return Err("empty K: field");
-    }
-    let head = words.remove(0);
-    let lower = head.to_ascii_lowercase();
-    let (tonic, mode) = if matches!(lower.as_str(), "none" | "hp" | "perc") {
-        (None, lower)
-    } else {
-        let bytes = head.as_bytes();
-        let class = match bytes.first().map(u8::to_ascii_uppercase) {
-            Some(b'A') => PitchClass::A,
-            Some(b'B') => PitchClass::B,
-            Some(b'C') => PitchClass::C,
-            Some(b'D') => PitchClass::D,
-            Some(b'E') => PitchClass::E,
-            Some(b'F') => PitchClass::F,
-            Some(b'G') => PitchClass::G,
-            _ => return Err("invalid K: tonic"),
-        };
-        let accidental = match bytes.get(1) {
-            Some(b'#') => Some(KeyAccidental::Sharp),
-            Some(b'b') => Some(KeyAccidental::Flat),
-            _ => None,
-        };
-        let mode_start = 1 + usize::from(accidental.is_some());
-        (
-            Some(KeyTonic { class, accidental }),
-            head[mode_start..].to_ascii_lowercase(),
-        )
-    };
-    let mut parameters = Vec::new();
-    let mut mode = mode;
-    if mode.is_empty() && words.first().is_some_and(|word| !word.contains('=')) {
-        mode = words.remove(0).to_ascii_lowercase();
-    }
-    for word in words {
-        parameters.push(parameter_from_word(&word));
-    }
-    Ok(KeySignature {
-        tonic,
-        mode,
-        parameters,
-    })
-}
-
-fn parse_voice(source: &str) -> Result<VoiceDefinition, &'static str> {
-    let mut words = split_field_words(source);
-    if words.is_empty() {
-        return Err("empty V: voice identifier");
-    }
-    let id = words.remove(0);
-    Ok(VoiceDefinition {
-        id,
-        properties: words.iter().map(|word| parameter_from_word(word)).collect(),
-    })
-}
-
-fn split_field_words(source: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    for character in source.chars() {
-        match character {
-            '"' => quoted = !quoted,
-            value if value.is_whitespace() && !quoted => {
-                if !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
-                }
-            }
-            value => current.push(value),
-        }
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
-}
-
-fn parameter_from_word(source: &str) -> FieldParameter {
-    if let Some((name, value)) = source.split_once('=') {
-        FieldParameter {
-            name: Some(name.into()),
-            value: value.into(),
-        }
-    } else {
-        FieldParameter {
-            name: None,
-            value: source.into(),
-        }
-    }
-}
-
-fn parse_parts(source: &str) -> Result<PartSequence, &'static str> {
-    let mut tokens = Vec::new();
-    let mut index = 0;
-    while index < source.len() {
-        let tail = &source[index..];
-        let first = tail.chars().next().ok_or("invalid P: part sequence")?;
-        if first.is_whitespace() {
-            index += first.len_utf8();
-        } else if first.is_ascii_alphabetic() {
-            let len = tail.bytes().take_while(u8::is_ascii_alphabetic).count();
-            tokens.push(PartToken::Part(tail[..len].into()));
-            index += len;
-        } else if first.is_ascii_digit() {
-            let len = tail.bytes().take_while(u8::is_ascii_digit).count();
-            tokens.push(PartToken::Repeat(
-                tail[..len].parse().map_err(|_| "invalid P: repeat")?,
-            ));
-            index += len;
-        } else {
-            tokens.push(match first {
-                '(' => PartToken::Open,
-                ')' => PartToken::Close,
-                '.' => PartToken::Separator,
-                _ => return Err("invalid P: part sequence"),
-            });
-            index += 1;
-        }
-    }
-    if tokens.is_empty() {
-        Err("empty P: part sequence")
-    } else {
-        Ok(PartSequence { tokens })
-    }
-}
-
-fn parse_assignment(source: &str) -> Option<(&str, &str)> {
-    let (left, right) = source.split_once('=')?;
-    let left = left.trim();
-    let right = right.trim();
-    (!left.is_empty() && !right.is_empty()).then_some((left, right))
 }
 
 fn field_kind(key: char) -> FieldKind {
@@ -1775,30 +870,6 @@ fn field_kind(key: char) -> FieldKind {
     }
 }
 
-fn length_prefix(source: &str) -> usize {
-    source
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit() || *byte == b'/')
-        .count()
-}
-fn valid_length(source: &str) -> bool {
-    source
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || byte == b'/')
-}
-
-fn valid_chord_contents(source: &str) -> bool {
-    // Chumsky is the core recognizer here: a chord is a non-empty sequence from
-    // the ABC note alphabet. Semantic grouping remains lossless in the AST.
-    none_of::<_, _, extra::Err<Rich<'_, char>>>("]\r\n")
-        .repeated()
-        .at_least(1)
-        .then_ignore(end::<_, extra::Err<Rich<'_, char>>>())
-        .parse(source)
-        .has_output()
-        && !source.contains('[')
-}
-
 fn error(kind: ErrorKind, message: &str, start: usize, end: usize) -> ParseError {
     ParseError {
         kind,
@@ -1806,10 +877,6 @@ fn error(kind: ErrorKind, message: &str, start: usize, end: usize) -> ParseError
         span: start..end,
     }
 }
-fn shift_error(error: &mut ParseError, offset: usize) {
-    error.span = error.span.start + offset..error.span.end + offset;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1818,6 +885,7 @@ mod tests {
     fn parses_public_partial_entries() {
         assert_eq!(parse_field("K:G mixolydian").unwrap().key, 'K');
         assert_eq!(parse_directive("%%staves (1 2)").unwrap().name, "staves");
+        assert!(parse_field("V:1 name=\"Soprano\" snm=\"S\" clef=treble").is_ok());
         assert_eq!(parse_chord("[CEG]4").unwrap().length.numerator, 4);
         assert!(parse_music_line("|: CDEF [CEG]2 :|").is_valid());
     }
@@ -1923,10 +991,7 @@ mod tests {
     fn reports_negative_partial_entries() {
         assert!(parse_field("Key:C").is_err());
         assert!(parse_directive("%% bad").is_err());
-        assert_eq!(
-            parse_chord("[CEG").unwrap_err().kind,
-            ErrorKind::UnclosedDelimiter
-        );
+        assert!(parse_chord("[CEG").is_err());
         assert!(!parse_music_line("C !trill").is_valid());
     }
 

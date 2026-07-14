@@ -1,0 +1,1082 @@
+// Copyright 2026 Maurice S. Barnum
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Chumsky parser constructors for ABC syntax.
+
+use super::Accidental;
+use super::Annotation;
+use super::AnnotationPlacement;
+use super::BarKind;
+use super::BarLine;
+use super::BrokenRhythm;
+use super::Chord;
+use super::ChordMember;
+use super::Decoration;
+use super::Directive;
+use super::Document;
+use super::EndingSelector;
+use super::Field;
+use super::FieldParameter;
+use super::FieldValue;
+use super::Fraction;
+use super::GraceGroup;
+use super::KeyAccidental;
+use super::KeySignature;
+use super::KeyTonic;
+use super::Line;
+use super::LineBreak;
+use super::MacroDefinition;
+use super::Meter;
+use super::MultiMeasureRest;
+use super::MusicElement;
+use super::Note;
+use super::NoteLength;
+use super::Overlay;
+use super::ParsedDocument;
+use super::PartSequence;
+use super::PartToken;
+use super::Pitch;
+use super::PitchClass;
+use super::Rest;
+use super::RestKind;
+use super::Slur;
+use super::SourceText;
+use super::Spanned;
+use super::SymbolDefinition;
+use super::Tempo;
+use super::Tie;
+use super::Tune;
+use super::Tuplet;
+use super::VariantEnding;
+use super::VoiceDefinition;
+use super::field_kind;
+use chumsky::IterParser;
+use chumsky::ParseResult;
+use chumsky::Parser;
+use chumsky::error::Rich;
+use chumsky::extra;
+use chumsky::input::Input;
+use chumsky::input::ValueInput;
+use chumsky::prelude::any;
+use chumsky::prelude::choice;
+use chumsky::prelude::empty;
+use chumsky::prelude::just;
+use chumsky::prelude::one_of;
+
+type Extra<'src, I> = extra::Err<Rich<'src, char, <I as Input<'src>>::Span>>;
+type ParsedMusic<S> = Vec<Spanned<MusicElement<SourceText<S>>, S>>;
+type ParsedLine<S> = Spanned<Line<S, SourceText<S>>, S>;
+
+/// Parses a character other than a physical line ending.
+fn line_character<'src, I>() -> impl Parser<'src, I, char, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    any().filter(|character| !matches!(character, '\r' | '\n'))
+}
+
+/// Parses horizontal spacing without allocating text.
+fn horizontal_space<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    one_of(" \t").repeated().ignored()
+}
+
+/// Parses a decimal u32 by folding digits and reports overflow at its span.
+fn unsigned<'src, I>() -> impl Parser<'src, I, u32, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    any()
+        .filter(char::is_ascii_digit)
+        .map(|digit| digit.to_digit(10).unwrap_or_default())
+        .try_foldl(
+            any()
+                .filter(char::is_ascii_digit)
+                .map(|digit| digit.to_digit(10).unwrap_or_default())
+                .repeated(),
+            |value, digit, extra| {
+                value
+                    .checked_mul(10)
+                    .and_then(|value| value.checked_add(digit))
+                    .ok_or_else(|| Rich::custom(extra.span(), "integer is too large"))
+            },
+        )
+}
+
+/// Parses a positive fraction used by fields and tempo marks.
+fn fraction<'src, I>() -> impl Parser<'src, I, Fraction, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    unsigned()
+        .then_ignore(just('/'))
+        .then(unsigned())
+        .try_map(|(numerator, denominator), span| {
+            (denominator != 0)
+                .then_some(Fraction {
+                    numerator,
+                    denominator,
+                })
+                .ok_or_else(|| Rich::custom(span, "fraction denominator must not be zero"))
+        })
+}
+
+/// Parses an optional ABC note-length suffix and computes its rational value.
+fn note_length<'src, I>() -> impl Parser<'src, I, NoteLength, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    unsigned()
+        .or_not()
+        .then(just('/').repeated().count())
+        .then(unsigned().or_not())
+        .try_map(|((numerator, slashes), denominator), span| {
+            let numerator = numerator.unwrap_or(1);
+            let denominator = match (slashes, denominator) {
+                (0, None) => 1,
+                (1, Some(value)) if value != 0 => value,
+                (count, None) if count > 0 => 2_u32
+                    .checked_pow(u32::try_from(count).unwrap_or(u32::MAX))
+                    .ok_or_else(|| Rich::custom(span, "note length denominator is too large"))?,
+                _ => return Err(Rich::custom(span, "invalid note length")),
+            };
+            Ok(NoteLength {
+                numerator,
+                denominator,
+            })
+        })
+}
+
+/// Parses one sharp or flat spelling, including microtonal fractions.
+fn raised_accidental<'src, I>(
+    marker: char,
+) -> impl Parser<'src, I, Accidental, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just(marker)
+        .repeated()
+        .at_least(1)
+        .count()
+        .then(unsigned().or_not())
+        .then(just('/').ignore_then(unsigned().or_not()).or_not())
+        .try_map(move |((markers, numerator), denominator), span| {
+            let denominator = denominator.flatten().unwrap_or(1);
+            if denominator == 0 {
+                return Err(Rich::custom(
+                    span,
+                    "accidental denominator must not be zero",
+                ));
+            }
+            let amount = Fraction {
+                numerator: numerator.unwrap_or(u32::try_from(markers).unwrap_or(u32::MAX)),
+                denominator,
+            };
+            Ok(if marker == '^' {
+                Accidental::Sharp(amount)
+            } else {
+                Accidental::Flat(amount)
+            })
+        })
+}
+
+/// Parses a complete written accidental.
+fn accidental<'src, I>() -> impl Parser<'src, I, Accidental, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    choice((
+        just('=').to(Accidental::Natural),
+        raised_accidental('^'),
+        raised_accidental('_'),
+    ))
+}
+
+/// Parses a pitch class while preserving upper/lowercase octave semantics.
+fn pitch_class<'src, I>() -> impl Parser<'src, I, (PitchClass, i8), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    one_of("ABCDEFGabcdefg").map(|letter: char| {
+        let class = match letter.to_ascii_uppercase() {
+            'A' => PitchClass::A,
+            'B' => PitchClass::B,
+            'C' => PitchClass::C,
+            'D' => PitchClass::D,
+            'E' => PitchClass::E,
+            'F' => PitchClass::F,
+            'G' => PitchClass::G,
+            _ => unreachable!("one_of restricts the pitch alphabet"),
+        };
+        (class, i8::from(letter.is_ascii_lowercase()))
+    })
+}
+
+/// Parses apostrophe/comma octave modifiers as a signed displacement.
+fn octave<'src, I>() -> impl Parser<'src, I, i8, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    choice((
+        just('\'')
+            .repeated()
+            .at_least(1)
+            .count()
+            .map(|count| i8::try_from(count).unwrap_or(i8::MAX)),
+        just(',')
+            .repeated()
+            .at_least(1)
+            .count()
+            .map(|count| -i8::try_from(count).unwrap_or(i8::MAX)),
+        empty().to(0),
+    ))
+}
+
+/// Parses a pitched note directly into semantic pitch and duration values.
+fn note<'src, I>() -> impl Parser<'src, I, Note, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    accidental()
+        .or_not()
+        .then(pitch_class())
+        .then(octave())
+        .then(note_length())
+        .map(
+            |(((accidental, (class, base_octave)), modifier), length)| Note {
+                pitch: Pitch {
+                    class,
+                    octave: base_octave.saturating_add(modifier),
+                    accidental,
+                },
+                length,
+            },
+        )
+}
+
+/// Parses a visible or invisible single rest.
+fn rest<'src, I>() -> impl Parser<'src, I, Rest, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    one_of("zx")
+        .then(note_length())
+        .map(|(marker, length)| Rest {
+            kind: if marker == 'z' {
+                RestKind::Visible
+            } else {
+                RestKind::Invisible
+            },
+            length,
+        })
+}
+
+/// Parses a multi-measure rest, defaulting its measure count to one.
+fn multi_measure_rest<'src, I>() -> impl Parser<'src, I, MultiMeasureRest, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    one_of("ZX")
+        .then(unsigned().or_not())
+        .map(|(marker, measures)| MultiMeasureRest {
+            invisible: marker == 'X',
+            measures: measures.unwrap_or(1),
+        })
+}
+
+/// Parses a quoted text body and returns only its interior span.
+fn quoted_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just('"')
+        .ignore_then(
+            any()
+                .filter(|character| !matches!(character, '"' | '\r' | '\n'))
+                .repeated()
+                .to_span(),
+        )
+        .then_ignore(just('"'))
+        .map(SourceText::Span)
+}
+
+/// Parses a non-whitespace token as a source span.
+fn token_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    any()
+        .filter(|character: &char| !character.is_whitespace() && !matches!(character, ']' | '='))
+        .repeated()
+        .at_least(1)
+        .to_span()
+        .map(SourceText::Span)
+}
+
+/// Parses source text to the end of a field, returning its native span.
+fn remaining_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    line_character().repeated().to_span().map(SourceText::Span)
+}
+
+/// Parses a named or positional key/voice parameter without copying its text.
+fn field_parameter<'src, I>()
+-> impl Parser<'src, I, FieldParameter<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let named = any()
+        .filter(|character: &char| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+        })
+        .repeated()
+        .at_least(1)
+        .to_span()
+        .map(SourceText::Span)
+        .then_ignore(just('='))
+        .then(choice((quoted_text(), token_text())))
+        .map(|(name, value)| FieldParameter {
+            name: Some(name),
+            value,
+        });
+    choice((
+        named,
+        token_text().map(|value| FieldParameter { name: None, value }),
+    ))
+}
+
+/// Builds a field with a preselected semantic kind and value.
+fn field<T>(key: char, value: FieldValue<T>) -> Field<T> {
+    Field {
+        key,
+        kind: field_kind(key),
+        value,
+    }
+}
+
+/// Parses the simple and additive forms of an M: meter value.
+fn meter<'src, I>() -> impl Parser<'src, I, Meter, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let fractional = just('(')
+        .or_not()
+        .ignore_then(
+            unsigned()
+                .separated_by(just('+'))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just(')').or_not())
+        .then_ignore(just('/'))
+        .then(unsigned())
+        .try_map(|(groups, denominator), span| {
+            if denominator == 0 {
+                return Err(Rich::custom(span, "meter denominator must not be zero"));
+            }
+            Ok(if let [numerator] = groups.as_slice() {
+                Meter::Simple(Fraction {
+                    numerator: *numerator,
+                    denominator,
+                })
+            } else {
+                Meter::Compound {
+                    groups,
+                    denominator,
+                }
+            })
+        });
+    choice((
+        just("C|").to(Meter::Cut),
+        just('C').to(Meter::Common),
+        just("none").to(Meter::None),
+        fractional,
+    ))
+}
+
+/// Parses a Q: metronome mark while retaining quoted descriptions as spans.
+fn tempo<'src, I>() -> impl Parser<'src, I, Tempo<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    quoted_text()
+        .then_ignore(horizontal_space())
+        .or_not()
+        .then(
+            fraction()
+                .separated_by(one_of(" \t").repeated().at_least(1))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just('='))
+        .then(unsigned())
+        .then(horizontal_space().ignore_then(quoted_text()).or_not())
+        .map(|(((prelude, beats), bpm), postlude)| Tempo {
+            prelude,
+            beats,
+            bpm,
+            postlude,
+        })
+}
+
+/// Parses a K: tonic, optional mode, and key parameters.
+fn key_signature<'src, I>()
+-> impl Parser<'src, I, KeySignature<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let tonic = pitch_class()
+        .map(|(class, _)| class)
+        .then(one_of("#b").or_not())
+        .map(|(class, accidental)| {
+            Some(KeyTonic {
+                class,
+                accidental: accidental.map(|marker| {
+                    if marker == '#' {
+                        KeyAccidental::Sharp
+                    } else {
+                        KeyAccidental::Flat
+                    }
+                }),
+            })
+        });
+    let no_tonic = choice((just("none"), just("perc"), just("HP"), just("Hp"))).to(None);
+    choice((tonic, no_tonic))
+        .then(
+            any()
+                .filter(char::is_ascii_alphabetic)
+                .repeated()
+                .at_least(1)
+                .to_span()
+                .map(SourceText::Span)
+                .or_not(),
+        )
+        .then(
+            one_of(" \t")
+                .repeated()
+                .at_least(1)
+                .ignore_then(field_parameter())
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map(|((tonic, mode), parameters)| KeySignature {
+            tonic,
+            mode: mode.unwrap_or_else(|| SourceText::Synthesized(String::new())),
+            parameters,
+        })
+}
+
+/// Parses a V: identifier and its optional properties.
+fn voice<'src, I>()
+-> impl Parser<'src, I, VoiceDefinition<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    token_text()
+        .then(
+            one_of(" \t")
+                .repeated()
+                .at_least(1)
+                .ignore_then(field_parameter())
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map(|(id, properties)| VoiceDefinition { id, properties })
+}
+
+/// Parses a P: part-order expression into semantic sequence tokens.
+fn parts<'src, I>()
+-> impl Parser<'src, I, PartSequence<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    choice((
+        any()
+            .filter(char::is_ascii_alphabetic)
+            .repeated()
+            .at_least(1)
+            .to_span()
+            .map(SourceText::Span)
+            .map(PartToken::Part),
+        unsigned().map(PartToken::Repeat),
+        just('(').to(PartToken::Open),
+        just(')').to(PartToken::Close),
+        just('.').to(PartToken::Separator),
+    ))
+    .then_ignore(horizontal_space())
+    .repeated()
+    .at_least(1)
+    .collect::<Vec<_>>()
+    .map(|tokens| PartSequence { tokens })
+}
+
+/// Builds strict structured and textual information-field alternatives.
+pub fn field_parser<'src, I>()
+-> impl Parser<'src, I, Field<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let structured = choice((
+        just("L:")
+            .ignore_then(fraction())
+            .map(|value| field('L', FieldValue::UnitLength(value))),
+        just("M:")
+            .ignore_then(meter())
+            .map(|value| field('M', FieldValue::Meter(value))),
+        just("Q:")
+            .ignore_then(horizontal_space())
+            .ignore_then(tempo())
+            .map(|value| field('Q', FieldValue::Tempo(value))),
+        just("K:")
+            .ignore_then(horizontal_space())
+            .ignore_then(key_signature())
+            .map(|value| field('K', FieldValue::Key(value))),
+        just("X:")
+            .ignore_then(horizontal_space())
+            .ignore_then(unsigned())
+            .map(|value| field('X', FieldValue::Reference(value))),
+        just("V:")
+            .ignore_then(horizontal_space())
+            .ignore_then(voice())
+            .map(|value| field('V', FieldValue::Voice(value))),
+        just("P:")
+            .ignore_then(horizontal_space())
+            .ignore_then(parts())
+            .map(|value| field('P', FieldValue::Parts(value))),
+        just("U:")
+            .ignore_then(horizontal_space())
+            .ignore_then(any().then_ignore(horizontal_space()).then_ignore(just('=')))
+            .then(horizontal_space().ignore_then(remaining_text()))
+            .map(|(symbol, replacement)| {
+                field(
+                    'U',
+                    FieldValue::UserSymbol(SymbolDefinition {
+                        symbol,
+                        replacement,
+                    }),
+                )
+            }),
+        just("m:")
+            .ignore_then(horizontal_space())
+            .ignore_then(
+                any()
+                    .filter(|character| *character != '=')
+                    .repeated()
+                    .at_least(1)
+                    .to_span()
+                    .map(SourceText::Span),
+            )
+            .then_ignore(just('='))
+            .then(horizontal_space().ignore_then(remaining_text()))
+            .map(|(pattern, replacement)| {
+                field(
+                    'm',
+                    FieldValue::Macro(MacroDefinition {
+                        pattern,
+                        replacement,
+                    }),
+                )
+            }),
+    ));
+    let textual = any()
+        .filter(|key: &char| {
+            key.is_ascii_alphabetic()
+                && !matches!(key, 'L' | 'M' | 'Q' | 'K' | 'X' | 'V' | 'P' | 'U' | 'm')
+        })
+        .then_ignore(just(':'))
+        .then(remaining_text())
+        .map(|(key, value)| field(key, FieldValue::Text(value)));
+    choice((structured, textual))
+}
+
+/// Retains malformed structured fields as spans and emits a non-fatal error.
+fn recovering_field_parser<'src, I>()
+-> impl Parser<'src, I, Field<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    field_parser().or(any()
+        .filter(char::is_ascii_alphabetic)
+        .then_ignore(just(':'))
+        .then(remaining_text())
+        .validate(|(key, value), extra, emitter| {
+            emitter.emit(Rich::custom(extra.span(), "invalid structured field value"));
+            field(key, FieldValue::Unparsed(value))
+        }))
+}
+
+/// Parses one bracketed chord directly from member and duration parsers.
+pub fn chord_parser<'src, I>() -> impl Parser<'src, I, Chord, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    choice((note().map(ChordMember::Note), rest().map(ChordMember::Rest)))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just('['), just(']'))
+        .then(note_length())
+        .map(|(members, length)| Chord { members, length })
+}
+
+/// Parses a variant-ending selector list such as [1,3-5.
+fn variant_ending<'src, I>() -> impl Parser<'src, I, VariantEnding, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let selector = unsigned()
+        .then(just('-').ignore_then(unsigned()).or_not())
+        .map(|(start, end)| {
+            end.map_or(EndingSelector::Number(start), |end| EndingSelector::Range {
+                start,
+                end,
+            })
+        });
+    just('[')
+        .ignore_then(
+            selector
+                .separated_by(just(','))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .map(|selectors| VariantEnding { selectors })
+}
+
+/// Parses standard bar spellings first, then accepts liberal bar sequences.
+fn bar<'src, I>() -> impl Parser<'src, I, BarLine<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    choice((
+        just("[|]").to(BarKind::Invisible),
+        just(":||:").to(BarKind::RepeatBoth),
+        just(":|:").to(BarKind::RepeatBoth),
+        just("::").to(BarKind::RepeatBoth),
+        just("|:").to(BarKind::RepeatStart),
+        just(":|").to(BarKind::RepeatEnd),
+        just("|]").to(BarKind::ThinThick),
+        just("[|").to(BarKind::ThickThin),
+        just("||").to(BarKind::Double),
+        just(".|").to(BarKind::Dotted),
+        just('|').to(BarKind::Single),
+        one_of("|:")
+            .repeated()
+            .at_least(1)
+            .ignored()
+            .to(BarKind::Other),
+    ))
+    .map_with(|kind, extra| BarLine {
+        kind,
+        source: SourceText::Span(extra.span()),
+    })
+}
+
+/// Parses a grace group, including the optional acciaccatura slash.
+fn grace<'src, I>() -> impl Parser<'src, I, GraceGroup, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just('/')
+        .or_not()
+        .then(note().repeated().at_least(1).collect::<Vec<_>>())
+        .delimited_by(just('{'), just('}'))
+        .map(|(slash, notes)| GraceGroup {
+            acciaccatura: slash.is_some(),
+            notes,
+        })
+}
+
+/// Parses inline structured fields whose values terminate at a closing bracket.
+fn inline_field<'src, I>()
+-> impl Parser<'src, I, Field<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just('[')
+        .ignore_then(choice((
+            just("L:")
+                .ignore_then(fraction())
+                .map(|value| field('L', FieldValue::UnitLength(value))),
+            just("M:")
+                .ignore_then(meter())
+                .map(|value| field('M', FieldValue::Meter(value))),
+            just("K:")
+                .ignore_then(horizontal_space())
+                .ignore_then(key_signature())
+                .map(|value| field('K', FieldValue::Key(value))),
+            just("X:")
+                .ignore_then(horizontal_space())
+                .ignore_then(unsigned())
+                .map(|value| field('X', FieldValue::Reference(value))),
+        )))
+        .then_ignore(just(']'))
+}
+
+/// Parses named, legacy, and shorthand decorations.
+fn decoration<'src, I>()
+-> impl Parser<'src, I, Decoration<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let named = |delimiter| {
+        just(delimiter)
+            .ignore_then(
+                any()
+                    .filter(move |character| {
+                        *character != delimiter && !matches!(character, '\r' | '\n')
+                    })
+                    .repeated()
+                    .at_least(1)
+                    .to_span()
+                    .map(SourceText::Span),
+            )
+            .then_ignore(just(delimiter))
+            .map(move |name| Decoration {
+                name,
+                legacy_delimiter: delimiter == '+',
+            })
+    };
+    let shorthand = one_of(".~HLMOPSTuv").map(|symbol| Decoration {
+        name: SourceText::Synthesized(
+            match symbol {
+                '.' => "staccato",
+                '~' => "roll",
+                'H' => "fermata",
+                'L' => "accent",
+                'M' => "lowermordent",
+                'O' => "coda",
+                'P' => "uppermordent",
+                'S' => "segno",
+                'T' => "trill",
+                'u' => "upbow",
+                'v' => "downbow",
+                _ => unreachable!("one_of restricts shorthand decorations"),
+            }
+            .into(),
+        ),
+        legacy_delimiter: false,
+    });
+    choice((named('!'), named('+'), shorthand))
+}
+
+/// Parses a quoted chord symbol or positioned annotation.
+fn annotation<'src, I>()
+-> impl Parser<'src, I, Annotation<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just('"')
+        .ignore_then(one_of("^_<>@").or_not())
+        .then(
+            any()
+                .filter(|character| !matches!(character, '"' | '\r' | '\n'))
+                .repeated()
+                .to_span()
+                .map(SourceText::Span),
+        )
+        .then_ignore(just('"'))
+        .map(|(marker, text)| Annotation {
+            placement: match marker {
+                Some('^') => AnnotationPlacement::Above,
+                Some('_') => AnnotationPlacement::Below,
+                Some('<') => AnnotationPlacement::Left,
+                Some('>') => AnnotationPlacement::Right,
+                Some('@') => AnnotationPlacement::Free,
+                _ => AnnotationPlacement::ChordSymbol,
+            },
+            text,
+        })
+}
+
+/// Parses compact and extended tuplet prefixes.
+fn tuplet<'src, I>() -> impl Parser<'src, I, Tuplet, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just('(')
+        .ignore_then(unsigned())
+        .then(just(':').ignore_then(unsigned().or_not()).or_not())
+        .then(just(':').ignore_then(unsigned().or_not()).or_not())
+        .try_map(|((p, q), r), span: I::Span| {
+            Ok(Tuplet {
+                p: u8::try_from(p)
+                    .map_err(|_| Rich::custom(span.clone(), "tuplet value exceeds u8"))?,
+                q: q.flatten()
+                    .map(u8::try_from)
+                    .transpose()
+                    .map_err(|_| Rich::custom(span.clone(), "tuplet value exceeds u8"))?,
+                r: r.flatten()
+                    .map(u8::try_from)
+                    .transpose()
+                    .map_err(|_| Rich::custom(span, "tuplet value exceeds u8"))?,
+            })
+        })
+}
+
+/// Parses repeated broken-rhythm operators while retaining direction.
+fn broken_rhythm<'src, I>() -> impl Parser<'src, I, BrokenRhythm, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    choice((
+        just('>')
+            .repeated()
+            .at_least(1)
+            .count()
+            .map(|count| BrokenRhythm {
+                greater: true,
+                count: u8::try_from(count).unwrap_or(u8::MAX),
+            }),
+        just('<')
+            .repeated()
+            .at_least(1)
+            .count()
+            .map(|count| BrokenRhythm {
+                greater: false,
+                count: u8::try_from(count).unwrap_or(u8::MAX),
+            }),
+    ))
+}
+
+/// Parses one semantic music-code element and attaches its native span.
+pub fn music_element_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let beam_break = one_of(" \t")
+        .repeated()
+        .at_least(1)
+        .to_span()
+        .map(SourceText::Span)
+        .map(MusicElement::BeamBreak);
+    let extension = line_character().validate(|_, extra, emitter| {
+        emitter.emit(Rich::custom(extra.span(), "unrecognized music token"));
+        MusicElement::Extension(SourceText::Span(extra.span()))
+    });
+    choice((
+        inline_field().map(MusicElement::InlineField),
+        chord_parser().map(MusicElement::Chord),
+        variant_ending().map(MusicElement::Ending),
+        grace().map(MusicElement::Grace),
+        annotation().map(MusicElement::Annotation),
+        decoration().map(MusicElement::Decoration),
+        multi_measure_rest().map(MusicElement::MultiMeasureRest),
+        rest().map(MusicElement::Rest),
+        note().map(MusicElement::Note),
+        tuplet().map(MusicElement::Tuplet),
+        bar().map(MusicElement::Bar),
+        just(".(").to(MusicElement::Slur(Slur {
+            opening: true,
+            dotted: true,
+        })),
+        just(".)").to(MusicElement::Slur(Slur {
+            opening: false,
+            dotted: true,
+        })),
+        just('(').to(MusicElement::Slur(Slur {
+            opening: true,
+            dotted: false,
+        })),
+        just(')').to(MusicElement::Slur(Slur {
+            opening: false,
+            dotted: false,
+        })),
+        just(".-").to(MusicElement::Tie(Tie { dotted: true })),
+        just('-').to(MusicElement::Tie(Tie { dotted: false })),
+        just("(&").to(MusicElement::Overlay(Overlay::Start)),
+        just("&)").to(MusicElement::Overlay(Overlay::End)),
+        just('&').to(MusicElement::Overlay(Overlay::NextVoice)),
+        broken_rhythm().map(MusicElement::BrokenRhythm),
+        just(char::from(96))
+            .repeated()
+            .at_least(1)
+            .count()
+            .map(MusicElement::BeamContinuation),
+        just('\\').to(MusicElement::LineBreak(LineBreak::Continue)),
+        beam_break,
+        extension,
+    ))
+    .map_with(|value, extra| Spanned {
+        value,
+        span: extra.span(),
+    })
+}
+
+/// Builds a parser for a complete physical music-code line.
+pub fn music_line_parser<'src, I>()
+-> impl Parser<'src, I, ParsedMusic<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    music_element_parser().repeated().at_least(1).collect()
+}
+
+/// Builds a strict parser for one %% directive using span-backed text.
+pub fn directive_parser<'src, I>()
+-> impl Parser<'src, I, Directive<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just("%%")
+        .ignore_then(
+            any()
+                .filter(|character: &char| character.is_ascii_alphanumeric() || *character == '-')
+                .repeated()
+                .at_least(1)
+                .to_span()
+                .map(SourceText::Span),
+        )
+        .then(
+            one_of(" \t")
+                .repeated()
+                .ignore_then(remaining_text())
+                .or_not(),
+        )
+        .map(|(name, arguments)| Directive {
+            name,
+            arguments: arguments.unwrap_or_else(|| SourceText::Synthesized(String::new())),
+        })
+}
+
+/// Classifies a physical line using ordered ABC prefix alternatives.
+fn unspanned_line_parser<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    choice((
+        directive_parser().map(Line::Directive),
+        just('%').ignore_then(remaining_text()).map(Line::Comment),
+        recovering_field_parser().map(Line::Field),
+        one_of(" \t").repeated().at_least(1).to(Line::Blank),
+        music_line_parser().map(Line::Music),
+        empty().to(Line::Blank),
+    ))
+}
+
+/// Builds a parser for one source-spanned physical ABC line.
+pub fn line_parser<'src, I>() -> impl Parser<'src, I, ParsedLine<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    unspanned_line_parser().map_with(|value, extra| Spanned {
+        value,
+        span: extra.span(),
+    })
+}
+
+/// Parses a platform-independent physical newline.
+fn newline<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    just('\r').or_not().then_ignore(just('\n')).ignored()
+}
+
+/// Builds a complete-document parser and groups lines at X: boundaries.
+pub fn document_parser<'src, I>()
+-> impl Parser<'src, I, ParsedDocument<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    line_parser()
+        .separated_by(newline())
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .map(|mut lines| {
+            if lines
+                .last()
+                .is_some_and(|line| matches!(line.value, Line::Blank))
+            {
+                lines.pop();
+            }
+            let mut document = Document {
+                header: Vec::new(),
+                tunes: Vec::new(),
+            };
+            let mut current_tune: Option<Tune<I::Span, SourceText<I::Span>>> = None;
+            for line in lines {
+                let is_reference = matches!(
+                    &line.value,
+                    Line::Field(field) if matches!(field.value, FieldValue::Reference(_))
+                );
+                if is_reference {
+                    if let Some(tune) = current_tune.replace(Tune { lines: Vec::new() }) {
+                        document.tunes.push(tune);
+                    }
+                }
+                if let Some(tune) = &mut current_tune {
+                    tune.lines.push(line);
+                } else {
+                    document.header.push(line);
+                }
+            }
+            if let Some(tune) = current_tune {
+                document.tunes.push(tune);
+            }
+            document
+        })
+}
+
+/// Parses an ABC document from any by-value character Input.
+///
+/// The AST uses the input's native span type and represents source-derived text
+/// as `SourceText::Span`.
+pub fn parse_input<'src, I>(
+    input: I,
+) -> ParseResult<ParsedDocument<I::Span>, Rich<'src, char, I::Span>>
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    document_parser().parse(input)
+}

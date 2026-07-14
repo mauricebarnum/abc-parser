@@ -1,34 +1,42 @@
 
 # Parser architecture
 
-This section describes how source text reaches the public AST. All offsets are
-UTF-8 byte offsets into the original input. The parser does not require callers
-to retain a second token stream: every [`Spanned`] node can be sliced directly
-from the original source using its [`Span`].
+This section describes how character input reaches the public AST. Parser
+constructors are generic over Chumsky's `ValueInput<Token = char>` (a by-value
+character-input specialization of `Input`). Every [`Spanned`] node uses the
+input's native `Input::Span`: `&str` therefore reports UTF-8 byte offsets while
+`&[char]` reports character indices.
 
 ## Entry points
 
-The complete-document APIs are:
+The primary complete-document APIs are:
 
-- [`parse_recovering`] always returns a [`ParseReport<Document>`]. Its
+- [`document_parser`] constructs an `impl Parser` that callers can compose with
+  other Chumsky parsers.
+- [`parse_input`] runs that parser and returns Chumsky's native `ParseResult`
+  with `Rich<char, I::Span>` errors.
+
+- [`parse_recovering`] always returns a [`ParseReport<OwnedDocument>`]. Its
   [`ParseReport::output`] contains everything recovered after faults and
   [`ParseReport::errors`] contains source-ordered diagnostics.
 - [`parse`] uses the same recovery pass, but returns the AST only when no errors
   were found.
 - [`validate`] performs complete parsing and discards a successful AST.
 
-Partial-input APIs are [`parse_line`], [`parse_music_line`], [`parse_field`],
-[`parse_directive`], and [`parse_chord`]. They are suitable for editors and for
-parsing ABC fragments that are not complete tunes.
+Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
+[`music_element_parser`], [`field_parser`], [`directive_parser`], and
+[`chord_parser`]. Convenience functions for `&str` remain available as
+[`parse_line`], [`parse_music_line`], [`parse_field`], [`parse_directive`], and
+[`parse_chord`].
 
 ```mermaid
 flowchart TD
-    source["&str source"] --> entry{Entry point}
-    entry -->|document| recovering[parse_recovering]
-    entry -->|physical line| line[parse_line]
-    entry -->|music fragment| music[parse_music_line]
-    entry -->|field/directive/chord| partial[Strict partial parser]
-    recovering --> split[Split into physical lines]
+    source["ValueInput Token=char"] --> entry{Parser constructor}
+    entry -->|document| recovering[document_parser]
+    entry -->|physical line| line[line_parser]
+    entry -->|music fragment| music[music_line_parser]
+    entry -->|field/directive/chord| partial[Partial parser combinators]
+    recovering --> split[separated_by newline]
     split --> classify[Classify each line]
     line --> classify
     classify --> blank[Blank]
@@ -37,12 +45,14 @@ flowchart TD
     classify --> field[Field parser]
     classify --> music
     field --> field_value[Structured field-value parser]
-    music --> scan[Music element scanner]
-    scan --> ast[Spanned AST nodes]
+    music --> elements[Music element combinators]
+    elements --> ast[Spanned AST nodes]
     field_value --> ast
     directive --> ast
     ast --> group[Group lines at X: tune boundaries]
-    group --> report[ParseReport Document]
+    group --> parsed[ParsedDocument with SourceText spans]
+    parsed -->|IntoOwnedAst + source| owned[OwnedDocument with strings]
+    parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
 ```
 
 The diagram is Mermaid source so it remains portable in generated rustdoc and
@@ -51,17 +61,17 @@ contains the same information for plain rustdoc viewers.
 
 ## Complete-document flow
 
-[`parse_recovering`] walks the source once at physical-line granularity:
+[`document_parser`] composes the source at physical-line granularity:
 
-1. `physical_lines` yields each line and its starting byte offset.
-2. `parse_line_at` classifies the line by its prefix. `%%` selects a directive,
+1. `line_parser().separated_by(newline())` identifies physical lines.
+2. A `choice` combinator classifies each line by its prefix. `%%` selects a directive,
    `%` selects a comment, and an ASCII letter followed by `:` selects an
    information field. Other non-blank lines are music code.
-3. A successful or recovered line is wrapped in [`Spanned<Line>`]. Newline
-   bytes are not part of the line span.
+3. `map_with` wraps a successful or recovered line in [`Spanned<Line>`] using
+   `MapExtra::span`. Newline tokens are not part of the line span.
 4. An `X:` field starts a new [`Tune`]. Lines before the first `X:` remain in
    [`Document::header`].
-5. Diagnostics and the [`Document`] are returned together in a [`ParseReport`].
+5. Chumsky returns diagnostics and the [`Document`] together in `ParseResult`.
 
 Physical lines are intentional recovery boundaries. ABC fields, directives,
 comments, and most music layout constructs cannot consume an arbitrary following
@@ -105,11 +115,13 @@ flowchart LR
 
 ## Music-code flow
 
-`parse_music_at` repeatedly calls the element scanner on the unconsumed suffix.
-Each scan returns an element, the number of bytes consumed, and an optional
-fault. The driver shifts the local range by the line's starting offset and
-emits a [`Spanned<MusicElement>`]. A scanner must consume at least one UTF-8
-character, which guarantees progress even for malformed input.
+[`music_line_parser`] is
+`music_element_parser().repeated().at_least(1).collect()`. The element parser is
+a `choice` of bracketed constructs, grace groups, quoted annotations,
+decorations, grouped operators, notes/rests, and a one-character recovery
+fallback. Repetition and delimiter ownership are handled by Chumsky primitives;
+`validate` emits non-fatal `Rich` errors, and `map_with` attaches the native
+input span.
 
 Bracketed input is disambiguated before general tokens:
 
@@ -118,10 +130,40 @@ Bracketed input is disambiguated before general tokens:
 3. `[|...` is a bar line.
 4. Other bracketed input is a [`Chord`].
 
-Notes are decomposed into [`Pitch`], optional [`Accidental`], octave, and
-[`NoteLength`]. Chords contain typed [`ChordMember`] values rather than source
-strings. The Chumsky recognizer enforces the non-empty, delimiter-safe chord
-interior before semantic chord-member parsing.
+Notes are recognized by chained `one_of`, `repeated`, `then`, and `map`
+combinators, then decomposed into [`Pitch`], optional [`Accidental`], octave,
+and [`NoteLength`]. Chords contain typed [`ChordMember`] values rather than
+source strings. Chumsky enforces non-empty, delimiter-safe chord interiors while
+producing semantic members directly; there is no secondary string scanner.
+
+## Source-backed text and ownership
+
+[`ParsedDocument`] stores source-derived text as [`SourceText::Span`] using the
+input's native span type. Values introduced or normalized by parsing use
+[`SourceText::Synthesized`]. Consequently, parsing does not allocate a `String`
+for every title, comment, directive argument, decoration, or recovery token.
+The span-only AST itself does not borrow the source and may outlive it, although
+exactly recovering its text later requires the matching source.
+
+[`IntoOwnedAst::into_owned`] recursively converts a parsed document or subtree
+to its `String`-backed equivalent. Passing the original `str` resolves
+`SimpleSpan<usize>` as UTF-8 byte offsets; passing the original `[char]` resolves
+the same span type as character indices. Invalid source/span combinations
+return [`ResolveError`]. This operation copies source-backed text into the
+standalone tree; already synthesized strings are moved without copying.
+
+When the source is unavailable or unwanted, [`PlaceholderResolver`] emits the
+documented form `[[ABC_SOURCE_REF:<Debug span>]]`. Use
+[`is_source_reference_placeholder`] for heuristic detection. A legitimate ABC
+source can contain the same shape, so detection cannot prove provenance.
+
+```mermaid
+flowchart LR
+    input[Input source] --> parse_input
+    parse_input --> parsed[ParsedDocument SourceText spans]
+    parsed -->|source resolver| exact[OwnedDocument exact strings]
+    parsed -->|PlaceholderResolver| placeholders[OwnedDocument reference placeholders]
+```
 
 ## AST overview
 
@@ -146,6 +188,9 @@ classDiagram
     FieldValue <|-- Tempo
     FieldValue <|-- KeySignature
     FieldValue <|-- VoiceDefinition
+    SourceText <|-- SourceSpan
+    SourceText <|-- SynthesizedString
+    FieldValue *-- SourceText
     MusicLine *-- SpannedMusicElement
     SpannedMusicElement *-- MusicElement
     MusicElement <|-- Note
@@ -181,9 +226,10 @@ a diagnostic, preserving bytes without pretending they were understood.
 errors found in nested inline fields. Diagnostics are emitted in encounter
 order. Recovery maintains these invariants:
 
-- scanning always advances;
+- repeated element parsing always advances;
 - every emitted span is half-open and within the input;
-- a malformed structured field retains its trimmed payload;
+- a malformed structured field retains its payload span and ownership
+  conversion trims the resulting fallback string;
 - an unclosed delimited music construct consumes no later physical line;
 - a later tune can still be discovered after faults in an earlier tune.
 

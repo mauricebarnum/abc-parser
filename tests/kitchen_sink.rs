@@ -14,6 +14,10 @@
 
 //! End-to-end tests using the repository's ABC 2.1 fixture.
 
+use abc_parser::IntoOwnedAst;
+use abc_parser::PlaceholderResolver;
+use abc_parser::is_source_reference_placeholder;
+use abc_parser::parse_input;
 use abc_parser::parse_recovering;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
@@ -53,4 +57,55 @@ fn mutations_report_bounded_faults_and_keep_later_tunes() {
                 .all(|error| error.span.end <= mutant.len())
         );
     }
+}
+
+#[test]
+fn chumsky_document_parser_accepts_string_and_character_inputs() {
+    let string_result = parse_input(KITCHEN_SINK);
+    assert!(
+        !string_result.has_errors(),
+        "{:#?}",
+        string_result.errors().collect::<Vec<_>>()
+    );
+    assert_eq!(string_result.output().unwrap().tunes.len(), 2);
+    let string_owned = string_result
+        .into_output()
+        .unwrap()
+        .into_owned(KITCHEN_SINK)
+        .unwrap();
+    assert_eq!(string_owned.tunes.len(), 2);
+
+    let characters: Vec<char> = KITCHEN_SINK.chars().collect();
+    let character_result = parse_input(characters.as_slice());
+    assert!(
+        !character_result.has_errors(),
+        "{:#?}",
+        character_result.errors().collect::<Vec<_>>()
+    );
+    assert_eq!(character_result.output().unwrap().tunes.len(), 2);
+    let character_owned = character_result
+        .into_output()
+        .unwrap()
+        .into_owned(characters.as_slice())
+        .unwrap();
+    assert_eq!(character_owned.tunes.len(), 2);
+}
+
+#[test]
+fn document_can_be_detached_without_retaining_the_source() {
+    let parsed = parse_input(KITCHEN_SINK).into_output().unwrap();
+    let detached = parsed.into_owned(&PlaceholderResolver).unwrap();
+    let first_title = detached.tunes[0]
+        .lines
+        .iter()
+        .find_map(|line| match &line.value {
+            abc_parser::Line::Field(abc_parser::Field {
+                key: 'T',
+                value: abc_parser::FieldValue::Text(text),
+                ..
+            }) => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    assert!(is_source_reference_placeholder(first_title));
 }
