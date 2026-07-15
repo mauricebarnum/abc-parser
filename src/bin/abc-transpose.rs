@@ -114,6 +114,9 @@ struct Arguments {
         value_name = "BOOL"
     )]
     spelling: SpellingPreference,
+    /// Write output to this file instead of standard output.
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
 }
 
 impl Arguments {
@@ -282,14 +285,14 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     }
 
     if request == Request::Semitones(0) && arguments.spelling == SpellingPreference::Auto {
-        return write_output(&source);
+        return write_output(&source, arguments.out.as_ref());
     }
 
     let mut document = parsed.output;
     for tune in document.tunes_mut() {
         transpose_tune(tune, &request, arguments.spelling)?;
     }
-    write_output(&document.to_abc())
+    write_output(&document.to_abc(), arguments.out.as_ref())
 }
 
 /// Converts exact half-step notation into its integral semitone equivalent.
@@ -357,11 +360,16 @@ fn read_source(path: &PathBuf) -> Result<String, String> {
     }
 }
 
-/// Writes all output bytes and reports broken pipes or other I/O errors.
-fn write_output(source: &str) -> Result<(), String> {
-    io::stdout()
-        .write_all(source.as_bytes())
-        .map_err(|error| format!("could not write standard output: {error}"))
+/// Writes all output bytes to the selected file or standard output.
+fn write_output(source: &str, path: Option<&PathBuf>) -> Result<(), String> {
+    if let Some(path) = path {
+        fs::write(path, source)
+            .map_err(|error| format!("could not write {}: {error}", path.display()))
+    } else {
+        io::stdout()
+            .write_all(source.as_bytes())
+            .map_err(|error| format!("could not write standard output: {error}"))
+    }
 }
 
 /// Transposes one tune using its first structured key field as the source key.

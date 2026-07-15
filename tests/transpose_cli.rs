@@ -18,6 +18,7 @@ use abc_parser::FieldValue;
 use abc_parser::Line;
 use abc_parser::ToAbc;
 use abc_parser::parse_recovering;
+use std::fs;
 use std::process::Command;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
@@ -45,7 +46,23 @@ fn help_describes_transposition_and_spelling_options() {
     assert!(help.contains("--semitones <N>"), "{help}");
     assert!(help.contains("--steps <N>"), "{help}");
     assert!(help.contains("--prefer-flats <BOOL>"), "{help}");
+    assert!(help.contains("--out <FILE>"), "{help}");
     assert!(help.contains("Possible values:"), "{help}");
+}
+
+#[test]
+fn out_writes_the_transposed_document_to_a_file() {
+    let path =
+        std::env::temp_dir().join(format!("abc-transpose-output-{}.abc", std::process::id()));
+    let output = run(&["--semitones", "1", "--out", path.to_str().unwrap()]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+
+    let source = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    let reparsed = parse_recovering(&source);
+    assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
+    assert_eq!(reparsed.output.tunes().count(), 2);
 }
 
 #[test]
