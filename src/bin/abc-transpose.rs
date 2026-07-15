@@ -26,19 +26,21 @@ use abc_parser::EmitOptions;
 use abc_parser::Field;
 use abc_parser::FieldValue;
 use abc_parser::Fraction;
+use abc_parser::IntoOwnedAst;
 use abc_parser::KeyAccidental;
 use abc_parser::KeySignature;
 use abc_parser::KeyTonic;
 use abc_parser::Line;
 use abc_parser::MusicElement;
 use abc_parser::NoteLengthStyle;
+use abc_parser::ParserOptions;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
+use abc_parser::parse;
 use abc_parser::parse_field;
 use abc_parser::parse_music_line;
-use abc_parser::parse_recovering;
 use clap::ArgGroup;
 use clap::Parser;
 use clap::ValueEnum;
@@ -310,7 +312,7 @@ fn main() -> ExitCode {
 fn run(arguments: &Arguments) -> Result<(), String> {
     let request = arguments.request();
     let source = read_source(&arguments.input)?;
-    let parsed = parse_recovering(&source);
+    let parsed = parse(source.as_str(), ParserOptions::default());
     let input_name = if arguments.input.as_os_str() == "-" {
         "<stdin>".to_owned()
     } else {
@@ -340,7 +342,12 @@ fn run(arguments: &Arguments) -> Result<(), String> {
         return write_output(&source, arguments.out.as_ref());
     }
 
-    let mut document = parsed.output;
+    let parsed_document = parsed
+        .output
+        .ok_or_else(|| "parser did not produce a document".to_owned())?;
+    let mut document = parsed_document
+        .into_owned(source.as_str())
+        .map_err(|error| format!("could not resolve parsed source text: {error}"))?;
     for tune in document.tunes_mut() {
         transpose_tune(tune, &request, arguments.spelling, arguments.octave)?;
     }
@@ -837,10 +844,11 @@ fn explicit_key_accidental(value: &str) -> Option<(PitchClass, Offset)> {
         return None;
     }
     let report = parse_music_line(value);
-    if !report.is_valid() || report.output.len() != 1 {
+    let output = report.output.as_ref()?;
+    if !report.is_valid() || output.len() != 1 {
         return None;
     }
-    let MusicElement::Note(note) = &report.output[0].value else {
+    let MusicElement::Note(note) = &output[0].value else {
         return None;
     };
     if note.length.numerator != 1 || note.length.denominator != 1 {
@@ -1015,8 +1023,10 @@ mod tests {
     use super::parse_key;
     use super::parse_steps;
     use super::transpose_tune;
+    use abc_parser::IntoOwnedAst;
+    use abc_parser::ParserOptions;
     use abc_parser::ToAbc;
-    use abc_parser::parse_recovering;
+    use abc_parser::parse;
     use clap::Parser;
 
     /// Parses and transposes the only tune in a compact fixture.
@@ -1040,7 +1050,11 @@ mod tests {
         spelling: SpellingPreference,
         octave: i16,
     ) -> String {
-        let mut document = parse_recovering(source).output;
+        let mut document = parse(source, ParserOptions::default())
+            .output
+            .unwrap()
+            .into_owned(source)
+            .unwrap();
         {
             let mut tunes = document.tunes_mut();
             let tune = tunes.next().unwrap();

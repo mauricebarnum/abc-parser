@@ -15,9 +15,14 @@
 //! End-to-end tests for the standalone ABC transposition command.
 
 use abc_parser::FieldValue;
+use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
+use abc_parser::OwnedDocument;
+use abc_parser::ParseReport;
+use abc_parser::ParserOptions;
 use abc_parser::ToAbc;
-use abc_parser::parse_recovering;
+use abc_parser::parse;
+use chumsky::span::SimpleSpan;
 use std::fs;
 use std::io::Write;
 use std::process::Command;
@@ -25,6 +30,17 @@ use std::process::Stdio;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 const KITCHEN_SINK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_kitchen_sink.abc");
+
+fn parse_owned(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>, SimpleSpan<usize>> {
+    let report = parse(source, ParserOptions::default());
+    ParseReport {
+        output: report
+            .output
+            .map(|document| document.into_owned(source).unwrap()),
+        errors: report.errors,
+        warnings: report.warnings,
+    }
+}
 
 /// Runs the built command with the repository fixture as input.
 fn run(arguments: &[&str]) -> std::process::Output {
@@ -84,9 +100,9 @@ fn out_writes_the_transposed_document_to_a_file() {
 
     let source = fs::read_to_string(&path).unwrap();
     fs::remove_file(path).unwrap();
-    let reparsed = parse_recovering(&source);
+    let reparsed = parse_owned(&source);
     assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
-    assert_eq!(reparsed.output.tunes().count(), 2);
+    assert_eq!(reparsed.output.as_ref().unwrap().tunes().count(), 2);
 }
 
 #[test]
@@ -125,7 +141,7 @@ fn transposition_defaults_to_note_length_shorthand() {
     assert!(explicit.contains("B/2A/2|G>AB g2g/2a/2|"), "{explicit}");
 
     for output in [shorthand, explicit] {
-        let reparsed = parse_recovering(&output);
+        let reparsed = parse_owned(&output);
         assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
     }
 }
@@ -149,9 +165,9 @@ fn half_a_step_matches_one_semitone_and_emits_valid_abc() {
     assert_eq!(steps.stdout, semitone.stdout);
 
     let source = String::from_utf8(steps.stdout).unwrap();
-    let reparsed = parse_recovering(&source);
+    let reparsed = parse_owned(&source);
     assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
-    assert_eq!(reparsed.output.tunes().count(), 2);
+    assert_eq!(reparsed.output.as_ref().unwrap().tunes().count(), 2);
 }
 
 #[test]
@@ -159,10 +175,10 @@ fn destination_key_is_applied_independently_to_every_tune() {
     let output = run(&["--key", "Dm"]);
     assert!(output.status.success());
     let source = String::from_utf8(output.stdout).unwrap();
-    let reparsed = parse_recovering(&source);
+    let reparsed = parse_owned(&source);
     assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
 
-    for tune in reparsed.output.tunes() {
+    for tune in reparsed.output.as_ref().unwrap().tunes() {
         let key = tune
             .lines
             .iter()
@@ -184,7 +200,7 @@ fn spelling_preference_values_are_accepted_by_the_command() {
         let output = run(&["--semitones", "1", "--prefer-flats", value]);
         assert!(output.status.success(), "{value}: {output:?}");
         let source = String::from_utf8(output.stdout).unwrap();
-        let reparsed = parse_recovering(&source);
+        let reparsed = parse_owned(&source);
         assert!(reparsed.is_valid(), "{value}: {:#?}", reparsed.errors);
     }
 }

@@ -21,7 +21,9 @@
 
 use chumsky::Parser;
 use chumsky::error::Rich;
+use chumsky::input::ValueInput;
 use chumsky::span::SimpleSpan;
+use chumsky::span::Span as ChumskySpan;
 use std::fmt;
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -32,14 +34,10 @@ mod source;
 
 pub use combinators::chord_parser;
 pub use combinators::directive_parser;
-pub use combinators::document_parser;
-pub use combinators::document_parser_with_options;
 pub use combinators::field_parser;
 pub use combinators::line_parser;
 pub use combinators::music_element_parser;
 pub use combinators::music_line_parser;
-pub use combinators::parse_input;
-pub use combinators::parse_input_with_options;
 pub use emit::AbcEmitter;
 pub use emit::EmitOptions;
 pub use emit::NoteLengthStyle;
@@ -790,28 +788,43 @@ pub enum ErrorKind {
 
 /// A recoverable syntax error with an exact source location.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParseError {
+pub struct ParseError<S = Span> {
     /// Error category suitable for programmatic handling.
     pub kind: ErrorKind,
     /// Human-readable explanation.
     pub message: String,
-    /// Half-open byte range in the original input.
-    pub span: Span,
+    /// Half-open native span in the original input.
+    pub span: S,
 }
 
-impl fmt::Display for ParseError {
+impl<S> fmt::Display for ParseError<S>
+where
+    S: ChumskySpan,
+    S::Offset: fmt::Display,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
             "{} at {}..{}",
-            self.message, self.span.start, self.span.end
+            self.message,
+            self.span.start(),
+            self.span.end()
         )
     }
 }
 
-impl std::error::Error for ParseError {}
+impl<S> std::error::Error for ParseError<S>
+where
+    S: ChumskySpan + fmt::Debug,
+    S::Offset: fmt::Display,
+{
+}
 
-impl ParseError {
+impl<S> ParseError<S>
+where
+    S: ChumskySpan,
+    S::Offset: fmt::Display,
+{
     /// Renders this error with line, column, and source context when available.
     ///
     /// ```
@@ -829,55 +842,71 @@ impl ParseError {
     /// ```
     ///
     /// Falls back to [`Display`](fmt::Display) when `resolver` no longer has the
-    /// complete source or the stored byte span is invalid for that source.
+    /// complete source or the stored native span is invalid for that source.
     pub fn diagnostic<R>(&self, resolver: &R) -> String
     where
-        R: SourceResolver<SimpleSpan<usize>> + ?Sized,
+        R: SourceResolver<S> + ?Sized,
     {
-        resolver.full_source().map_or_else(
-            || self.to_string(),
-            |source| {
-                render_diagnostic(&self.message, &self.span, &source)
-                    .unwrap_or_else(|| self.to_string())
-            },
-        )
+        resolver
+            .full_source()
+            .zip(resolver.diagnostic_range(&self.span))
+            .map_or_else(
+                || self.to_string(),
+                |(source, range)| {
+                    render_diagnostic(&self.message, &range, &source)
+                        .unwrap_or_else(|| self.to_string())
+                },
+            )
     }
 }
 
 /// A non-fatal parser advisory with an exact source location.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParseWarning {
+pub struct ParseWarning<S = Span> {
     /// Diagnostic category suitable for programmatic handling.
     pub kind: ErrorKind,
     /// Human-readable explanation.
     pub message: String,
-    /// Half-open byte range in the original input.
-    pub span: Span,
+    /// Half-open native span in the original input.
+    pub span: S,
 }
 
-impl fmt::Display for ParseWarning {
+impl<S> fmt::Display for ParseWarning<S>
+where
+    S: ChumskySpan,
+    S::Offset: fmt::Display,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
             "{} at {}..{}",
-            self.message, self.span.start, self.span.end
+            self.message,
+            self.span.start(),
+            self.span.end()
         )
     }
 }
 
-impl ParseWarning {
+impl<S> ParseWarning<S>
+where
+    S: ChumskySpan,
+    S::Offset: fmt::Display,
+{
     /// Renders this warning with line, column, and source context when available.
     pub fn diagnostic<R>(&self, resolver: &R) -> String
     where
-        R: SourceResolver<SimpleSpan<usize>> + ?Sized,
+        R: SourceResolver<S> + ?Sized,
     {
-        resolver.full_source().map_or_else(
-            || self.to_string(),
-            |source| {
-                render_diagnostic(&self.message, &self.span, &source)
-                    .unwrap_or_else(|| self.to_string())
-            },
-        )
+        resolver
+            .full_source()
+            .zip(resolver.diagnostic_range(&self.span))
+            .map_or_else(
+                || self.to_string(),
+                |(source, range)| {
+                    render_diagnostic(&self.message, &range, &source)
+                        .unwrap_or_else(|| self.to_string())
+                },
+            )
     }
 }
 
@@ -921,16 +950,16 @@ fn render_diagnostic(message: &str, span: &Span, source: &str) -> Option<String>
 
 /// The syntax tree and every diagnostic produced during recovering parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParseReport<T> {
-    /// Recovered syntax value.
-    pub output: T,
+pub struct ParseReport<T, S = Span> {
+    /// Parsed or recovered syntax value.
+    pub output: Option<T>,
     /// Diagnostics in source order.
-    pub errors: Vec<ParseError>,
+    pub errors: Vec<ParseError<S>>,
     /// Non-fatal advisories in source order.
-    pub warnings: Vec<ParseWarning>,
+    pub warnings: Vec<ParseWarning<S>>,
 }
 
-impl<T> ParseReport<T> {
+impl<T, S> ParseReport<T, S> {
     /// Returns whether parsing completed without diagnostics.
     pub const fn is_valid(&self) -> bool {
         self.errors.is_empty()
@@ -942,37 +971,49 @@ impl<T> ParseReport<T> {
     }
 }
 
-/// Parses a complete ABC document and recovers at physical line boundaries.
+/// Parses a complete ABC document with physical-line error recovery.
 ///
-/// Source spans are always recorded. Callers that do not need them can ignore
-/// the [`Spanned::span`] fields.
-pub fn parse_recovering(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>> {
-    parse_recovering_with_options(source, ParserOptions::default())
-}
-
-/// Parses a complete document with explicit text-retention behavior.
-pub fn parse_recovering_with_options(
-    source: &str,
+/// The returned AST uses the input's native spans and retains source-derived
+/// text as [`SourceText`] values. Use [`IntoOwnedAst::into_owned`] with the
+/// original input to create a standalone document.
+///
+/// # Examples
+///
+/// ```
+/// use abc_parser::IntoOwnedAst;
+/// use abc_parser::ParserOptions;
+/// use abc_parser::parse;
+///
+/// let source = "X:1\nT:Example\nK:C\nCDEF |\n";
+/// let report = parse(source, ParserOptions::default());
+/// assert!(report.is_valid());
+/// let document = report.output.unwrap().into_owned(source).unwrap();
+/// assert_eq!(document.tunes().count(), 1);
+/// ```
+pub fn parse<'src, I>(
+    input: I,
     options: ParserOptions,
-) -> ParseReport<OwnedDocument<SimpleSpan<usize>>> {
-    let (result, warning_spans) =
-        combinators::parse_input_with_options_and_warnings(source, options);
+) -> ParseReport<ParsedDocument<I::Span>, I::Span>
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord + fmt::Display,
+{
+    let (result, warning_spans) = combinators::parse_document(input, options);
     let (output, faults) = result.into_output_errors();
-    let output = output
-        .and_then(|document| document.into_owned(source).ok())
-        .unwrap_or_default();
     let mut errors = faults.iter().map(chumsky_error).collect::<Vec<_>>();
-    errors.sort_by_key(|error| (error.span.start, error.span.end));
+    errors.sort_by_key(|error| (error.span.start(), error.span.end()));
     let mut warnings = warning_spans
         .into_iter()
         .map(|span| ParseWarning {
             kind: ErrorKind::MissingReference,
             message: "block parses as music but has no leading information field; treating it as free text"
                 .to_owned(),
-            span: span.start..span.end,
+            span,
         })
         .collect::<Vec<_>>();
-    warnings.sort_by_key(|warning| (warning.span.start, warning.span.end));
+    warnings.sort_by_key(|warning| (warning.span.start(), warning.span.end()));
     ParseReport {
         output,
         errors,
@@ -980,38 +1021,15 @@ pub fn parse_recovering_with_options(
     }
 }
 
-/// Parses a complete ABC document, failing if any syntax error is found.
-///
-/// # Errors
-/// Returns all syntax errors found while recovering through the document.
-pub fn parse(source: &str) -> Result<OwnedDocument<SimpleSpan<usize>>, Vec<ParseError>> {
-    parse_with_options(source, ParserOptions::default())
-}
-
-/// Parses a complete document with explicit text-retention behavior.
-///
-/// # Errors
-/// Returns all syntax errors found while recovering through the document.
-pub fn parse_with_options(
-    source: &str,
-    options: ParserOptions,
-) -> Result<OwnedDocument<SimpleSpan<usize>>, Vec<ParseError>> {
-    let report = parse_recovering_with_options(source, options);
-    if report.errors.is_empty() {
-        Ok(report.output)
-    } else {
-        Err(report.errors)
-    }
-}
-
 /// Parses one physical ABC line.
 pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> {
     let source = source.trim_end_matches(['\r', '\n']);
     let (output, faults) = line_parser().parse(source).into_output_errors();
-    let output = output
-        .and_then(|line| line.value.into_owned(source).ok())
-        .unwrap_or(Line::Blank);
-    let errors = faults.iter().map(chumsky_error).collect();
+    let output = output.and_then(|line| line.value.into_owned(source).ok());
+    let errors = faults
+        .iter()
+        .map(|error| chumsky_error_with_offset(error, 0))
+        .collect();
     ParseReport {
         output,
         errors,
@@ -1038,7 +1056,7 @@ pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
                         source.len(),
                     )
                 },
-                |error| chumsky_error(&error),
+                |error| chumsky_error_with_offset(&error, 0),
             )
         })?
         .into_owned(source)
@@ -1064,7 +1082,7 @@ pub fn parse_field(source: &str) -> Result<Field, ParseError> {
         .map_err(|errors| {
             errors.into_iter().next().map_or_else(
                 || error(ErrorKind::InvalidField, "invalid field", 0, source.len()),
-                |error| chumsky_error(&error),
+                |error| chumsky_error_with_offset(&error, 0),
             )
         })?
         .into_owned(source)
@@ -1089,7 +1107,7 @@ pub fn parse_chord(source: &str) -> Result<Chord, ParseError> {
         .map_err(|errors| {
             errors.into_iter().next().map_or_else(
                 || error(ErrorKind::InvalidMusic, "invalid chord", 0, source.len()),
-                |error| chumsky_error(&error),
+                |error| chumsky_error_with_offset(&error, 0),
             )
         })
 }
@@ -1100,12 +1118,16 @@ pub fn parse_music_line(
 ) -> ParseReport<Vec<Spanned<MusicElement<String>, SimpleSpan<usize>>>> {
     let source = source.trim_end_matches(['\r', '\n']);
     let (output, faults) = music_line_parser().parse(source).into_output_errors();
-    let output = output
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| item.into_owned(source).ok())
+    let output = output.map(|items| {
+        items
+            .into_iter()
+            .filter_map(|item| item.into_owned(source).ok())
+            .collect()
+    });
+    let errors = faults
+        .iter()
+        .map(|error| chumsky_error_with_offset(error, 0))
         .collect();
-    let errors = faults.iter().map(chumsky_error).collect();
     ParseReport {
         output,
         errors,
@@ -1113,8 +1135,15 @@ pub fn parse_music_line(
     }
 }
 
-fn chumsky_error(error: &Rich<'_, char, SimpleSpan<usize>>) -> ParseError {
-    chumsky_error_with_offset(error, 0)
+fn chumsky_error<S>(error: &Rich<'_, char, S>) -> ParseError<S>
+where
+    S: Clone,
+{
+    ParseError {
+        kind: ErrorKind::InvalidMusic,
+        message: rich_error_message(error),
+        span: error.span().clone(),
+    }
 }
 
 /// Converts a line-local Chumsky error to a document-relative parse error.
@@ -1131,7 +1160,7 @@ fn chumsky_error_with_offset(
 }
 
 /// Formats Chumsky's reason and production contexts without internal spans.
-fn rich_error_message(error: &Rich<'_, char, SimpleSpan<usize>>) -> String {
+fn rich_error_message<S>(error: &Rich<'_, char, S>) -> String {
     let mut message = error
         .reason()
         .to_string()
@@ -1210,8 +1239,9 @@ mod tests {
         let report =
             parse_music_line("^/2c'3/2 z/ X4 |: [1,3-5 (3:2:3 !trill! \"^text\" C>>D.-D &");
         assert!(report.is_valid(), "{:#?}", report.errors);
+        let output = report.output.as_ref().unwrap();
         assert!(matches!(
-            report.output[0].value,
+            output[0].value,
             MusicElement::Note(Note {
                 pitch: Pitch {
                     class: PitchClass::C,
@@ -1227,14 +1257,14 @@ mod tests {
                 }
             })
         ));
-        assert!(report.output.iter().any(|item| matches!(
+        assert!(output.iter().any(|item| matches!(
             item.value,
             MusicElement::Bar(BarLine {
                 kind: BarKind::RepeatStart,
                 ..
             })
         )));
-        assert!(report.output.iter().any(|item| matches!(
+        assert!(output.iter().any(|item| matches!(
             item.value,
             MusicElement::Tuplet(Tuplet {
                 p: 3,
@@ -1243,8 +1273,7 @@ mod tests {
             })
         )));
         assert!(
-            report
-                .output
+            output
                 .iter()
                 .any(|item| matches!(item.value, MusicElement::BrokenRhythm(_)))
         );
@@ -1309,10 +1338,10 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(matches!(
             report.output,
-            Line::Field(Field {
+            Some(Line::Field(Field {
                 value: FieldValue::Unparsed(ref value),
                 ..
-            }) if value == "not-a-length"
+            })) if value == "not-a-length"
         ));
     }
 
@@ -1340,10 +1369,10 @@ mod tests {
             );
             assert!(matches!(
                 report.output,
-                Line::Field(Field {
+                Some(Line::Field(Field {
                     value: FieldValue::Unparsed(_),
                     ..
-                })
+                }))
             ));
         }
     }
@@ -1371,7 +1400,7 @@ mod tests {
             );
         }
 
-        let document = parse_recovering("X:1\nK:C\n[CEG\nC |\n");
+        let document = parse("X:1\nK:C\n[CEG\nC |\n", ParserOptions::default());
         assert!(!document.is_valid());
         assert!(
             document
@@ -1413,9 +1442,9 @@ mod tests {
 
     #[test]
     fn recovers_on_the_next_line() {
-        let report = parse_recovering("X:1\nK:C\n[CEG\nCDEF |\n");
+        let report = parse("X:1\nK:C\n[CEG\nCDEF |\n", ParserOptions::default());
         assert_eq!(report.errors.len(), 1);
-        let tune = report.output.tunes().next().unwrap();
+        let tune = report.output.as_ref().unwrap().tunes().next().unwrap();
         assert_eq!(tune.lines.len(), 4);
         assert!(matches!(tune.lines[3].value, Line::Music(_)));
     }
@@ -1426,7 +1455,7 @@ mod tests {
         for index in 0..original.len() {
             let mut mutated = original.to_owned();
             mutated.replace_range(index..=index, "@");
-            let report = parse_recovering(&mutated);
+            let report = parse(mutated.as_str(), ParserOptions::default());
             assert!(
                 report
                     .errors

@@ -1419,24 +1419,12 @@ fn push_free_text<S>(
     });
 }
 
-/// Builds a complete-document parser using default text-retention options.
-pub fn document_parser<'src, I>()
--> impl Parser<'src, I, ParsedDocument<I::Span>, Extra<'src, I>> + Clone
-where
-    I: ValueInput<'src, Token = char>,
-    I::Span: Clone,
-    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
-    <I::Span as ChumskySpan>::Offset: Ord,
-{
-    document_parser_with_options(ParserOptions::default())
-}
-
 /// Builds a complete-document parser with explicit text-retention behavior.
 #[allow(
     clippy::too_many_lines,
     reason = "the document state machine keeps context-sensitive recovery in one Chumsky validation pass"
 )]
-pub fn document_parser_with_options<'src, I>(
+fn document_parser<'src, I>(
     options: ParserOptions,
 ) -> impl Parser<'src, I, ParsedDocument<I::Span>, Extra<'src, I>> + Clone
 where
@@ -1705,38 +1693,8 @@ where
         })
 }
 
-/// Parses an ABC document from any by-value character Input.
-///
-/// The AST uses the input's native span type and represents source-derived text
-/// as `SourceText::Span`.
-pub fn parse_input<'src, I>(
-    input: I,
-) -> ParseResult<ParsedDocument<I::Span>, Rich<'src, char, I::Span>>
-where
-    I: ValueInput<'src, Token = char>,
-    I::Span: Clone,
-    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
-    <I::Span as ChumskySpan>::Offset: Ord,
-{
-    document_parser().parse(input)
-}
-
-/// Parses an ABC document with explicit text-retention behavior.
-pub fn parse_input_with_options<'src, I>(
-    input: I,
-    options: ParserOptions,
-) -> ParseResult<ParsedDocument<I::Span>, Rich<'src, char, I::Span>>
-where
-    I: ValueInput<'src, Token = char>,
-    I::Span: Clone,
-    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
-    <I::Span as ChumskySpan>::Offset: Ord,
-{
-    document_parser_with_options(options).parse(input)
-}
-
 /// Parses a document while retaining advisory block-classification spans.
-pub(super) fn parse_input_with_options_and_warnings<'src, I>(
+pub(super) fn parse_document<'src, I>(
     input: I,
     options: ParserOptions,
 ) -> DocumentParseWithWarnings<'src, I>
@@ -1747,6 +1705,6 @@ where
     <I::Span as ChumskySpan>::Offset: Ord,
 {
     let mut warnings = WarningState::default();
-    let result = document_parser_with_options(options).parse_with_state(input, &mut warnings);
+    let result = document_parser(options).parse_with_state(input, &mut warnings);
     (result, warnings.0)
 }

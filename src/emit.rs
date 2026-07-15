@@ -158,20 +158,32 @@ impl Write for AbcEmitter<'_> {
 /// quoted values must not contain an unescaped `"` delimiter.
 ///
 /// ```
-/// use abc_parser::ToAbc;
 /// use abc_parser::EmitOptions;
+/// use abc_parser::IntoOwnedAst;
 /// use abc_parser::NoteLengthStyle;
+/// use abc_parser::ParserOptions;
+/// use abc_parser::ToAbc;
 /// use abc_parser::parse;
 ///
-/// let document = parse("X:1\nM:2+3/8\nK:C\nCDEF |\n").unwrap();
+/// let source = "X:1\nM:2+3/8\nK:C\nCDEF |\n";
+/// let document = parse(source, ParserOptions::default())
+///     .output
+///     .unwrap()
+///     .into_owned(source)
+///     .unwrap();
 /// let source = document.to_abc();
 /// assert!(source.contains("M:2+3/8"));
 /// assert!(source.contains("CDEF |"));
 ///
 /// let options = EmitOptions::new()
 ///     .with_note_length_style(NoteLengthStyle::ExplicitDenominator);
-/// assert_eq!(parse("X:1\nK:C\nA/\n").unwrap().to_abc_with_options(options),
-///            "X:1\nK:C\nA/2");
+/// let source = "X:1\nK:C\nA/\n";
+/// let document = parse(source, ParserOptions::default())
+///     .output
+///     .unwrap()
+///     .into_owned(source)
+///     .unwrap();
+/// assert_eq!(document.to_abc_with_options(options), "X:1\nK:C\nA/2");
 /// ```
 pub trait ToAbc {
     /// Writes this node as ABC notation.
@@ -1145,6 +1157,8 @@ fn write_repeated(character: char, count: usize, output: &mut dyn Write) -> fmt:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IntoOwnedAst;
+    use crate::ParserOptions;
     use crate::parse;
     use crate::parse_field;
     use crate::parse_music_line;
@@ -1180,7 +1194,13 @@ mod tests {
         let source = r"(&C&)\$$y";
         let parsed = parse_music_line(source);
         assert!(parsed.is_valid(), "{:#?}", parsed.errors);
-        let emitted = parsed.output.iter().map(ToAbc::to_abc).collect::<String>();
+        let emitted = parsed
+            .output
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(ToAbc::to_abc)
+            .collect::<String>();
         assert_eq!(emitted, source);
     }
 
@@ -1281,7 +1301,12 @@ mod tests {
 
     #[test]
     fn configured_emitter_reaches_nested_music_lengths() {
-        let document = parse("X:1\nK:C\nA/ z// [B/z//]/// {c/}\n").unwrap();
+        let source = "X:1\nK:C\nA/ z// [B/z//]/// {c/}\n";
+        let document = parse(source, ParserOptions::default())
+            .output
+            .unwrap()
+            .into_owned(source)
+            .unwrap();
         let explicit =
             EmitOptions::new().with_note_length_style(NoteLengthStyle::ExplicitDenominator);
         assert_eq!(document.to_abc(), "X:1\nK:C\nA/ z// [B/z//]/// {c/}");

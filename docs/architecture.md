@@ -9,21 +9,12 @@ input's native `Input::Span`: `&str` therefore reports UTF-8 byte offsets while
 
 ## Entry points
 
-The primary complete-document APIs are:
-
-- [`document_parser`] constructs an `impl Parser` that callers can compose with
-  other Chumsky parsers.
-- [`parse_input`] runs that parser and returns Chumsky's native `ParseResult`
-  with `Rich<char, I::Span>` errors.
-- [`document_parser_with_options`] and [`parse_input_with_options`] accept
-  [`ParserOptions`] controlling independent free- and typeset-text retention.
-
-- [`parse_recovering`] always returns a [`ParseReport<OwnedDocument>`]. Its
-  [`ParseReport::output`] contains everything recovered after faults and
-  [`ParseReport::errors`] contains source-ordered errors. Advisory
-  [`ParseReport::warnings`] do not make the report invalid.
-- [`parse`] uses the same recovery pass, but returns the AST only when no errors
-  were found.
+[`parse`] is the complete-document API. It accepts any compatible character
+input plus [`ParserOptions`] and returns a [`ParseReport`] whose optional output
+is a source-backed [`ParsedDocument`]. Errors and warnings use the input's native
+span type. Recovery normally supplies output alongside diagnostics; an
+unrecoverable failure returns no output. Advisory [`ParseReport::warnings`] do
+not make the report invalid.
 
 Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 [`music_element_parser`], [`field_parser`], [`directive_parser`], and
@@ -33,8 +24,8 @@ Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 
 ```mermaid
 flowchart TD
-    source["ValueInput Token=char"] --> entry{Parser constructor}
-    entry -->|document| recovering[document_parser]
+    source["ValueInput Token=char"] --> entry{Public entry point}
+    entry -->|document| recovering[parse]
     entry -->|physical line| line[line_parser]
     entry -->|music fragment| music[music_line_parser]
     entry -->|field/directive/chord| partial[Partial parser combinators]
@@ -65,7 +56,8 @@ contains the same information for plain rustdoc viewers.
 
 ## Complete-document flow
 
-[`document_parser`] composes the source at physical-line granularity:
+The private complete-document parser composes the source at physical-line
+granularity:
 
 1. Empty lines divide the input into blocks and terminate tunes.
 2. Leading `%` comments are transparent to classification. An ASCII letter
@@ -93,8 +85,8 @@ grace group, decoration, or annotation.
 file-level [`TypesetText`], comments, and stylesheet directives after the
 optional initial header. A tune ends at an empty line or EOF. This prevents
 letters in inter-tune prose from being interpreted as notes. A fieldless block
-always remains free text; if its deciding line is valid music,
-[`parse_recovering`] reports an advisory warning.
+always remains free text; if its deciding line is valid music, [`parse`] reports
+an advisory warning.
 
 `%%text` and `%%center` become typed text nodes. `%%begintext` through
 `%%endtext` becomes one block node; each standard body line must begin with
@@ -188,8 +180,9 @@ source can contain the same shape, so detection cannot prove provenance.
 
 ```mermaid
 flowchart LR
-    input[Input source] --> parse_input
-    parse_input --> parsed[ParsedDocument SourceText spans]
+    input[Input source] --> parse
+    parse --> report[ParseReport]
+    report --> parsed[ParsedDocument SourceText spans]
     parsed -->|source resolver| exact[OwnedDocument exact strings]
     parsed -->|PlaceholderResolver| placeholders[OwnedDocument reference placeholders]
     exact -->|ToAbc| emitted[Canonical ABC source]
@@ -290,6 +283,6 @@ order. Recovery maintains these invariants:
 - an unclosed delimited music construct consumes no later physical line;
 - a later tune can still be discovered after faults in an earlier tune.
 
-Callers that require only valid input should use [`parse`]. Interactive tools
-usually want [`parse_recovering`] and should render both its partial AST and its
-diagnostics.
+All complete-document callers use [`parse`]. Batch tools may reject reports with
+errors, while interactive tools can inspect recovered output and render every
+diagnostic.

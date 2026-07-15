@@ -3,10 +3,10 @@
 ## Summary
 
 The parser will retain source-derived text as native input spans while keeping
-semantic values directly usable. `parse_input` will return a span-backed AST and
-native Chumsky errors. `IntoOwnedAst::into_owned` will materialize a standalone
-tree through either an exact source resolver or `PlaceholderResolver`. No
-`parse_owned` convenience API will be added.
+semantic values directly usable. `parse` returns a `ParseReport` containing a
+span-backed AST and native-span diagnostics. `IntoOwnedAst::into_owned`
+materializes a standalone tree through either an exact source resolver or
+`PlaceholderResolver`. No `parse_owned` convenience API is provided.
 
 ## Public model
 

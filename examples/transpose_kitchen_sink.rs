@@ -22,21 +22,23 @@ use abc_parser::ChordMember;
 use abc_parser::Document;
 use abc_parser::Field;
 use abc_parser::FieldValue;
+use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
 use abc_parser::MusicElement;
 use abc_parser::Note;
+use abc_parser::ParserOptions;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
-use abc_parser::parse_recovering;
+use abc_parser::parse;
 use std::process::ExitCode;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 
 /// Parses, prints, transposes, and reprints the bundled ABC fixture.
 fn main() -> ExitCode {
-    let report = parse_recovering(KITCHEN_SINK);
+    let report = parse(KITCHEN_SINK, ParserOptions::default());
     for error in &report.errors {
         eprintln!("{error}");
     }
@@ -47,7 +49,13 @@ fn main() -> ExitCode {
     println!("=== ORIGINAL AST ===");
     println!("{:#?}", report.output);
 
-    let mut transposed = report.output;
+    let Some(document) = report.output else {
+        eprintln!("parser did not produce a document");
+        return ExitCode::FAILURE;
+    };
+    let mut transposed = document
+        .into_owned(KITCHEN_SINK)
+        .expect("the original source resolves its parser spans");
     transpose_document(&mut transposed);
 
     println!("=== TRANSPOSED UP ONE DIATONIC STEP ===");

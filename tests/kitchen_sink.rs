@@ -17,17 +17,29 @@
 use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
 use abc_parser::OwnedDocument;
+use abc_parser::ParseReport;
+use abc_parser::ParserOptions;
 use abc_parser::PlaceholderResolver;
 use abc_parser::Spanned;
 use abc_parser::ToAbc;
 use abc_parser::is_source_reference_placeholder;
-use abc_parser::parse_input;
-use abc_parser::parse_recovering;
+use abc_parser::parse;
 use chumsky::span::SimpleSpan;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 
 type OwnedLine = Spanned<Line<SimpleSpan<usize>, String>, SimpleSpan<usize>>;
+
+fn parse_owned(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>, SimpleSpan<usize>> {
+    let report = parse(source, ParserOptions::default());
+    ParseReport {
+        output: report
+            .output
+            .map(|document| document.into_owned(source).unwrap()),
+        errors: report.errors,
+        warnings: report.warnings,
+    }
+}
 
 /// Replaces physical-line and music-element locations with a common sentinel.
 fn erase_source_locations(document: &mut OwnedDocument<SimpleSpan<usize>>) {
@@ -56,14 +68,14 @@ fn erase_line_locations(line: &mut OwnedLine) {
 
 #[test]
 fn parses_kitchen_sink_with_spans() {
-    let report = parse_recovering(KITCHEN_SINK);
+    let report = parse_owned(KITCHEN_SINK);
     assert!(report.errors.is_empty(), "{:#?}", report.errors);
-    assert_eq!(report.output.tunes().count(), 2);
-    for line in report
-        .output
+    let document = report.output.as_ref().unwrap();
+    assert_eq!(document.tunes().count(), 2);
+    for line in document
         .header
         .iter()
-        .chain(report.output.tunes().flat_map(|tune| &tune.lines))
+        .chain(document.tunes().flat_map(|tune| &tune.lines))
     {
         assert!(line.span.end <= KITCHEN_SINK.len());
         assert!(line.span.start <= line.span.end);
@@ -76,12 +88,12 @@ fn mutations_report_bounded_faults_and_keep_later_tunes() {
         let start = KITCHEN_SINK.find(needle).unwrap();
         let mut mutant = KITCHEN_SINK.to_owned();
         mutant.replace_range(start..=start, "@");
-        let report = parse_recovering(&mutant);
+        let report = parse_owned(&mutant);
         assert!(
             !report.errors.is_empty(),
             "mutation of {needle} was accepted"
         );
-        assert_eq!(report.output.tunes().count(), 2);
+        assert_eq!(report.output.as_ref().unwrap().tunes().count(), 2);
         assert!(
             report
                 .errors
@@ -93,30 +105,30 @@ fn mutations_report_bounded_faults_and_keep_later_tunes() {
 
 #[test]
 fn chumsky_document_parser_accepts_string_and_character_inputs() {
-    let string_result = parse_input(KITCHEN_SINK);
+    let string_result = parse(KITCHEN_SINK, ParserOptions::default());
     assert!(
-        !string_result.has_errors(),
+        string_result.errors.is_empty(),
         "{:#?}",
-        string_result.errors().collect::<Vec<_>>()
+        string_result.errors
     );
-    assert_eq!(string_result.output().unwrap().tunes().count(), 2);
+    assert_eq!(string_result.output.as_ref().unwrap().tunes().count(), 2);
     let string_owned = string_result
-        .into_output()
+        .output
         .unwrap()
         .into_owned(KITCHEN_SINK)
         .unwrap();
     assert_eq!(string_owned.tunes().count(), 2);
 
     let characters: Vec<char> = KITCHEN_SINK.chars().collect();
-    let character_result = parse_input(characters.as_slice());
+    let character_result = parse(characters.as_slice(), ParserOptions::default());
     assert!(
-        !character_result.has_errors(),
+        character_result.errors.is_empty(),
         "{:#?}",
-        character_result.errors().collect::<Vec<_>>()
+        character_result.errors
     );
-    assert_eq!(character_result.output().unwrap().tunes().count(), 2);
+    assert_eq!(character_result.output.as_ref().unwrap().tunes().count(), 2);
     let character_owned = character_result
-        .into_output()
+        .output
         .unwrap()
         .into_owned(characters.as_slice())
         .unwrap();
@@ -125,7 +137,9 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
 
 #[test]
 fn document_can_be_detached_without_retaining_the_source() {
-    let parsed = parse_input(KITCHEN_SINK).into_output().unwrap();
+    let parsed = parse(KITCHEN_SINK, ParserOptions::default())
+        .output
+        .unwrap();
     let detached = parsed.into_owned(&PlaceholderResolver).unwrap();
     let first_title = detached
         .tunes()
@@ -147,19 +161,19 @@ fn document_can_be_detached_without_retaining_the_source() {
 
 #[test]
 fn emitted_kitchen_sink_parses_as_a_complete_document() {
-    let parsed = parse_recovering(KITCHEN_SINK);
+    let parsed = parse_owned(KITCHEN_SINK);
     assert!(parsed.is_valid());
 
-    let emitted = parsed.output.to_abc();
-    let reparsed = parse_recovering(&emitted);
+    let emitted = parsed.output.as_ref().unwrap().to_abc();
+    let reparsed = parse_owned(&emitted);
 
     assert!(reparsed.errors.is_empty(), "{:#?}", reparsed.errors);
     assert!(emitted.contains("M:4/4"));
     assert!(emitted.contains("[CEG]4"));
     assert!(emitted.contains("|: CDEF GABc | cBAG FEDC :|"));
 
-    let mut expected = parsed.output;
-    let mut actual = reparsed.output;
+    let mut expected = parsed.output.unwrap();
+    let mut actual = reparsed.output.unwrap();
     erase_source_locations(&mut expected);
     erase_source_locations(&mut actual);
     assert_eq!(actual, expected);

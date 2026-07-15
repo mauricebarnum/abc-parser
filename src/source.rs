@@ -39,6 +39,7 @@ use chumsky::span::SimpleSpan;
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt;
+use std::ops::Range;
 
 /// Text retained from source or synthesized while parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +68,15 @@ pub trait SourceResolver<S> {
     /// display surrounding source. Resolvers without the complete source may
     /// retain the default implementation.
     fn full_source(&self) -> Option<Cow<'_, str>> {
+        None
+    }
+
+    /// Converts a native span to byte offsets in [`Self::full_source`].
+    ///
+    /// Diagnostic rendering uses this to support sources whose native offsets
+    /// are not UTF-8 byte offsets. Resolvers without a complete source may
+    /// retain the default implementation.
+    fn diagnostic_range(&self, _span: &S) -> Option<Range<usize>> {
         None
     }
 }
@@ -136,6 +146,10 @@ impl SourceResolver<SimpleSpan<usize>> for str {
     fn full_source(&self) -> Option<Cow<'_, str>> {
         Some(Cow::Borrowed(self))
     }
+
+    fn diagnostic_range(&self, span: &SimpleSpan<usize>) -> Option<Range<usize>> {
+        self.get(span.start..span.end).map(|_| span.start..span.end)
+    }
 }
 
 impl SourceResolver<SimpleSpan<usize>> for [char] {
@@ -150,6 +164,53 @@ impl SourceResolver<SimpleSpan<usize>> for [char] {
 
     fn full_source(&self) -> Option<Cow<'_, str>> {
         Some(Cow::Owned(self.iter().collect()))
+    }
+
+    fn diagnostic_range(&self, span: &SimpleSpan<usize>) -> Option<Range<usize>> {
+        if span.start > span.end || span.end > self.len() {
+            return None;
+        }
+        let start = self[..span.start]
+            .iter()
+            .map(|character| character.len_utf8())
+            .sum();
+        let length = self[span.start..span.end]
+            .iter()
+            .map(|character| character.len_utf8())
+            .sum::<usize>();
+        Some(start..start + length)
+    }
+}
+
+impl SourceResolver<Range<usize>> for str {
+    type Error = ResolveError;
+
+    fn resolve<'src>(&'src self, span: &Range<usize>) -> Result<Cow<'src, str>, Self::Error> {
+        self.resolve(&SimpleSpan::from(span.clone()))
+    }
+
+    fn full_source(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Borrowed(self))
+    }
+
+    fn diagnostic_range(&self, span: &Range<usize>) -> Option<Range<usize>> {
+        self.get(span.clone()).map(|_| span.clone())
+    }
+}
+
+impl SourceResolver<Range<usize>> for [char] {
+    type Error = ResolveError;
+
+    fn resolve<'src>(&'src self, span: &Range<usize>) -> Result<Cow<'src, str>, Self::Error> {
+        self.resolve(&SimpleSpan::from(span.clone()))
+    }
+
+    fn full_source(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Owned(self.iter().collect()))
+    }
+
+    fn diagnostic_range(&self, span: &Range<usize>) -> Option<Range<usize>> {
+        SourceResolver::<SimpleSpan<usize>>::diagnostic_range(self, &SimpleSpan::from(span.clone()))
     }
 }
 
