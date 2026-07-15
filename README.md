@@ -4,6 +4,12 @@ A source-spanned, error-recovering parser for ABC music notation 2.1. The crate
 offers whole-file recovering parsing as well as entry points for fields,
 directives, chords, and individual music lines.
 
+The minimum supported Rust version is 1.95.
+
+`cargo doc --no-deps --open` renders the architecture diagrams as inline SVG.
+The generated documentation does not need network access or JavaScript to
+display them.
+
 The primary `parse` API accepts any Chumsky `ValueInput<Token = char>` and
 returns a `ParseReport` using default `ParserOptions`. Use
 `parse_with_options` to configure text retention. The optional source-backed AST

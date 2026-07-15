@@ -17,7 +17,7 @@
 //! The parser keeps extension fields and directives losslessly while recognizing
 //! the structure of standard music constructs.
 //!
-#![doc = include_str!("../docs/architecture.md")]
+//! See [`architecture`] for parser flows and an overview of the public AST.
 
 use chumsky::Parser;
 use chumsky::error::Rich;
@@ -31,6 +31,8 @@ use std::ops::Range;
 mod combinators;
 mod emit;
 mod source;
+
+include!(concat!(env!("OUT_DIR"), "/architecture.rs"));
 
 pub use combinators::chord_parser;
 pub use combinators::directive_parser;

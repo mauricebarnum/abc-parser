@@ -51,9 +51,9 @@ flowchart TD
     parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
 ```
 
-The diagram is Mermaid source so it remains portable in generated rustdoc and
-renders in documentation front ends that support Mermaid. The surrounding text
-contains the same information for plain rustdoc viewers.
+The diagrams remain Mermaid source in this file and are rendered as inline SVG
+in the generated documentation. The surrounding text contains the same
+information in documentation formats that do not display SVG.
 
 ## Complete-document flow
 
