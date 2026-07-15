@@ -1004,14 +1004,6 @@ pub fn parse_with_options(
     }
 }
 
-/// Validates a complete ABC document without returning its syntax tree.
-///
-/// # Errors
-/// Returns all syntax errors found in the document.
-pub fn validate(source: &str) -> Result<(), Vec<ParseError>> {
-    parse(source).map(|_| ())
-}
-
 /// Parses one physical ABC line.
 pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> {
     let source = source.trim_end_matches(['\r', '\n']);

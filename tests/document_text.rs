@@ -26,7 +26,6 @@ use abc_parser::parse;
 use abc_parser::parse_input;
 use abc_parser::parse_recovering;
 use abc_parser::parse_recovering_with_options;
-use abc_parser::validate;
 use chumsky::span::SimpleSpan;
 
 const TEXT_DOCUMENT: &str = "%abc-2.1
@@ -298,7 +297,6 @@ fn music_like_text_warns_without_becoming_invalid_or_a_tune() {
     assert_eq!(report.output.tunes().count(), 0);
     assert!(report.warnings[0].diagnostic(source).contains("2 | CDEF |"));
     assert!(parse(source).is_ok());
-    assert!(validate(source).is_ok());
 
     let ambiguous = parse_recovering("CAGE\n");
     assert!(ambiguous.is_valid());

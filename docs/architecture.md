@@ -24,7 +24,6 @@ The primary complete-document APIs are:
   [`ParseReport::warnings`] do not make the report invalid.
 - [`parse`] uses the same recovery pass, but returns the AST only when no errors
   were found.
-- [`validate`] performs complete parsing and discards a successful AST.
 
 Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 [`music_element_parser`], [`field_parser`], [`directive_parser`], and
@@ -291,6 +290,6 @@ order. Recovery maintains these invariants:
 - an unclosed delimited music construct consumes no later physical line;
 - a later tune can still be discovered after faults in an earlier tune.
 
-Callers that require only valid input should use [`parse`] or [`validate`].
-Interactive tools usually want [`parse_recovering`] and should render both its
-partial AST and its diagnostics.
+Callers that require only valid input should use [`parse`]. Interactive tools
+usually want [`parse_recovering`] and should render both its partial AST and its
+diagnostics.
