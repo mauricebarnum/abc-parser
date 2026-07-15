@@ -807,6 +807,74 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+impl ParseError {
+    /// Renders this error with line, column, and source context when available.
+    ///
+    /// ```
+    /// use abc_parser::ErrorKind;
+    /// use abc_parser::ParseError;
+    ///
+    /// let error = ParseError {
+    ///     kind: ErrorKind::InvalidField,
+    ///     message: "invalid M: field value".to_owned(),
+    ///     span: 4..10,
+    /// };
+    /// let diagnostic = error.diagnostic("X:1\nM:nope\n");
+    /// assert!(diagnostic.starts_with("2:1: invalid M: field value"));
+    /// assert!(diagnostic.contains("2 | M:nope"));
+    /// ```
+    ///
+    /// Falls back to [`Display`](fmt::Display) when `resolver` no longer has the
+    /// complete source or the stored byte span is invalid for that source.
+    pub fn diagnostic<R>(&self, resolver: &R) -> String
+    where
+        R: SourceResolver<SimpleSpan<usize>> + ?Sized,
+    {
+        resolver.full_source().map_or_else(
+            || self.to_string(),
+            |source| render_parse_error(self, &source).unwrap_or_else(|| self.to_string()),
+        )
+    }
+}
+
+/// Renders one byte-spanned error against its complete source.
+fn render_parse_error(error: &ParseError, source: &str) -> Option<String> {
+    let start = error.span.start;
+    let end = error.span.end;
+    if start > end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[start..]
+        .find(['\r', '\n'])
+        .map_or(source.len(), |offset| start + offset);
+    let line_number = source[..line_start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    let column = source[line_start..start].chars().count() + 1;
+    let prefix = source[line_start..start]
+        .chars()
+        .map(|character| if character == '\t' { '\t' } else { ' ' })
+        .collect::<String>();
+    let highlight_end = end.min(line_end);
+    let highlight_width = source[start..highlight_end].chars().count().max(1);
+    let marker = "^".repeat(highlight_width);
+    let gutter_width = line_number.to_string().len();
+    Some(format!(
+        "{line_number}:{column}: {}\n{empty:>gutter_width$} |\n{line_number:>gutter_width$} | {}\n{empty:>gutter_width$} | {prefix}{marker}",
+        error.message,
+        &source[line_start..line_end],
+        empty = "",
+    ))
+}
+
 /// The syntax tree and every diagnostic produced during recovering parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseReport<T> {

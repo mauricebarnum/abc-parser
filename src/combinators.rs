@@ -651,7 +651,10 @@ where
         .then_ignore(just(':'))
         .then(remaining_text())
         .validate(|(key, value), extra, emitter| {
-            emitter.emit(Rich::custom(extra.span(), "invalid structured field value"));
+            emitter.emit(Rich::custom(
+                extra.span(),
+                format!("invalid {key}: field value"),
+            ));
             field(key, FieldValue::Unparsed(value))
         }))
 }

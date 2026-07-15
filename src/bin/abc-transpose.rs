@@ -306,10 +306,15 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     let source = read_source(&arguments.input)?;
     let parsed = parse_recovering(&source);
     if !parsed.is_valid() {
+        let input_name = if arguments.input.as_os_str() == "-" {
+            "<stdin>".to_owned()
+        } else {
+            arguments.input.display().to_string()
+        };
         let diagnostics = parsed
             .errors
             .iter()
-            .map(ToString::to_string)
+            .map(|error| format!("{input_name}:{}", error.diagnostic(source.as_str())))
             .collect::<Vec<_>>()
             .join("\n");
         return Err(format!("input is not valid ABC:\n{diagnostics}"));

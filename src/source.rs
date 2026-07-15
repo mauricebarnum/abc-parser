@@ -60,6 +60,15 @@ pub trait SourceResolver<S> {
     ///
     /// Returns the resolver-specific error when the span is invalid.
     fn resolve<'src>(&'src self, span: &S) -> Result<Cow<'src, str>, Self::Error>;
+
+    /// Returns the complete original source when it remains available.
+    ///
+    /// Diagnostic renderers use this to calculate line and column positions and
+    /// display surrounding source. Resolvers without the complete source may
+    /// retain the default implementation.
+    fn full_source(&self) -> Option<Cow<'_, str>> {
+        None
+    }
 }
 
 /// Converts a span-backed AST node into a standalone owned node.
@@ -123,6 +132,10 @@ impl SourceResolver<SimpleSpan<usize>> for str {
         }
         Ok(Cow::Borrowed(&self[span.start..span.end]))
     }
+
+    fn full_source(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Borrowed(self))
+    }
 }
 
 impl SourceResolver<SimpleSpan<usize>> for [char] {
@@ -133,6 +146,10 @@ impl SourceResolver<SimpleSpan<usize>> for [char] {
             .get(span.start..span.end)
             .ok_or(ResolveError::OutOfBounds)?;
         Ok(Cow::Owned(characters.iter().collect()))
+    }
+
+    fn full_source(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Owned(self.iter().collect()))
     }
 }
 

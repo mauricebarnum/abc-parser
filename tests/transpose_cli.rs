@@ -19,7 +19,9 @@ use abc_parser::Line;
 use abc_parser::ToAbc;
 use abc_parser::parse_recovering;
 use std::fs;
+use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 const KITCHEN_SINK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_kitchen_sink.abc");
@@ -31,6 +33,25 @@ fn run(arguments: &[&str]) -> std::process::Output {
         .args(arguments)
         .output()
         .unwrap()
+}
+
+/// Runs the built command with ABC supplied through standard input.
+fn run_stdin(source: &str, arguments: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_abc-transpose"))
+        .arg("-")
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(source.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 #[test]
@@ -139,4 +160,17 @@ fn non_half_step_values_are_rejected() {
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("exact multiple of 0.5"));
+}
+
+#[test]
+fn invalid_input_reports_source_context() {
+    let output = run_stdin("X:1\nM:nope\nK:C\nC |\n", &["--semitones", "1"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("<stdin>:2:1: invalid M: field value"),
+        "{error}"
+    );
+    assert!(error.contains("2 | M:nope"), "{error}");
+    assert!(error.contains("| ^^^^^^"), "{error}");
 }
