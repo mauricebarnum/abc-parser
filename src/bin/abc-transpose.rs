@@ -22,6 +22,7 @@
 use abc_parser::Accidental;
 use abc_parser::BarLine;
 use abc_parser::ChordMember;
+use abc_parser::EmitOptions;
 use abc_parser::Field;
 use abc_parser::FieldValue;
 use abc_parser::Fraction;
@@ -30,6 +31,7 @@ use abc_parser::KeySignature;
 use abc_parser::KeyTonic;
 use abc_parser::Line;
 use abc_parser::MusicElement;
+use abc_parser::NoteLengthStyle;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
 use abc_parser::ToAbc;
@@ -118,6 +120,9 @@ struct Arguments {
         value_name = "BOOL"
     )]
     spelling: SpellingPreference,
+    /// Write shortened note lengths with explicit power-of-two denominators.
+    #[arg(long)]
+    explicit_note_lengths: bool,
     /// Write output to this file instead of standard output.
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
@@ -330,6 +335,7 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     if request == Request::Semitones(0)
         && arguments.octave == 0
         && arguments.spelling == SpellingPreference::Auto
+        && !arguments.explicit_note_lengths
     {
         return write_output(&source, arguments.out.as_ref());
     }
@@ -338,7 +344,16 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     for tune in document.tunes_mut() {
         transpose_tune(tune, &request, arguments.spelling, arguments.octave)?;
     }
-    write_output(&document.to_abc(), arguments.out.as_ref())
+    let note_length_style = if arguments.explicit_note_lengths {
+        NoteLengthStyle::ExplicitDenominator
+    } else {
+        NoteLengthStyle::Shorthand
+    };
+    let options = EmitOptions::new().with_note_length_style(note_length_style);
+    write_output(
+        &document.to_abc_with_options(options),
+        arguments.out.as_ref(),
+    )
 }
 
 /// Converts exact half-step notation into its integral semitone equivalent.

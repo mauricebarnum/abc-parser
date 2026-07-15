@@ -26,8 +26,17 @@ abc-transpose tunes.abc --semitones -1 > tunes-down-one-semitone.abc
 abc-transpose tunes.abc --steps 1.5 > tunes-up-three-semitones.abc
 ```
 
+Canonical output uses ABC note-length shorthand (`A/`, `A//`, `A///`) for
+power-of-two divisors. Pass `--explicit-note-lengths` to emit the equivalent
+explicit denominators (`A/2`, `A/4`, `A/8`) instead:
+
+```sh
+abc-transpose tunes.abc --key Dm --explicit-note-lengths
+```
+
 Pass `-` as the input path to read ABC from standard input. A zero semitone or
-step interval is a byte-preserving no-op.
+step interval is a byte-preserving no-op unless an emission preference such as
+`--explicit-note-lengths` requests canonical re-emission.
 
 Music code is represented semantically: pitches, fractional accidentals and
 durations, rests, chords, bars and repeats, variant endings, tuplets, grace
@@ -41,7 +50,9 @@ textual metadata and application-defined fields remain lossless source spans in
 standalone strings using the original source or conspicuous placeholders when
 the source is unavailable. Owned AST nodes implement `ToAbc`, allowing complete
 documents or individual fields and music elements to be emitted as canonical
-ABC notation after inspection or transformation.
+ABC notation after inspection or transformation. `AbcEmitter` and `EmitOptions`
+configure equivalent canonical spellings while carrying one shared emission
+context through the complete AST.
 
 At file level, tunes, free-text blocks, and typed `%%text`, `%%center`, and
 `%%begintext` annotations are retained in source order. `ParserOptions` can

@@ -69,6 +69,7 @@ fn help_describes_transposition_and_spelling_options() {
     assert!(help.contains("--octave <OCTAVE>"), "{help}");
     assert!(help.contains("[default: 0]"), "{help}");
     assert!(help.contains("--prefer-flats <BOOL>"), "{help}");
+    assert!(help.contains("--explicit-note-lengths"), "{help}");
     assert!(help.contains("--out <FILE>"), "{help}");
     assert!(help.contains("Possible values:"), "{help}");
 }
@@ -93,6 +94,40 @@ fn zero_semitones_are_a_byte_preserving_no_op() {
     let output = run(&["--semitones", "0"]);
     assert!(output.status.success());
     assert_eq!(output.stdout, KITCHEN_SINK.as_bytes());
+}
+
+#[test]
+fn explicit_note_lengths_reemit_a_zero_transposition() {
+    let source = "X: 1\nL: 1/8\nK: C\nA/\n";
+    let default = run_stdin(source, &["--semitones", "0"]);
+    assert!(default.status.success(), "{default:?}");
+    assert_eq!(default.stdout, source.as_bytes());
+
+    let explicit = run_stdin(source, &["--semitones", "0", "--explicit-note-lengths"]);
+    assert!(explicit.status.success(), "{explicit:?}");
+    assert_eq!(
+        String::from_utf8(explicit.stdout).unwrap(),
+        "X:1\nL:1/8\nK:C\nA/2"
+    );
+}
+
+#[test]
+fn transposition_defaults_to_note_length_shorthand() {
+    let source = "X:1\nM:6/8\nL:1/8\nK:Bmin\nF/E/|D>EF d2d/e/|\n";
+    let shorthand = run_stdin(source, &["--key", "Em"]);
+    assert!(shorthand.status.success(), "{shorthand:?}");
+    let shorthand = String::from_utf8(shorthand.stdout).unwrap();
+    assert!(shorthand.contains("B/A/|G>AB g2g/a/|"), "{shorthand}");
+
+    let explicit = run_stdin(source, &["--key", "Em", "--explicit-note-lengths"]);
+    assert!(explicit.status.success(), "{explicit:?}");
+    let explicit = String::from_utf8(explicit.stdout).unwrap();
+    assert!(explicit.contains("B/2A/2|G>AB g2g/2a/2|"), "{explicit}");
+
+    for output in [shorthand, explicit] {
+        let reparsed = parse_recovering(&output);
+        assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
+    }
 }
 
 #[test]

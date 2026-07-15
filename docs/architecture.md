@@ -201,9 +201,15 @@ flowchart LR
 [`ToAbc`] writes owned or otherwise `AsRef<str>`-backed AST nodes as canonical
 ABC notation. It is implemented for complete documents and tunes as well as
 individual lines, fields, music elements, pitches, durations, and other public
-semantic nodes. Source positions are ignored. Stored textual values and bar
-spellings are preserved, while normalized syntax such as note lengths,
-accidentals, decorations, and field parameters uses deterministic spellings.
+semantic nodes. [`AbcEmitter`] carries a destination, [`EmitOptions`], and any
+context needed while recursively emitting those nodes. The convenience
+[`ToAbc::to_abc`] method uses default options; [`ToAbc::to_abc_with_options`]
+selects equivalent spellings such as shorthand or explicit note-length
+denominators.
+
+Source positions are ignored. Stored textual values and bar spellings are
+preserved, while normalized syntax such as note lengths, accidentals,
+decorations, and field parameters uses deterministic spellings.
 
 A [`ParsedDocument`] must first be converted with [`IntoOwnedAst::into_owned`]
 and an appropriate resolver. [`OwnedDocument`] can be emitted directly with

@@ -62,6 +62,94 @@ use super::VoiceDefinition;
 use std::fmt;
 use std::fmt::Write;
 
+/// Selects the canonical spelling used for shortened note lengths.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NoteLengthStyle {
+    /// Use repeated slash shorthand such as `A/`, `A//`, and `A///`.
+    #[default]
+    Shorthand,
+    /// Write the denominator explicitly, such as `A/2`, `A/4`, and `A/8`.
+    ExplicitDenominator,
+}
+
+/// Controls canonical ABC emission choices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EmitOptions {
+    note_length_style: NoteLengthStyle,
+}
+
+impl EmitOptions {
+    /// Creates options using the default canonical spellings.
+    pub const fn new() -> Self {
+        Self {
+            note_length_style: NoteLengthStyle::Shorthand,
+        }
+    }
+
+    /// Selects how shortened note lengths are written.
+    #[must_use]
+    pub const fn with_note_length_style(mut self, style: NoteLengthStyle) -> Self {
+        self.note_length_style = style;
+        self
+    }
+
+    /// Returns the selected shortened note-length spelling.
+    pub const fn note_length_style(self) -> NoteLengthStyle {
+        self.note_length_style
+    }
+}
+
+impl Default for EmitOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Writes AST values using a shared destination and emission preferences.
+pub struct AbcEmitter<'writer> {
+    output: &'writer mut dyn Write,
+    options: EmitOptions,
+}
+
+impl<'writer> AbcEmitter<'writer> {
+    /// Creates an emitter using the default canonical spellings.
+    pub fn new(output: &'writer mut dyn Write) -> Self {
+        Self::with_options(output, EmitOptions::new())
+    }
+
+    /// Creates an emitter using the supplied canonical spelling preferences.
+    pub const fn with_options(output: &'writer mut dyn Write, options: EmitOptions) -> Self {
+        Self { output, options }
+    }
+
+    /// Returns this emitter's canonical spelling preferences.
+    pub const fn options(&self) -> &EmitOptions {
+        &self.options
+    }
+
+    /// Writes one AST value through this emitter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fmt::Error`] when the destination writer fails.
+    pub fn emit<T>(&mut self, value: &T) -> fmt::Result
+    where
+        T: ToAbc + ?Sized,
+    {
+        value.write_abc_with(self)
+    }
+}
+
+impl Write for AbcEmitter<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.output.write_str(value)
+    }
+
+    fn write_char(&mut self, value: char) -> fmt::Result {
+        self.output.write_char(value)
+    }
+}
+
 /// Converts an AST node to canonical ABC notation.
 ///
 /// Source positions are intentionally ignored. Exact spellings retained in
@@ -71,12 +159,19 @@ use std::fmt::Write;
 ///
 /// ```
 /// use abc_parser::ToAbc;
+/// use abc_parser::EmitOptions;
+/// use abc_parser::NoteLengthStyle;
 /// use abc_parser::parse;
 ///
 /// let document = parse("X:1\nM:2+3/8\nK:C\nCDEF |\n").unwrap();
 /// let source = document.to_abc();
 /// assert!(source.contains("M:2+3/8"));
 /// assert!(source.contains("CDEF |"));
+///
+/// let options = EmitOptions::new()
+///     .with_note_length_style(NoteLengthStyle::ExplicitDenominator);
+/// assert_eq!(parse("X:1\nK:C\nA/\n").unwrap().to_abc_with_options(options),
+///            "X:1\nK:C\nA/2");
 /// ```
 pub trait ToAbc {
     /// Writes this node as ABC notation.
@@ -86,10 +181,32 @@ pub trait ToAbc {
     /// Returns [`fmt::Error`] when the destination writer fails.
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result;
 
+    /// Writes this node through a configured emitter.
+    ///
+    /// Implementations predating [`AbcEmitter`] may rely on this default,
+    /// which ignores preferences and delegates to [`Self::write_abc`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fmt::Error`] when the emitter's destination writer fails.
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        self.write_abc(emitter)
+    }
+
     /// Returns this node as an owned ABC source string.
     fn to_abc(&self) -> String {
         let mut output = String::new();
         if self.write_abc(&mut output).is_err() {
+            unreachable!("writing to String cannot fail");
+        }
+        output
+    }
+
+    /// Returns this node using the supplied canonical spelling preferences.
+    fn to_abc_with_options(&self, options: EmitOptions) -> String {
+        let mut output = String::new();
+        let mut emitter = AbcEmitter::with_options(&mut output, options);
+        if emitter.emit(self).is_err() {
             unreachable!("writing to String cannot fail");
         }
         output
@@ -102,6 +219,10 @@ where
 {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
         self.value.write_abc(output)
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.emit(&self.value)
     }
 }
 
@@ -123,6 +244,21 @@ where
         }
         Ok(())
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        let mut needs_separator = false;
+        for line in &self.header {
+            write_line_with_emitter(&line.value, emitter, &mut needs_separator)?;
+        }
+        for item in &self.items {
+            if needs_separator {
+                emitter.write_str("\n\n")?;
+            }
+            emitter.emit(&item.value)?;
+            needs_separator = true;
+        }
+        Ok(())
+    }
 }
 
 impl<S, T> ToAbc for DocumentItem<S, T>
@@ -136,6 +272,16 @@ where
             Self::TypesetText(text) => text.write_abc(output),
             Self::Comment(text) => write!(output, "%{}", text.as_ref()),
             Self::Directive(value) => value.write_abc(output),
+        }
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Tune(tune) => emitter.emit(tune),
+            Self::FreeText(text) => emitter.emit(text),
+            Self::TypesetText(text) => emitter.emit(text),
+            Self::Comment(text) => write!(emitter, "%{}", text.as_ref()),
+            Self::Directive(value) => emitter.emit(value),
         }
     }
 }
@@ -186,6 +332,14 @@ where
         }
         Ok(())
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        let mut needs_separator = false;
+        for line in &self.lines {
+            write_line_with_emitter(&line.value, emitter, &mut needs_separator)?;
+        }
+        Ok(())
+    }
 }
 
 /// Writes one line, prefixing a newline after the first emitted line.
@@ -202,6 +356,22 @@ where
     }
     *needs_separator = true;
     line.write_abc(output)
+}
+
+/// Writes one line through an emitter, prefixing a newline after the first line.
+fn write_line_with_emitter<S, T>(
+    line: &Line<S, T>,
+    emitter: &mut AbcEmitter<'_>,
+    needs_separator: &mut bool,
+) -> fmt::Result
+where
+    T: AsRef<str>,
+{
+    if *needs_separator {
+        emitter.write_char('\n')?;
+    }
+    *needs_separator = true;
+    emitter.emit(line)
 }
 
 impl<S, T> ToAbc for Line<S, T>
@@ -222,6 +392,23 @@ where
             }
             Self::TypesetText(text) => text.write_abc(output),
             Self::DirectiveText(text) => write!(output, "%%{}", text.as_ref()),
+        }
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Blank => Ok(()),
+            Self::Comment(text) => write!(emitter, "%{}", text.as_ref()),
+            Self::Directive(directive) => emitter.emit(directive),
+            Self::Field(field) => emitter.emit(field),
+            Self::Music(elements) => {
+                for element in elements {
+                    emitter.emit(&element.value)?;
+                }
+                Ok(())
+            }
+            Self::TypesetText(text) => emitter.emit(text),
+            Self::DirectiveText(text) => write!(emitter, "%%{}", text.as_ref()),
         }
     }
 }
@@ -247,6 +434,11 @@ where
         write!(output, "{}:", self.key)?;
         self.value.write_abc(output)
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        write!(emitter, "{}:", self.key)?;
+        emitter.emit(&self.value)
+    }
 }
 
 impl<T> ToAbc for FieldValue<T>
@@ -265,6 +457,21 @@ where
             Self::Parts(value) => value.write_abc(output),
             Self::UserSymbol(value) => value.write_abc(output),
             Self::Macro(value) => value.write_abc(output),
+        }
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) | Self::Unparsed(text) => emitter.write_str(text.as_ref()),
+            Self::UnitLength(value) => emitter.emit(value),
+            Self::Meter(value) => emitter.emit(value),
+            Self::Tempo(value) => emitter.emit(value),
+            Self::Key(value) => emitter.emit(value),
+            Self::Reference(value) => write!(emitter, "{value}"),
+            Self::Voice(value) => emitter.emit(value),
+            Self::Parts(value) => emitter.emit(value),
+            Self::UserSymbol(value) => emitter.emit(value),
+            Self::Macro(value) => emitter.emit(value),
         }
     }
 }
@@ -296,6 +503,27 @@ impl ToAbc for Meter {
             }
         }
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Common => emitter.write_char('C'),
+            Self::Cut => emitter.write_str("C|"),
+            Self::None => emitter.write_str("none"),
+            Self::Simple(value) => emitter.emit(value),
+            Self::Compound {
+                groups,
+                denominator,
+            } => {
+                for (index, group) in groups.iter().enumerate() {
+                    if index > 0 {
+                        emitter.write_char('+')?;
+                    }
+                    write!(emitter, "{group}")?;
+                }
+                write!(emitter, "/{denominator}")
+            }
+        }
+    }
 }
 
 impl<T> ToAbc for Tempo<T>
@@ -317,6 +545,25 @@ where
         if let Some(postlude) = &self.postlude {
             output.write_char(' ')?;
             write_quoted(postlude.as_ref(), output)?;
+        }
+        Ok(())
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        if let Some(prelude) = &self.prelude {
+            write_quoted(prelude.as_ref(), emitter)?;
+            emitter.write_char(' ')?;
+        }
+        for (index, beat) in self.beats.iter().enumerate() {
+            if index > 0 {
+                emitter.write_char(' ')?;
+            }
+            emitter.emit(beat)?;
+        }
+        write!(emitter, "={}", self.bpm)?;
+        if let Some(postlude) = &self.postlude {
+            emitter.write_char(' ')?;
+            write_quoted(postlude.as_ref(), emitter)?;
         }
         Ok(())
     }
@@ -344,6 +591,25 @@ where
         }
         Ok(())
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        if let Some(tonic) = self.tonic {
+            write_pitch_class(tonic.class, false, emitter)?;
+            match tonic.accidental {
+                Some(KeyAccidental::Sharp) => emitter.write_char('#')?,
+                Some(KeyAccidental::Flat) => emitter.write_char('b')?,
+                None => {}
+            }
+        } else {
+            emitter.write_str("none")?;
+        }
+        emitter.write_str(self.mode.as_ref())?;
+        for parameter in &self.parameters {
+            emitter.write_char(' ')?;
+            emitter.emit(parameter)?;
+        }
+        Ok(())
+    }
 }
 
 impl<T> ToAbc for VoiceDefinition<T>
@@ -355,6 +621,15 @@ where
         for property in &self.properties {
             output.write_char(' ')?;
             property.write_abc(output)?;
+        }
+        Ok(())
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.write_str(self.id.as_ref())?;
+        for property in &self.properties {
+            emitter.write_char(' ')?;
+            emitter.emit(property)?;
         }
         Ok(())
     }
@@ -399,6 +674,13 @@ where
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
         for token in &self.tokens {
             token.write_abc(output)?;
+        }
+        Ok(())
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        for token in &self.tokens {
+            emitter.emit(token)?;
         }
         Ok(())
     }
@@ -472,12 +754,44 @@ where
             Self::LineBreak(value) => value.write_abc(output),
         }
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Note(value) => emitter.emit(value),
+            Self::Rest(value) => emitter.emit(value),
+            Self::MultiMeasureRest(value) => emitter.emit(value),
+            Self::Chord(value) => emitter.emit(value),
+            Self::Bar(value) => emitter.emit(value),
+            Self::Ending(value) => emitter.emit(value),
+            Self::InlineField(value) => {
+                emitter.write_char('[')?;
+                emitter.emit(value)?;
+                emitter.write_char(']')
+            }
+            Self::Grace(value) => emitter.emit(value),
+            Self::Decoration(value) => emitter.emit(value),
+            Self::Annotation(value) => emitter.emit(value),
+            Self::Tuplet(value) => emitter.emit(value),
+            Self::Slur(value) => emitter.emit(value),
+            Self::Tie(value) => emitter.emit(value),
+            Self::BrokenRhythm(value) => emitter.emit(value),
+            Self::Overlay(value) => emitter.emit(value),
+            Self::BeamBreak(value) | Self::Extension(value) => emitter.write_str(value.as_ref()),
+            Self::BeamContinuation(count) => write_repeated('`', *count, emitter),
+            Self::LineBreak(value) => emitter.emit(value),
+        }
+    }
 }
 
 impl ToAbc for Note {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
         self.pitch.write_abc(output)?;
         self.length.write_abc(output)
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.emit(&self.pitch)?;
+        emitter.emit(&self.length)
     }
 }
 
@@ -493,6 +807,20 @@ impl ToAbc for Pitch {
             write_repeated('\'', count, output)
         } else {
             write_repeated(',', usize::from(self.octave.unsigned_abs()), output)
+        }
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        if let Some(accidental) = self.accidental {
+            emitter.emit(&accidental)?;
+        }
+        let lowercase = self.octave >= 1;
+        write_pitch_class(self.class, lowercase, emitter)?;
+        if lowercase {
+            let count = usize::from(self.octave.unsigned_abs().saturating_sub(1));
+            write_repeated('\'', count, emitter)
+        } else {
+            write_repeated(',', usize::from(self.octave.unsigned_abs()), emitter)
         }
     }
 }
@@ -523,6 +851,14 @@ impl ToAbc for Accidental {
             Self::Flat(amount) => write_accidental('_', *amount, output),
         }
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Natural => emitter.write_char('='),
+            Self::Sharp(amount) => write_accidental('^', *amount, emitter),
+            Self::Flat(amount) => write_accidental('_', *amount, emitter),
+        }
+    }
 }
 
 /// Writes a sharp or flat amount in the parser's canonical fraction spelling.
@@ -545,12 +881,31 @@ fn write_accidental(marker: char, amount: Fraction, output: &mut dyn Write) -> f
 
 impl ToAbc for NoteLength {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
-        match (self.numerator, self.denominator) {
-            (1, 1) => Ok(()),
-            (numerator, 1) => write!(output, "{numerator}"),
-            (1, denominator) => write!(output, "/{denominator}"),
-            (numerator, denominator) => write!(output, "{numerator}/{denominator}"),
+        write_note_length(*self, NoteLengthStyle::Shorthand, output)
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        let style = emitter.options().note_length_style();
+        write_note_length(*self, style, emitter)
+    }
+}
+
+/// Writes one note length using the selected equivalent spelling.
+fn write_note_length(
+    length: NoteLength,
+    style: NoteLengthStyle,
+    output: &mut dyn Write,
+) -> fmt::Result {
+    match (length.numerator, length.denominator) {
+        (1, 1) => Ok(()),
+        (numerator, 1) => write!(output, "{numerator}"),
+        (1, denominator)
+            if style == NoteLengthStyle::Shorthand && denominator.is_power_of_two() =>
+        {
+            write_repeated('/', denominator.ilog2() as usize, output)
         }
+        (1, denominator) => write!(output, "/{denominator}"),
+        (numerator, denominator) => write!(output, "{numerator}/{denominator}"),
     }
 }
 
@@ -561,6 +916,14 @@ impl ToAbc for Rest {
             RestKind::Invisible => 'x',
         })?;
         self.length.write_abc(output)
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.write_char(match self.kind {
+            RestKind::Visible => 'z',
+            RestKind::Invisible => 'x',
+        })?;
+        emitter.emit(&self.length)
     }
 }
 
@@ -583,6 +946,15 @@ impl ToAbc for Chord {
         output.write_char(']')?;
         self.length.write_abc(output)
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.write_char('[')?;
+        for member in &self.members {
+            emitter.emit(member)?;
+        }
+        emitter.write_char(']')?;
+        emitter.emit(&self.length)
+    }
 }
 
 impl ToAbc for ChordMember {
@@ -590,6 +962,13 @@ impl ToAbc for ChordMember {
         match self {
             Self::Note(value) => value.write_abc(output),
             Self::Rest(value) => value.write_abc(output),
+        }
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Note(value) => emitter.emit(value),
+            Self::Rest(value) => emitter.emit(value),
         }
     }
 }
@@ -614,6 +993,17 @@ impl ToAbc for VariantEnding {
         }
         Ok(())
     }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.write_char('[')?;
+        for (index, selector) in self.selectors.iter().enumerate() {
+            if index > 0 {
+                emitter.write_char(',')?;
+            }
+            emitter.emit(selector)?;
+        }
+        Ok(())
+    }
 }
 
 impl ToAbc for EndingSelector {
@@ -635,6 +1025,17 @@ impl ToAbc for GraceGroup {
             note.write_abc(output)?;
         }
         output.write_char('}')
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        emitter.write_char('{')?;
+        if self.acciaccatura {
+            emitter.write_char('/')?;
+        }
+        for note in &self.notes {
+            emitter.emit(note)?;
+        }
+        emitter.write_char('}')
     }
 }
 
@@ -744,8 +1145,18 @@ fn write_repeated(character: char, count: usize, output: &mut dyn Write) -> fmt:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse;
     use crate::parse_field;
     use crate::parse_music_line;
+
+    /// A pre-emitter-context implementation used to verify compatibility.
+    struct LegacyValue;
+
+    impl ToAbc for LegacyValue {
+        fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
+            output.write_str("legacy")
+        }
+    }
 
     #[test]
     fn structured_fields_use_canonical_spellings() {
@@ -790,5 +1201,107 @@ mod tests {
             },
         };
         assert_eq!(note.to_abc(), "^1/2b''3/2");
+    }
+
+    #[test]
+    fn note_length_styles_cover_equivalent_and_irregular_fractions() {
+        let explicit =
+            EmitOptions::new().with_note_length_style(NoteLengthStyle::ExplicitDenominator);
+        let cases = [
+            (
+                NoteLength {
+                    numerator: 1,
+                    denominator: 1,
+                },
+                "",
+                "",
+            ),
+            (
+                NoteLength {
+                    numerator: 1,
+                    denominator: 2,
+                },
+                "/",
+                "/2",
+            ),
+            (
+                NoteLength {
+                    numerator: 1,
+                    denominator: 4,
+                },
+                "//",
+                "/4",
+            ),
+            (
+                NoteLength {
+                    numerator: 1,
+                    denominator: 8,
+                },
+                "///",
+                "/8",
+            ),
+            (
+                NoteLength {
+                    numerator: 1,
+                    denominator: 3,
+                },
+                "/3",
+                "/3",
+            ),
+            (
+                NoteLength {
+                    numerator: 1,
+                    denominator: 6,
+                },
+                "/6",
+                "/6",
+            ),
+            (
+                NoteLength {
+                    numerator: 3,
+                    denominator: 2,
+                },
+                "3/2",
+                "3/2",
+            ),
+            (
+                NoteLength {
+                    numerator: 2,
+                    denominator: 4,
+                },
+                "2/4",
+                "2/4",
+            ),
+        ];
+        for (length, shorthand, denominator) in cases {
+            assert_eq!(length.to_abc(), shorthand);
+            assert_eq!(length.to_abc_with_options(explicit), denominator);
+        }
+    }
+
+    #[test]
+    fn configured_emitter_reaches_nested_music_lengths() {
+        let document = parse("X:1\nK:C\nA/ z// [B/z//]/// {c/}\n").unwrap();
+        let explicit =
+            EmitOptions::new().with_note_length_style(NoteLengthStyle::ExplicitDenominator);
+        assert_eq!(document.to_abc(), "X:1\nK:C\nA/ z// [B/z//]/// {c/}");
+        assert_eq!(
+            document.to_abc_with_options(explicit),
+            "X:1\nK:C\nA/2 z/4 [B/2z/4]/8 {c/2}"
+        );
+    }
+
+    #[test]
+    fn emitter_supports_legacy_trait_implementations() {
+        let options =
+            EmitOptions::new().with_note_length_style(NoteLengthStyle::ExplicitDenominator);
+        let mut output = String::new();
+        let mut emitter = AbcEmitter::with_options(&mut output, options);
+        assert_eq!(
+            emitter.options().note_length_style(),
+            NoteLengthStyle::ExplicitDenominator
+        );
+        emitter.emit(&LegacyValue).unwrap();
+        assert_eq!(output, "legacy");
     }
 }
