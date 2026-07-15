@@ -17,6 +17,9 @@
 //! The parser keeps extension fields and directives losslessly while recognizing
 //! the structure of standard music constructs.
 //!
+//! The companion [`abc-transpose` command](../abc_transpose/index.html)
+//! transposes complete ABC files by destination key or chromatic interval.
+//!
 //! See [`architecture`] for parser flows and an overview of the public AST.
 
 use chumsky::Parser;

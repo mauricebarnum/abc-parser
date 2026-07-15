@@ -12,6 +12,11 @@ chumsky = "0.11.1"
 clap = { version = "4.5.54", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 merman-rustdoc = "0.7.0"
 
+[[bin]]
+name = "abc-transpose"
+path = "src/bin/abc-transpose.rs"
+doc = true
+
 [lints.rust]
 missing_docs = "deny"
 unsafe_code = "deny"
