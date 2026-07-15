@@ -305,12 +305,18 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     let request = arguments.request();
     let source = read_source(&arguments.input)?;
     let parsed = parse_recovering(&source);
+    let input_name = if arguments.input.as_os_str() == "-" {
+        "<stdin>".to_owned()
+    } else {
+        arguments.input.display().to_string()
+    };
+    for warning in &parsed.warnings {
+        eprintln!(
+            "abc-transpose: warning: {input_name}:{}",
+            warning.diagnostic(source.as_str())
+        );
+    }
     if !parsed.is_valid() {
-        let input_name = if arguments.input.as_os_str() == "-" {
-            "<stdin>".to_owned()
-        } else {
-            arguments.input.display().to_string()
-        };
         let diagnostics = parsed
             .errors
             .iter()

@@ -20,7 +20,8 @@ The primary complete-document APIs are:
 
 - [`parse_recovering`] always returns a [`ParseReport<OwnedDocument>`]. Its
   [`ParseReport::output`] contains everything recovered after faults and
-  [`ParseReport::errors`] contains source-ordered diagnostics.
+  [`ParseReport::errors`] contains source-ordered errors. Advisory
+  [`ParseReport::warnings`] do not make the report invalid.
 - [`parse`] uses the same recovery pass, but returns the AST only when no errors
   were found.
 - [`validate`] performs complete parsing and discards a successful AST.
@@ -38,21 +39,21 @@ flowchart TD
     entry -->|physical line| line[line_parser]
     entry -->|music fragment| music[music_line_parser]
     entry -->|field/directive/chord| partial[Partial parser combinators]
-    recovering --> split[separated_by newline]
-    split --> classify[Classify each line]
+    recovering --> split[Split at blank lines]
+    split --> classify[Classify from first non-comment line]
     line --> classify
     classify --> blank[Blank]
     classify --> comment[Comment]
     classify --> directive[Directive parser]
     classify --> field[Field parser]
-    classify --> music
+    classify -->|field-led block| music
+    classify -->|raw block| free[Free text]
     field --> field_value[Structured field-value parser]
     music --> elements[Music element combinators]
     elements --> ast[Spanned AST nodes]
     field_value --> ast
     directive --> ast
-    ast --> group[Split sections at empty lines]
-    group --> ordered[Classify header, tunes, free text, and typeset text]
+    ast --> ordered[Assemble header, tunes, free text, and typeset text]
     ordered --> filter[Apply ParserOptions retention]
     filter --> parsed[ParsedDocument with SourceText spans]
     parsed -->|IntoOwnedAst + source| owned[OwnedDocument with strings]
@@ -67,21 +68,20 @@ contains the same information for plain rustdoc viewers.
 
 [`document_parser`] composes the source at physical-line granularity:
 
-1. A non-reporting line candidate parser separated by `newline()` identifies
-   physical lines without treating prose letters as malformed music.
-2. A `choice` combinator classifies each line by its prefix. `%%` selects a directive,
-   `%` selects a comment, and an ASCII letter followed by `:` selects an
-   information field. Other non-blank lines are music code.
-3. `map_with` wraps a successful or recovered line in [`Spanned<Line>`] using
-   `MapExtra::span`. Newline tokens are not part of the line span.
-4. Empty lines terminate tunes and divide the initial file header, tunes, free
-   text, and file-level typeset annotations.
-5. An `X:` block becomes a [`Tune`]. Other blocks become ordered
-   [`DocumentItem`] values, with text directives represented by
-   [`TypesetText`].
-6. Music-token errors are emitted only inside tunes; information fields are
-   diagnosed inside free text.
-7. Chumsky returns diagnostics and the [`Document`] together in `ParseResult`.
+1. Empty lines divide the input into blocks and terminate tunes.
+2. Leading `%` comments are transparent to classification. An ASCII letter
+   followed by `:` selects tune mode; directives and raw lines select text mode.
+3. Tune lines are parsed immediately with diagnostic music recovery. Text lines
+   retain raw spans without invoking the music grammar.
+4. A strict probe of a raw deciding line records a non-fatal
+   [`ErrorKind::MissingReference`] warning when the whole line is valid music;
+   the block remains free text.
+5. `map_with` attaches native input spans. Parser state carries advisory spans
+   separately from Chumsky's `Rich` error channel.
+6. The initial metadata-only block remains the file header. Later field-led
+   blocks become [`Tune`] values even when their first field is not `X:`.
+7. Typeset text and comments are assembled in source order before applying
+   [`ParserOptions`] retention.
 
 Physical lines are intentional recovery boundaries. ABC fields, directives,
 comments, and most music layout constructs cannot consume an arbitrary following
@@ -93,7 +93,9 @@ grace group, decoration, or annotation.
 [`Document::items`] preserves the order of tunes, [`FreeText`] blocks,
 file-level [`TypesetText`], comments, and stylesheet directives after the
 optional initial header. A tune ends at an empty line or EOF. This prevents
-letters in inter-tune prose from being interpreted as notes.
+letters in inter-tune prose from being interpreted as notes. A fieldless block
+always remains free text; if its deciding line is valid music,
+[`parse_recovering`] reports an advisory warning.
 
 `%%text` and `%%center` become typed text nodes. `%%begintext` through
 `%%endtext` becomes one block node; each standard body line must begin with

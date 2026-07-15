@@ -15,15 +15,18 @@
 //! ABC 2.1 free-text and typeset-text document structure tests.
 
 use abc_parser::DocumentItem;
+use abc_parser::ErrorKind;
 use abc_parser::Line;
 use abc_parser::OwnedDocument;
 use abc_parser::ParserOptions;
 use abc_parser::Spanned;
 use abc_parser::ToAbc;
 use abc_parser::TypesetText;
+use abc_parser::parse;
 use abc_parser::parse_input;
 use abc_parser::parse_recovering;
 use abc_parser::parse_recovering_with_options;
+use abc_parser::validate;
 use chumsky::span::SimpleSpan;
 
 const TEXT_DOCUMENT: &str = "%abc-2.1
@@ -236,4 +239,89 @@ C |
     assert_eq!(report.errors.len(), 1);
     assert_eq!(report.output.tunes().count(), 1);
     assert_eq!(free_text_count(&report.output), 1);
+}
+
+#[test]
+fn field_led_blocks_are_tunes_without_reference_fields() {
+    let report = parse_recovering("T:No reference\nM:4/4\nK:C\nCDEF |\n");
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert!(report.warnings.is_empty(), "{:#?}", report.warnings);
+    assert_eq!(report.output.tunes().count(), 1);
+
+    let report = parse_recovering(
+        "X:1\nT:First\nK:C\nCDEF |\n\n% before the second tune\nT:Second\nK:G\nGABc |\n",
+    );
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert_eq!(report.output.tunes().count(), 2);
+    assert!(matches!(
+        report.output.items[1].value,
+        DocumentItem::Comment(_)
+    ));
+}
+
+#[test]
+fn malformed_opening_fields_still_select_tune_mode() {
+    let report = parse_recovering("M:6/x\nK:C\nCDEF |\n");
+    assert_eq!(report.output.tunes().count(), 1);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.message.contains("M: meter")),
+        "{:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn initial_metadata_only_block_remains_the_file_header() {
+    let report = parse_recovering("M:4/4\nL:1/8\n");
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert_eq!(report.output.header.len(), 2);
+    assert_eq!(report.output.tunes().count(), 0);
+
+    let report = parse_recovering("X:1\nT:Header-only tune\nK:C\n");
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert!(report.output.header.is_empty());
+    assert_eq!(report.output.tunes().count(), 1);
+}
+
+#[test]
+fn music_like_text_warns_without_becoming_invalid_or_a_tune() {
+    let source = "% classification comment\nCDEF |\n";
+    let report = parse_recovering(source);
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert!(report.has_warnings());
+    assert_eq!(report.warnings.len(), 1);
+    assert_eq!(report.warnings[0].kind, ErrorKind::MissingReference);
+    assert_eq!(report.warnings[0].span, 25..31);
+    assert_eq!(report.output.tunes().count(), 0);
+    assert!(report.warnings[0].diagnostic(source).contains("2 | CDEF |"));
+    assert!(parse(source).is_ok());
+    assert!(validate(source).is_ok());
+
+    let ambiguous = parse_recovering("CAGE\n");
+    assert!(ambiguous.is_valid());
+    assert_eq!(ambiguous.warnings.len(), 1);
+
+    let prose = parse_recovering("ABC letters here are prose.\n");
+    assert!(prose.is_valid());
+    assert!(prose.warnings.is_empty());
+
+    let later_music = parse_recovering("Ordinary prose.\nCDEF |\n");
+    assert!(later_music.is_valid());
+    assert!(later_music.warnings.is_empty());
+
+    let two_blocks = parse_recovering("CDEF |\n\nGABc |\n");
+    assert!(two_blocks.is_valid());
+    assert_eq!(two_blocks.warnings.len(), 2);
+}
+
+#[test]
+fn possible_music_warning_is_independent_of_text_retention() {
+    let report =
+        parse_recovering_with_options("CDEF |\n", ParserOptions::new().retain_free_text(false));
+    assert!(report.is_valid());
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.output.items.is_empty());
 }

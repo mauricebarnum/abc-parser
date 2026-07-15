@@ -21,7 +21,6 @@
 
 use chumsky::Parser;
 use chumsky::error::Rich;
-use chumsky::error::RichReason;
 use chumsky::span::SimpleSpan;
 use std::fmt;
 use std::fmt::Write as _;
@@ -133,10 +132,10 @@ pub type ParsedDocument<S> = Document<S, SourceText<S>>;
 /// A standalone document whose textual values are owned.
 pub type OwnedDocument<S> = Document<S, String>;
 
-/// One tune beginning with an `X:` field.
+/// One field-led ABC tune, with or without an `X:` field.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Tune<S = Span, T = SourceText<S>> {
-    /// All lines belonging to the tune, including `X:`.
+    /// All lines belonging to the tune, including its opening field.
     pub lines: Vec<Spanned<Line<S, T>, S>>,
 }
 
@@ -770,7 +769,7 @@ pub enum ChordMember {
     Rest(Rest),
 }
 
-/// Classification of a parse fault.
+/// Classification of an error or advisory parser diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -782,7 +781,7 @@ pub enum ErrorKind {
     InvalidDirective,
     /// A token is not valid music syntax.
     InvalidMusic,
-    /// A file has tune material but no `X:` reference field.
+    /// A free-text block looks like tune material without an opening field.
     MissingReference,
 }
 
@@ -834,15 +833,55 @@ impl ParseError {
     {
         resolver.full_source().map_or_else(
             || self.to_string(),
-            |source| render_parse_error(self, &source).unwrap_or_else(|| self.to_string()),
+            |source| {
+                render_diagnostic(&self.message, &self.span, &source)
+                    .unwrap_or_else(|| self.to_string())
+            },
         )
     }
 }
 
-/// Renders one byte-spanned error against its complete source.
-fn render_parse_error(error: &ParseError, source: &str) -> Option<String> {
-    let start = error.span.start;
-    let end = error.span.end;
+/// A non-fatal parser advisory with an exact source location.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseWarning {
+    /// Diagnostic category suitable for programmatic handling.
+    pub kind: ErrorKind,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Half-open byte range in the original input.
+    pub span: Span,
+}
+
+impl fmt::Display for ParseWarning {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} at {}..{}",
+            self.message, self.span.start, self.span.end
+        )
+    }
+}
+
+impl ParseWarning {
+    /// Renders this warning with line, column, and source context when available.
+    pub fn diagnostic<R>(&self, resolver: &R) -> String
+    where
+        R: SourceResolver<SimpleSpan<usize>> + ?Sized,
+    {
+        resolver.full_source().map_or_else(
+            || self.to_string(),
+            |source| {
+                render_diagnostic(&self.message, &self.span, &source)
+                    .unwrap_or_else(|| self.to_string())
+            },
+        )
+    }
+}
+
+/// Renders one byte-spanned diagnostic against its complete source.
+fn render_diagnostic(message: &str, span: &Span, source: &str) -> Option<String> {
+    let start = span.start;
+    let end = span.end;
     if start > end
         || end > source.len()
         || !source.is_char_boundary(start)
@@ -871,7 +910,7 @@ fn render_parse_error(error: &ParseError, source: &str) -> Option<String> {
     let gutter_width = line_number.to_string().len();
     Some(format!(
         "{line_number}:{column}: {}\n{empty:>gutter_width$} |\n{line_number:>gutter_width$} | {}\n{empty:>gutter_width$} | {prefix}{marker}",
-        error.message,
+        message,
         &source[line_start..line_end],
         empty = "",
     ))
@@ -884,12 +923,19 @@ pub struct ParseReport<T> {
     pub output: T,
     /// Diagnostics in source order.
     pub errors: Vec<ParseError>,
+    /// Non-fatal advisories in source order.
+    pub warnings: Vec<ParseWarning>,
 }
 
 impl<T> ParseReport<T> {
     /// Returns whether parsing completed without diagnostics.
     pub const fn is_valid(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    /// Returns whether parsing produced any non-fatal advisories.
+    pub const fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
     }
 }
 
@@ -906,57 +952,29 @@ pub fn parse_recovering_with_options(
     source: &str,
     options: ParserOptions,
 ) -> ParseReport<OwnedDocument<SimpleSpan<usize>>> {
-    let (output, faults) = parse_input_with_options(source, options).into_output_errors();
+    let (result, warning_spans) =
+        combinators::parse_input_with_options_and_warnings(source, options);
+    let (output, faults) = result.into_output_errors();
     let output = output
         .and_then(|document| document.into_owned(source).ok())
         .unwrap_or_default();
-    let extension_lines = extension_music_line_spans(&output);
-    let mut errors = faults
-        .iter()
-        .filter(|error| !is_unknown_music_error(error) || extension_lines.is_empty())
-        .map(chumsky_error)
-        .collect::<Vec<_>>();
-    for span in extension_lines {
-        let line = source.get(span.start..span.end).unwrap_or_default();
-        errors.extend(
-            music_line_parser()
-                .parse(line)
-                .into_errors()
-                .iter()
-                .map(|error| chumsky_error_with_offset(error, span.start)),
-        );
-    }
+    let mut errors = faults.iter().map(chumsky_error).collect::<Vec<_>>();
     errors.sort_by_key(|error| (error.span.start, error.span.end));
-    ParseReport { output, errors }
-}
-
-/// Returns tune music lines that contain recovered extension nodes.
-fn extension_music_line_spans(
-    document: &OwnedDocument<SimpleSpan<usize>>,
-) -> Vec<SimpleSpan<usize>> {
-    document
-        .tunes()
-        .flat_map(|tune| &tune.lines)
-        .filter_map(|line| match &line.value {
-            Line::Music(elements)
-                if elements
-                    .iter()
-                    .any(|element| matches!(element.value, MusicElement::Extension(_))) =>
-            {
-                Some(line.span)
-            }
-            _ => None,
+    let mut warnings = warning_spans
+        .into_iter()
+        .map(|span| ParseWarning {
+            kind: ErrorKind::MissingReference,
+            message: "block parses as music but has no leading information field; treating it as free text"
+                .to_owned(),
+            span: span.start..span.end,
         })
-        .collect()
-}
-
-/// Identifies the source-independent music fallback replaced during refinement.
-fn is_unknown_music_error(error: &Rich<'_, char, SimpleSpan<usize>>) -> bool {
-    matches!(
-        error.reason(),
-        RichReason::Custom(message)
-            if message == combinators::UNKNOWN_MUSIC_DIAGNOSTIC
-    )
+        .collect::<Vec<_>>();
+    warnings.sort_by_key(|warning| (warning.span.start, warning.span.end));
+    ParseReport {
+        output,
+        errors,
+        warnings,
+    }
 }
 
 /// Parses a complete ABC document, failing if any syntax error is found.
@@ -999,7 +1017,11 @@ pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> 
         .and_then(|line| line.value.into_owned(source).ok())
         .unwrap_or(Line::Blank);
     let errors = faults.iter().map(chumsky_error).collect();
-    ParseReport { output, errors }
+    ParseReport {
+        output,
+        errors,
+        warnings: Vec::new(),
+    }
 }
 
 /// Parses a `%%` directive line.
@@ -1089,7 +1111,11 @@ pub fn parse_music_line(
         .filter_map(|item| item.into_owned(source).ok())
         .collect();
     let errors = faults.iter().map(chumsky_error).collect();
-    ParseReport { output, errors }
+    ParseReport {
+        output,
+        errors,
+        warnings: Vec::new(),
+    }
 }
 
 fn chumsky_error(error: &Rich<'_, char, SimpleSpan<usize>>) -> ParseError {
@@ -1111,7 +1137,11 @@ fn chumsky_error_with_offset(
 
 /// Formats Chumsky's reason and production contexts without internal spans.
 fn rich_error_message(error: &Rich<'_, char, SimpleSpan<usize>>) -> String {
-    let mut message = error.reason().to_string();
+    let mut message = error
+        .reason()
+        .to_string()
+        .replace("found '\n'", "found end of line")
+        .replace("found '\r'", "found end of line");
     let contexts = error
         .contexts()
         .map(|(context, _)| context.to_string())

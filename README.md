@@ -46,4 +46,6 @@ ABC notation after inspection or transformation.
 At file level, tunes, free-text blocks, and typed `%%text`, `%%center`, and
 `%%begintext` annotations are retained in source order. `ParserOptions` can
 independently discard free text or typeset text while continuing to parse and
-validate it.
+validate it. Field-led blocks are parsed as tunes even without `X:`; a fieldless
+block that looks entirely like music remains free text and produces a non-fatal
+warning in `ParseReport`.

@@ -83,13 +83,31 @@ use chumsky::recovery::via_parser;
 use chumsky::span::Span as ChumskySpan;
 use std::fmt;
 
-type Extra<'src, I> = extra::Err<Rich<'src, char, <I as Input<'src>>::Span>>;
+type WarningState<S> = extra::SimpleState<Vec<S>>;
+type Extra<'src, I> = extra::Full<
+    Rich<'src, char, <I as Input<'src>>::Span>,
+    WarningState<<I as Input<'src>>::Span>,
+    (),
+>;
 type ParsedMusic<S> = Vec<Spanned<MusicElement<SourceText<S>>, S>>;
 type ParsedLine<S> = Spanned<Line<S, SourceText<S>>, S>;
+type DocumentParse<'src, I> = ParseResult<
+    ParsedDocument<<I as Input<'src>>::Span>,
+    Rich<'src, char, <I as Input<'src>>::Span>,
+>;
+type DocumentParseWithWarnings<'src, I> = (DocumentParse<'src, I>, Vec<<I as Input<'src>>::Span>);
 
-/// Source-independent fallback used until tune lines can be reparsed.
-pub(super) const UNKNOWN_MUSIC_DIAGNOSTIC: &str =
-    "unrecognized music token; expected music element";
+/// A blank-delimited document block parsed in its selected grammar mode.
+enum ParsedBlock<S> {
+    Tune {
+        leading_comments: Vec<ParsedLine<S>>,
+        lines: Vec<ParsedLine<S>>,
+    },
+    Text {
+        lines: Vec<ParsedLine<S>>,
+        possible_music: Option<S>,
+    },
+}
 
 /// Parses a character other than a physical line ending.
 fn line_character<'src, I>() -> impl Parser<'src, I, char, Extra<'src, I>> + Clone
@@ -1027,23 +1045,6 @@ where
     .as_context()
 }
 
-/// Parses one music element quietly during preliminary line classification.
-fn quiet_music_element_parser<'src, I>()
--> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
-where
-    I: ValueInput<'src, Token = char>,
-    I::Span: Clone,
-{
-    let extension = line_character()
-        .map_with(|_, extra| MusicElement::Extension(SourceText::Span(extra.span())));
-    semantic_music_element_parser()
-        .or(extension)
-        .map_with(|value, extra| Spanned {
-            value,
-            span: extra.span(),
-        })
-}
-
 /// Parses one music element while preserving the strict parser's failure.
 fn diagnostic_music_element_parser<'src, I>()
 -> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
@@ -1145,32 +1146,31 @@ where
         })
 }
 
-/// Classifies a physical line using ordered ABC prefix alternatives.
-fn unspanned_line_parser<'src, I>()
+/// Classifies a non-blank tune line while preserving music parser failures.
+fn tune_line_parser<'src, I>()
 -> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
+    let directive_fallback = just("%%")
+        .ignore_then(remaining_text())
+        .map(Line::DirectiveText);
     choice((
         directive_parser().map(Line::Directive),
-        just("%%")
-            .ignore_then(remaining_text())
-            .map(Line::DirectiveText),
+        directive_fallback,
         just('%').ignore_then(remaining_text()).map(Line::Comment),
         recovering_field_parser().map(Line::Field),
-        one_of(" \t").repeated().at_least(1).to(Line::Blank),
-        quiet_music_element_parser::<I>()
+        diagnostic_music_element_parser::<I>()
             .repeated()
             .at_least(1)
             .collect()
             .map(Line::Music),
-        empty().to(Line::Blank),
     ))
 }
 
-/// Classifies one physical line while preserving music parser failures.
-fn diagnostic_unspanned_line_parser<'src, I>()
+/// Classifies a standalone line while preserving directive parser failures.
+fn diagnostic_line_parser<'src, I>()
 -> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
@@ -1186,14 +1186,163 @@ where
         directive,
         just('%').ignore_then(remaining_text()).map(Line::Comment),
         recovering_field_parser().map(Line::Field),
-        one_of(" \t").repeated().at_least(1).to(Line::Blank),
         diagnostic_music_element_parser::<I>()
             .repeated()
             .at_least(1)
             .collect()
             .map(Line::Music),
-        empty().to(Line::Blank),
     ))
+}
+
+/// Classifies a non-blank text line without applying the music grammar.
+fn text_line_parser<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let directive_fallback = just("%%")
+        .ignore_then(remaining_text())
+        .map(Line::DirectiveText);
+    choice((
+        directive_parser().map(Line::Directive),
+        directive_fallback,
+        just('%').ignore_then(remaining_text()).map(Line::Comment),
+        recovering_field_parser().map(Line::Field),
+        line_character()
+            .repeated()
+            .at_least(1)
+            .ignored()
+            .to(Line::Music(Vec::new())),
+    ))
+}
+
+/// Parses a complete music line without recovery for advisory classification.
+fn strict_music_line_parser<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    semantic_music_element_parser()
+        .map_with(|value, extra| Spanned {
+            value,
+            span: extra.span(),
+        })
+        .repeated()
+        .at_least(1)
+        .collect()
+        .map(Line::Music)
+}
+
+/// Requires a physical line to contain a non-whitespace character.
+fn nonblank_line<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    one_of(" \t")
+        .repeated()
+        .ignore_then(line_character().filter(|character| !matches!(character, ' ' | '\t')))
+        .rewind()
+        .ignored()
+}
+
+/// Wraps a non-blank line parser with its source span.
+fn spanned_nonblank_line<'src, I, P>(
+    parser: P,
+) -> impl Parser<'src, I, ParsedLine<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    P: Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone,
+{
+    nonblank_line::<I>()
+        .ignore_then(parser)
+        .map_with(|value, extra| Spanned {
+            value,
+            span: extra.span(),
+        })
+}
+
+/// Parses a blank-delimited block directly in tune or text mode.
+fn block_parser<'src, I>() -> impl Parser<'src, I, ParsedBlock<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let comment = just('%')
+        .then_ignore(just('%').not())
+        .ignore_then(remaining_text())
+        .map(Line::Comment);
+    let spanned_comment = spanned_nonblank_line::<I, _>(comment);
+    let tune_line = spanned_nonblank_line::<I, _>(tune_line_parser());
+    let text_line = spanned_nonblank_line::<I, _>(text_line_parser());
+    let possible_music_line = spanned_nonblank_line::<I, _>(
+        strict_music_line_parser().then_ignore(newline().rewind().or(end())),
+    );
+    let field_start = any()
+        .filter(char::is_ascii_alphabetic)
+        .then_ignore(just(':'))
+        .rewind();
+
+    let tune = spanned_comment
+        .clone()
+        .then_ignore(newline())
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(
+            field_start.ignore_then(tune_line.clone()).then(
+                newline()
+                    .ignore_then(tune_line)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .map(|(leading_comments, (reference, mut lines))| {
+            lines.insert(0, reference);
+            ParsedBlock::Tune {
+                leading_comments,
+                lines,
+            }
+        });
+    let possible_music = spanned_comment
+        .then_ignore(newline())
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(
+            possible_music_line.then(
+                newline()
+                    .ignore_then(text_line.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .map(|(mut leading_comments, (first, mut lines))| {
+            let possible_music = first.span.clone();
+            leading_comments.push(first);
+            leading_comments.append(&mut lines);
+            ParsedBlock::Text {
+                lines: leading_comments,
+                possible_music: Some(possible_music),
+            }
+        });
+    let text = text_line
+        .clone()
+        .then(
+            newline()
+                .ignore_then(text_line)
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map(|(first, mut lines)| {
+            lines.insert(0, first);
+            ParsedBlock::Text {
+                lines,
+                possible_music: None,
+            }
+        });
+
+    choice((tune, possible_music, text))
 }
 
 /// Builds a parser for one source-spanned physical ABC line.
@@ -1202,7 +1351,12 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    diagnostic_unspanned_line_parser::<I>().map_with(|value, extra| Spanned {
+    choice((
+        diagnostic_line_parser(),
+        one_of(" \t").repeated().at_least(1).to(Line::Blank),
+        empty().to(Line::Blank),
+    ))
+    .map_with(|value, extra| Spanned {
         value,
         span: extra.span(),
     })
@@ -1216,14 +1370,6 @@ where
     just('\r').or_not().then_ignore(just('\n')).ignored()
 }
 
-/// Returns whether a parsed physical line starts an ABC tune.
-fn is_reference_line<S, T>(line: &Spanned<Line<S, T>, S>) -> bool {
-    matches!(
-        &line.value,
-        Line::Field(field) if matches!(field.value, FieldValue::Reference(_))
-    )
-}
-
 /// Computes the encompassing span for a non-empty physical-line block.
 fn block_span<S, T>(lines: &[Spanned<Line<S, T>, S>]) -> S
 where
@@ -1232,6 +1378,22 @@ where
     S::Offset: Ord,
 {
     lines[0].span.union(lines[lines.len() - 1].span.clone())
+}
+
+/// Returns whether the first block contains only non-tune header material.
+fn is_initial_header<S, T>(lines: &[Spanned<Line<S, T>, S>]) -> bool {
+    !lines.iter().any(|line| {
+        matches!(
+            &line.value,
+            Line::Field(field) if field.key == 'X'
+        )
+    }) && lines.iter().all(|line| {
+        matches!(&line.value, Line::Comment(_) | Line::Field(_))
+            || matches!(
+                &line.value,
+                Line::Directive(directive) if directive.kind == DirectiveKind::Other
+            )
+    })
 }
 
 /// Converts unclassified physical lines into one lossless free-text item.
@@ -1283,169 +1445,206 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
-    unspanned_line_parser::<I>()
-        .map_with(|value, extra| Spanned {
-            value,
-            span: extra.span(),
-        })
-        .separated_by(newline())
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .validate(move |mut lines, _, emitter| {
-            if lines
-                .last()
-                .is_some_and(|line| matches!(line.value, Line::Blank))
-            {
-                lines.pop();
-            }
-            let mut blocks = Vec::<Vec<_>>::new();
-            let mut block = Vec::new();
-            for line in lines {
-                if matches!(line.value, Line::Blank) {
-                    if !block.is_empty() {
-                        blocks.push(std::mem::take(&mut block));
-                    }
-                } else {
-                    block.push(line);
-                }
-            }
-            if !block.is_empty() {
-                blocks.push(block);
-            }
-
+    let blank_line = horizontal_space::<I>().then_ignore(newline());
+    let block_separator = newline()
+        .ignore_then(blank_line.clone().repeated().at_least(1))
+        .ignored();
+    blank_line
+        .repeated()
+        .ignore_then(
+            block_parser::<I>()
+                .separated_by(block_separator)
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(newline().or_not())
+        .then_ignore(horizontal_space())
+        .then_ignore(end())
+        .validate(move |blocks, extra, emitter| {
             let mut document = Document {
                 header: Vec::new(),
                 items: Vec::new(),
             };
-            if let Some(first) = blocks.first_mut() {
-                if let Some(reference) = first.iter().position(is_reference_line) {
-                    if reference > 0
-                        && first[..reference]
-                            .iter()
-                            .all(|line| matches!(line.value, Line::Comment(_)))
-                    {
-                        document.header.extend(first.drain(..reference));
-                    }
-                } else if first.iter().all(|line| {
-                    matches!(&line.value, Line::Comment(_) | Line::Field(_))
-                        || matches!(
-                            &line.value,
-                            Line::Directive(directive)
-                                if directive.kind == DirectiveKind::Other
-                        )
-                }) {
-                    document.header = blocks.remove(0);
-                }
-            }
 
-            for block in blocks {
-                if block.first().is_some_and(is_reference_line) {
-                    let span = block_span(&block);
-                    let mut tune_lines = Vec::new();
-                    let mut iterator = block.into_iter();
-                    while let Some(line) = iterator.next() {
-                        match line.value {
-                            Line::Directive(directive) if directive.kind == DirectiveKind::Text => {
-                                if options.keeps_typeset_text() {
-                                    tune_lines.push(Spanned {
-                                        value: Line::TypesetText(TypesetText::Text(
-                                            directive.arguments,
-                                        )),
+            for (block_index, block) in blocks.into_iter().enumerate() {
+                let block = match block {
+                    ParsedBlock::Tune {
+                        mut leading_comments,
+                        lines,
+                    } => {
+                        if block_index == 0 && is_initial_header(&lines) {
+                            leading_comments.extend(lines);
+                            document.header = leading_comments;
+                            continue;
+                        }
+                        if block_index == 0 {
+                            document.header = leading_comments;
+                        } else {
+                            for line in leading_comments {
+                                if let Line::Comment(text) = line.value {
+                                    document.items.push(Spanned {
+                                        value: DocumentItem::Comment(text),
                                         span: line.span,
                                     });
                                 }
                             }
-                            Line::Directive(directive)
-                                if directive.kind == DirectiveKind::Center =>
-                            {
-                                if options.keeps_typeset_text() {
-                                    tune_lines.push(Spanned {
-                                        value: Line::TypesetText(TypesetText::Centered(
-                                            directive.arguments,
-                                        )),
-                                        span: line.span,
-                                    });
-                                }
-                            }
-                            Line::Directive(directive)
-                                if directive.kind == DirectiveKind::BeginText =>
-                            {
-                                let start = line.span;
-                                let mut end = start.clone();
-                                let mut body = Vec::new();
-                                let mut closed = false;
-                                for body_line in iterator.by_ref() {
-                                    end = body_line.span.clone();
-                                    match body_line.value {
-                                        Line::Directive(value)
-                                            if value.kind == DirectiveKind::EndText =>
-                                        {
-                                            closed = true;
-                                            break;
-                                        }
-                                        Line::Directive(value) => body.push(value.body),
-                                        Line::DirectiveText(value) => body.push(value),
-                                        _ => emitter.emit(Rich::custom(
-                                            body_line.span,
-                                            "typeset block lines must begin with %%",
-                                        )),
+                        }
+                        lines
+                    }
+                    ParsedBlock::Text {
+                        lines,
+                        possible_music,
+                    } => {
+                        if let Some(span) = possible_music {
+                            extra.state().push(span);
+                        }
+                        if block_index == 0 && is_initial_header(&lines) {
+                            document.header = lines;
+                            continue;
+                        }
+
+                        let mut free_lines = Vec::new();
+                        let mut iterator = lines.into_iter();
+                        while let Some(line) = iterator.next() {
+                            match line.value {
+                                Line::Directive(directive)
+                                    if directive.kind == DirectiveKind::Text
+                                        || directive.kind == DirectiveKind::Center =>
+                                {
+                                    if options.keeps_free_text() {
+                                        push_free_text(&mut document.items, &mut free_lines);
+                                    } else {
+                                        free_lines.clear();
+                                    }
+                                    if options.keeps_typeset_text() {
+                                        let text = if directive.kind == DirectiveKind::Text {
+                                            TypesetText::Text(directive.arguments)
+                                        } else {
+                                            TypesetText::Centered(directive.arguments)
+                                        };
+                                        document.items.push(Spanned {
+                                            value: DocumentItem::TypesetText(text),
+                                            span: line.span,
+                                        });
                                     }
                                 }
-                                if !closed {
-                                    emitter.emit(Rich::custom(
-                                        start.clone(),
-                                        "unclosed %%begintext block",
-                                    ));
-                                }
-                                if options.keeps_typeset_text() {
-                                    tune_lines.push(Spanned {
-                                        value: Line::TypesetText(TypesetText::Block(body)),
-                                        span: start.union(end),
-                                    });
-                                }
-                            }
-                            Line::Music(ref elements) => {
-                                for element in elements {
-                                    if matches!(element.value, MusicElement::Extension(_)) {
+                                Line::Directive(directive)
+                                    if directive.kind == DirectiveKind::BeginText =>
+                                {
+                                    if options.keeps_free_text() {
+                                        push_free_text(&mut document.items, &mut free_lines);
+                                    } else {
+                                        free_lines.clear();
+                                    }
+                                    let start = line.span;
+                                    let mut end = start.clone();
+                                    let mut body = Vec::new();
+                                    let mut closed = false;
+                                    for body_line in iterator.by_ref() {
+                                        end = body_line.span.clone();
+                                        match body_line.value {
+                                            Line::Directive(value)
+                                                if value.kind == DirectiveKind::EndText =>
+                                            {
+                                                closed = true;
+                                                break;
+                                            }
+                                            Line::Directive(value) => body.push(value.body),
+                                            Line::DirectiveText(value) => body.push(value),
+                                            _ => emitter.emit(Rich::custom(
+                                                body_line.span,
+                                                "typeset block lines must begin with %%",
+                                            )),
+                                        }
+                                    }
+                                    if !closed {
                                         emitter.emit(Rich::custom(
-                                            element.span.clone(),
-                                            UNKNOWN_MUSIC_DIAGNOSTIC,
+                                            start.clone(),
+                                            "unclosed %%begintext block",
                                         ));
                                     }
+                                    if options.keeps_typeset_text() {
+                                        document.items.push(Spanned {
+                                            value: DocumentItem::TypesetText(TypesetText::Block(
+                                                body,
+                                            )),
+                                            span: start.union(end),
+                                        });
+                                    }
                                 }
-                                tune_lines.push(line);
+                                Line::Comment(text) => {
+                                    if options.keeps_free_text() {
+                                        push_free_text(&mut document.items, &mut free_lines);
+                                    } else {
+                                        free_lines.clear();
+                                    }
+                                    document.items.push(Spanned {
+                                        value: DocumentItem::Comment(text),
+                                        span: line.span,
+                                    });
+                                }
+                                Line::Directive(directive) => {
+                                    if options.keeps_free_text() {
+                                        push_free_text(&mut document.items, &mut free_lines);
+                                    } else {
+                                        free_lines.clear();
+                                    }
+                                    if directive.kind == DirectiveKind::EndText {
+                                        emitter.emit(Rich::custom(
+                                            line.span.clone(),
+                                            "%%endtext without %%begintext",
+                                        ));
+                                    }
+                                    document.items.push(Spanned {
+                                        value: DocumentItem::Directive(directive),
+                                        span: line.span,
+                                    });
+                                }
+                                Line::Field(_) => {
+                                    emitter.emit(Rich::custom(
+                                        line.span.clone(),
+                                        "information fields are not allowed in free text",
+                                    ));
+                                    free_lines.push(line);
+                                }
+                                Line::DirectiveText(_) => {
+                                    emitter.emit(Rich::custom(
+                                        line.span.clone(),
+                                        "invalid stylesheet directive",
+                                    ));
+                                    free_lines.push(line);
+                                }
+                                _ => free_lines.push(line),
                             }
-                            _ => tune_lines.push(line),
                         }
+                        if options.keeps_free_text() {
+                            push_free_text(&mut document.items, &mut free_lines);
+                        }
+                        continue;
                     }
-                    document.items.push(Spanned {
-                        value: DocumentItem::Tune(Tune { lines: tune_lines }),
-                        span,
-                    });
-                    continue;
-                }
+                };
 
-                let mut free_lines = Vec::new();
+                let span = block_span(&block);
+                let mut tune_lines = Vec::new();
                 let mut iterator = block.into_iter();
                 while let Some(line) = iterator.next() {
                     match line.value {
-                        Line::Directive(directive)
-                            if directive.kind == DirectiveKind::Text
-                                || directive.kind == DirectiveKind::Center =>
-                        {
-                            if options.keeps_free_text() {
-                                push_free_text(&mut document.items, &mut free_lines);
-                            } else {
-                                free_lines.clear();
-                            }
+                        Line::Directive(directive) if directive.kind == DirectiveKind::Text => {
                             if options.keeps_typeset_text() {
-                                let text = if directive.kind == DirectiveKind::Text {
-                                    TypesetText::Text(directive.arguments)
-                                } else {
-                                    TypesetText::Centered(directive.arguments)
-                                };
-                                document.items.push(Spanned {
-                                    value: DocumentItem::TypesetText(text),
+                                tune_lines.push(Spanned {
+                                    value: Line::TypesetText(TypesetText::Text(
+                                        directive.arguments,
+                                    )),
+                                    span: line.span,
+                                });
+                            }
+                        }
+                        Line::Directive(directive) if directive.kind == DirectiveKind::Center => {
+                            if options.keeps_typeset_text() {
+                                tune_lines.push(Spanned {
+                                    value: Line::TypesetText(TypesetText::Centered(
+                                        directive.arguments,
+                                    )),
                                     span: line.span,
                                 });
                             }
@@ -1453,11 +1652,6 @@ where
                         Line::Directive(directive)
                             if directive.kind == DirectiveKind::BeginText =>
                         {
-                            if options.keeps_free_text() {
-                                push_free_text(&mut document.items, &mut free_lines);
-                            } else {
-                                free_lines.clear();
-                            }
                             let start = line.span;
                             let mut end = start.clone();
                             let mut body = Vec::new();
@@ -1486,60 +1680,26 @@ where
                                 ));
                             }
                             if options.keeps_typeset_text() {
-                                document.items.push(Spanned {
-                                    value: DocumentItem::TypesetText(TypesetText::Block(body)),
+                                tune_lines.push(Spanned {
+                                    value: Line::TypesetText(TypesetText::Block(body)),
                                     span: start.union(end),
                                 });
                             }
                         }
-                        Line::Comment(text) => {
-                            if options.keeps_free_text() {
-                                push_free_text(&mut document.items, &mut free_lines);
-                            } else {
-                                free_lines.clear();
-                            }
-                            document.items.push(Spanned {
-                                value: DocumentItem::Comment(text),
-                                span: line.span,
-                            });
-                        }
-                        Line::Directive(directive) => {
-                            if options.keeps_free_text() {
-                                push_free_text(&mut document.items, &mut free_lines);
-                            } else {
-                                free_lines.clear();
-                            }
-                            if directive.kind == DirectiveKind::EndText {
-                                emitter.emit(Rich::custom(
-                                    line.span.clone(),
-                                    "%%endtext without %%begintext",
-                                ));
-                            }
-                            document.items.push(Spanned {
-                                value: DocumentItem::Directive(directive),
-                                span: line.span,
-                            });
-                        }
-                        Line::Field(_) => {
-                            emitter.emit(Rich::custom(
-                                line.span.clone(),
-                                "information fields are not allowed in free text",
-                            ));
-                            free_lines.push(line);
-                        }
                         Line::DirectiveText(_) => {
                             emitter.emit(Rich::custom(
                                 line.span.clone(),
-                                "invalid stylesheet directive",
+                                "invalid stylesheet directive; expected stylesheet directive name",
                             ));
-                            free_lines.push(line);
+                            tune_lines.push(line);
                         }
-                        _ => free_lines.push(line),
+                        _ => tune_lines.push(line),
                     }
                 }
-                if options.keeps_free_text() {
-                    push_free_text(&mut document.items, &mut free_lines);
-                }
+                document.items.push(Spanned {
+                    value: DocumentItem::Tune(Tune { lines: tune_lines }),
+                    span,
+                });
             }
             document
         })
@@ -1573,4 +1733,20 @@ where
     <I::Span as ChumskySpan>::Offset: Ord,
 {
     document_parser_with_options(options).parse(input)
+}
+
+/// Parses a document while retaining advisory block-classification spans.
+pub(super) fn parse_input_with_options_and_warnings<'src, I>(
+    input: I,
+    options: ParserOptions,
+) -> DocumentParseWithWarnings<'src, I>
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    let mut warnings = WarningState::default();
+    let result = document_parser_with_options(options).parse_with_state(input, &mut warnings);
+    (result, warnings.0)
 }

@@ -177,11 +177,26 @@ fn invalid_input_reports_source_context() {
 }
 
 #[test]
+fn music_like_free_text_warns_without_failing() {
+    let source = "% comment\nCDEF |\n";
+    let output = run_stdin(source, &["--semitones", "0"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, source.as_bytes());
+    let warning = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        warning.contains("abc-transpose: warning: <stdin>:2:1"),
+        "{warning}"
+    );
+    assert!(warning.contains("treating it as free text"), "{warning}");
+    assert!(warning.contains("2 | CDEF |"), "{warning}");
+}
+
+#[test]
 fn malformed_music_reports_the_enclosing_production() {
     let output = run_stdin("X:1\nK:C\n[CEG\nC |\n", &["--semitones", "1"]);
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("<stdin>:3:5: found end of input"), "{error}");
+    assert!(error.contains("<stdin>:3:5: found end of line"), "{error}");
     assert!(error.contains("while parsing chord"), "{error}");
     assert!(error.contains("3 | [CEG"), "{error}");
     assert!(error.contains("|     ^"), "{error}");
