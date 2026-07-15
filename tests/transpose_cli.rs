@@ -113,6 +113,18 @@ fn zero_semitones_are_a_byte_preserving_no_op() {
 }
 
 #[test]
+fn output_without_a_source_newline_is_newline_terminated() {
+    let source = "X:1\nK:C\nC |";
+    let unchanged = run_stdin(source, &["--semitones", "0"]);
+    let transposed = run_stdin(source, &["--semitones", "1"]);
+
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert_eq!(unchanged.stdout, b"X:1\nK:C\nC |\n");
+    assert!(transposed.status.success(), "{transposed:?}");
+    assert!(transposed.stdout.ends_with(b"\n"), "{transposed:?}");
+}
+
+#[test]
 fn explicit_note_lengths_reemit_a_zero_transposition() {
     let source = "X: 1\nL: 1/8\nK: C\nA/\n";
     let default = run_stdin(source, &["--semitones", "0"]);
@@ -123,7 +135,7 @@ fn explicit_note_lengths_reemit_a_zero_transposition() {
     assert!(explicit.status.success(), "{explicit:?}");
     assert_eq!(
         String::from_utf8(explicit.stdout).unwrap(),
-        "X:1\nL:1/8\nK:C\nA/2"
+        "X:1\nL:1/8\nK:C\nA/2\n"
     );
 }
 

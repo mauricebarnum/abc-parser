@@ -430,6 +430,15 @@ fn read_source(path: &PathBuf) -> Result<String, String> {
 
 /// Writes all output bytes to the selected file or standard output.
 fn write_output(source: &str, path: Option<&PathBuf>) -> Result<(), String> {
+    let mut terminated;
+    let source = if source.ends_with('\n') {
+        source
+    } else {
+        terminated = String::with_capacity(source.len() + 1);
+        terminated.push_str(source);
+        terminated.push('\n');
+        &terminated
+    };
     if let Some(path) = path {
         fs::write(path, source)
             .map_err(|error| format!("could not write {}: {error}", path.display()))
