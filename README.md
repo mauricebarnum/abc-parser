@@ -12,8 +12,22 @@ streams without first converting them to `&str`.
 ```sh
 cargo run -p abc-parser --example kitchen_sink -- test_kitchen_sink.abc
 cargo run -p abc-parser --example transpose_kitchen_sink
+cargo run -p abc-parser --bin abc-transpose -- test_kitchen_sink.abc --semitones 1
 cargo test --workspace
 ```
+
+The `abc-transpose` binary writes each transposed tune to standard output. It
+accepts a destination key, signed semitones, or signed whole-tone steps in exact
+increments of `0.5`:
+
+```sh
+abc-transpose tunes.abc --key Dm > tunes-in-d-minor.abc
+abc-transpose tunes.abc --semitones -1 > tunes-down-one-semitone.abc
+abc-transpose tunes.abc --steps 1.5 > tunes-up-three-semitones.abc
+```
+
+Pass `-` as the input path to read ABC from standard input. A zero semitone or
+step interval is a byte-preserving no-op.
 
 Music code is represented semantically: pitches, fractional accidentals and
 durations, rests, chords, bars and repeats, variant endings, tuplets, grace

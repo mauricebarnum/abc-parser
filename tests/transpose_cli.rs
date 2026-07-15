@@ -1,0 +1,85 @@
+// Copyright 2026 Maurice S. Barnum
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! End-to-end tests for the standalone ABC transposition command.
+
+use abc_parser::FieldValue;
+use abc_parser::Line;
+use abc_parser::ToAbc;
+use abc_parser::parse_recovering;
+use std::process::Command;
+
+const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
+const KITCHEN_SINK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_kitchen_sink.abc");
+
+/// Runs the built command with the repository fixture as input.
+fn run(arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_abc-transpose"))
+        .arg(KITCHEN_SINK_PATH)
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn zero_semitones_are_a_byte_preserving_no_op() {
+    let output = run(&["--semitones", "0"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, KITCHEN_SINK.as_bytes());
+}
+
+#[test]
+fn half_a_step_matches_one_semitone_and_emits_valid_abc() {
+    let steps = run(&["--steps", "0.5"]);
+    let semitone = run(&["--semitones", "1"]);
+    assert!(steps.status.success());
+    assert_eq!(steps.stdout, semitone.stdout);
+
+    let source = String::from_utf8(steps.stdout).unwrap();
+    let reparsed = parse_recovering(&source);
+    assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
+    assert_eq!(reparsed.output.tunes().count(), 2);
+}
+
+#[test]
+fn destination_key_is_applied_independently_to_every_tune() {
+    let output = run(&["--key", "Dm"]);
+    assert!(output.status.success());
+    let source = String::from_utf8(output.stdout).unwrap();
+    let reparsed = parse_recovering(&source);
+    assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
+
+    for tune in reparsed.output.tunes() {
+        let key = tune
+            .lines
+            .iter()
+            .find_map(|line| match &line.value {
+                Line::Field(field) => match &field.value {
+                    FieldValue::Key(key) => Some(key),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(key.to_abc(), "Dm");
+    }
+}
+
+#[test]
+fn non_half_step_values_are_rejected() {
+    let output = run(&["--steps", "0.25"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("exact multiple of 0.5"));
+}
