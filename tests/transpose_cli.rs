@@ -33,6 +33,22 @@ fn run(arguments: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn help_describes_transposition_and_spelling_options() {
+    let output = Command::new(env!("CARGO_BIN_EXE_abc-transpose"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("Usage: abc-transpose"), "{help}");
+    assert!(help.contains("--key <KEY>"), "{help}");
+    assert!(help.contains("--semitones <N>"), "{help}");
+    assert!(help.contains("--steps <N>"), "{help}");
+    assert!(help.contains("--prefer-flats <BOOL>"), "{help}");
+    assert!(help.contains("Possible values:"), "{help}");
+}
+
+#[test]
 fn zero_semitones_are_a_byte_preserving_no_op() {
     let output = run(&["--semitones", "0"]);
     assert!(output.status.success());

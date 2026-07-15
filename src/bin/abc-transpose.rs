@@ -36,20 +36,15 @@ use abc_parser::Tune;
 use abc_parser::parse_field;
 use abc_parser::parse_music_line;
 use abc_parser::parse_recovering;
-use std::env;
+use clap::ArgGroup;
+use clap::Parser;
+use clap::ValueEnum;
 use std::fs;
 use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-const USAGE: &str = "Usage: abc-transpose <FILE|-> (--key <KEY> | --semitones <N> | --steps <N>) [--prefer-flats <true|false|auto>]\n\
-\n\
-Transpose every tune in an ABC file and write canonical ABC to standard output.\n\
-Use - as FILE to read standard input. KEY accepts ABC K: syntax with or without K:.\n\
-Semitones are signed: 0 is unchanged, 1 is one semitone higher, and -1 is one lower.\n\
-Steps are signed whole-tone steps and must be multiples of 0.5; 0.5 is one semitone.\n";
 
 /// A requested transposition operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,14 +56,17 @@ enum Request {
 }
 
 /// Requested policy for choosing enharmonic spellings.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum SpellingPreference {
     /// Select the conventional destination having the smallest key signature.
+    #[value(name = "auto")]
     #[default]
     Auto,
     /// Prefer flat-oriented conventional destinations.
+    #[value(name = "true")]
     Flats,
     /// Prefer sharp-oriented conventional destinations.
+    #[value(name = "false")]
     Sharps,
 }
 
@@ -83,12 +81,55 @@ impl SpellingPreference {
     }
 }
 
-/// Fully validated command-line arguments.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Command-line arguments for transposing an ABC file.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[command(
+    name = "abc-transpose",
+    about = "Transpose every tune in an ABC file",
+    long_about = "Transpose every tune in an ABC file and write canonical ABC to standard output."
+)]
+#[command(group(
+    ArgGroup::new("transposition")
+        .required(true)
+        .multiple(false)
+        .args(["key", "semitones", "steps"])
+))]
 struct Arguments {
+    /// ABC input file, or - to read standard input.
     input: PathBuf,
-    request: Request,
+    /// Destination key, in ABC K: syntax with or without K:.
+    #[arg(long, value_name = "KEY", value_parser = parse_key)]
+    key: Option<KeySignature<String>>,
+    /// Signed chromatic interval; 1 is one semitone higher.
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    semitones: Option<i16>,
+    /// Signed whole-tone steps, in exact multiples of 0.5.
+    #[arg(long, value_name = "N", allow_hyphen_values = true, value_parser = parse_steps)]
+    steps: Option<i16>,
+    /// Override automatic enharmonic spelling selection.
+    #[arg(
+        long = "prefer-flats",
+        value_enum,
+        default_value = "auto",
+        value_name = "BOOL"
+    )]
     spelling: SpellingPreference,
+}
+
+impl Arguments {
+    /// Returns the mutually exclusive transposition requested by the user.
+    fn request(&self) -> Request {
+        if let Some(key) = &self.key {
+            Request::Key(key.clone())
+        } else if let Some(interval) = self.semitones {
+            Request::Semitones(interval)
+        } else {
+            Request::Semitones(
+                self.steps
+                    .expect("clap requires exactly one transposition operation"),
+            )
+        }
+    }
 }
 
 /// A rational accidental displacement measured in semitones.
@@ -216,17 +257,7 @@ impl TranspositionState {
 
 /// Parses arguments, transforms the input, and writes the resulting ABC.
 fn main() -> ExitCode {
-    let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
-        return match write_output(USAGE) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(message) => {
-                eprintln!("abc-transpose: {message}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    match run(arguments) {
+    match run(&Arguments::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("abc-transpose: {message}");
@@ -235,9 +266,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs the command for an arbitrary argument iterator.
-fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
-    let arguments = parse_arguments(arguments)?;
+/// Runs the command with fully parsed arguments.
+fn run(arguments: &Arguments) -> Result<(), String> {
+    let request = arguments.request();
     let source = read_source(&arguments.input)?;
     let parsed = parse_recovering(&source);
     if !parsed.is_valid() {
@@ -250,76 +281,15 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Err(format!("input is not valid ABC:\n{diagnostics}"));
     }
 
-    if arguments.request == Request::Semitones(0) && arguments.spelling == SpellingPreference::Auto
-    {
+    if request == Request::Semitones(0) && arguments.spelling == SpellingPreference::Auto {
         return write_output(&source);
     }
 
     let mut document = parsed.output;
     for tune in document.tunes_mut() {
-        transpose_tune(tune, &arguments.request, arguments.spelling)?;
+        transpose_tune(tune, &request, arguments.spelling)?;
     }
     write_output(&document.to_abc())
-}
-
-/// Parses the file path and exactly one mutually exclusive operation.
-fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, String> {
-    let mut arguments = arguments.into_iter();
-    let Some(first) = arguments.next() else {
-        return Err(USAGE.into());
-    };
-    if matches!(first.as_str(), "-h" | "--help") {
-        return Err(USAGE.into());
-    }
-    let input = PathBuf::from(first);
-    let mut request = None;
-    let mut spelling = None;
-    while let Some(option) = arguments.next() {
-        let Some(value) = arguments.next() else {
-            return Err(format!("{option} requires a value\n\n{USAGE}"));
-        };
-        match option.as_str() {
-            "--key" | "--semitones" | "--steps" => {
-                if request.is_some() {
-                    return Err(format!(
-                        "specify exactly one transposition operation\n\n{USAGE}"
-                    ));
-                }
-                request = Some(match option.as_str() {
-                    "--key" => Request::Key(parse_key(&value)?),
-                    "--semitones" => Request::Semitones(
-                        value
-                            .parse()
-                            .map_err(|_| format!("invalid semitone count: {value}"))?,
-                    ),
-                    "--steps" => Request::Semitones(parse_steps(&value)?),
-                    _ => unreachable!("the outer match restricts operation names"),
-                });
-            }
-            "--prefer-flats" => {
-                if spelling.is_some() {
-                    return Err(format!("--prefer-flats may be specified once\n\n{USAGE}"));
-                }
-                spelling = Some(match value.as_str() {
-                    "auto" => SpellingPreference::Auto,
-                    "true" => SpellingPreference::Flats,
-                    "false" => SpellingPreference::Sharps,
-                    _ => {
-                        return Err(format!(
-                            "invalid --prefer-flats value: {value}; expected true, false, or auto"
-                        ));
-                    }
-                });
-            }
-            _ => return Err(format!("unknown option: {option}\n\n{USAGE}")),
-        }
-    }
-    let request = request.ok_or_else(|| USAGE.to_owned())?;
-    Ok(Arguments {
-        input,
-        request,
-        spelling: spelling.unwrap_or_default(),
-    })
 }
 
 /// Converts exact half-step notation into its integral semitone equivalent.
@@ -959,14 +929,15 @@ fn find_measure_accidental(
 
 #[cfg(test)]
 mod tests {
+    use super::Arguments;
     use super::Request;
     use super::SpellingPreference;
-    use super::parse_arguments;
     use super::parse_key;
     use super::parse_steps;
     use super::transpose_tune;
     use abc_parser::ToAbc;
     use abc_parser::parse_recovering;
+    use clap::Parser;
 
     /// Parses and transposes the only tune in a compact fixture.
     fn transpose(source: &str, request: &Request) -> String {
@@ -1093,7 +1064,8 @@ mod tests {
 
     #[test]
     fn prefer_flats_accepts_all_values_in_either_option_order() {
-        let before = parse_arguments([
+        let before = Arguments::try_parse_from([
+            "abc-transpose".to_owned(),
             "input.abc".to_owned(),
             "--prefer-flats".to_owned(),
             "true".to_owned(),
@@ -1103,7 +1075,8 @@ mod tests {
         .unwrap();
         assert_eq!(before.spelling, SpellingPreference::Flats);
 
-        let after = parse_arguments([
+        let after = Arguments::try_parse_from([
+            "abc-transpose".to_owned(),
             "input.abc".to_owned(),
             "--semitones".to_owned(),
             "-2".to_owned(),
@@ -1113,7 +1086,8 @@ mod tests {
         .unwrap();
         assert_eq!(after.spelling, SpellingPreference::Sharps);
 
-        let automatic = parse_arguments([
+        let automatic = Arguments::try_parse_from([
+            "abc-transpose".to_owned(),
             "input.abc".to_owned(),
             "--key".to_owned(),
             "F".to_owned(),
@@ -1126,7 +1100,8 @@ mod tests {
 
     #[test]
     fn prefer_flats_rejects_invalid_and_duplicate_values() {
-        let invalid = parse_arguments([
+        let invalid = Arguments::try_parse_from([
+            "abc-transpose".to_owned(),
             "input.abc".to_owned(),
             "--steps".to_owned(),
             "1".to_owned(),
@@ -1135,7 +1110,8 @@ mod tests {
         ]);
         assert!(invalid.is_err());
 
-        let duplicate = parse_arguments([
+        let duplicate = Arguments::try_parse_from([
+            "abc-transpose".to_owned(),
             "input.abc".to_owned(),
             "--semitones".to_owned(),
             "1".to_owned(),
