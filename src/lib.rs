@@ -21,8 +21,10 @@
 
 use chumsky::Parser;
 use chumsky::error::Rich;
+use chumsky::error::RichReason;
 use chumsky::span::SimpleSpan;
 use std::fmt;
+use std::fmt::Write as _;
 use std::ops::Range;
 
 mod combinators;
@@ -908,8 +910,53 @@ pub fn parse_recovering_with_options(
     let output = output
         .and_then(|document| document.into_owned(source).ok())
         .unwrap_or_default();
-    let errors = faults.iter().map(chumsky_error).collect();
+    let extension_lines = extension_music_line_spans(&output);
+    let mut errors = faults
+        .iter()
+        .filter(|error| !is_unknown_music_error(error) || extension_lines.is_empty())
+        .map(chumsky_error)
+        .collect::<Vec<_>>();
+    for span in extension_lines {
+        let line = source.get(span.start..span.end).unwrap_or_default();
+        errors.extend(
+            music_line_parser()
+                .parse(line)
+                .into_errors()
+                .iter()
+                .map(|error| chumsky_error_with_offset(error, span.start)),
+        );
+    }
+    errors.sort_by_key(|error| (error.span.start, error.span.end));
     ParseReport { output, errors }
+}
+
+/// Returns tune music lines that contain recovered extension nodes.
+fn extension_music_line_spans(
+    document: &OwnedDocument<SimpleSpan<usize>>,
+) -> Vec<SimpleSpan<usize>> {
+    document
+        .tunes()
+        .flat_map(|tune| &tune.lines)
+        .filter_map(|line| match &line.value {
+            Line::Music(elements)
+                if elements
+                    .iter()
+                    .any(|element| matches!(element.value, MusicElement::Extension(_))) =>
+            {
+                Some(line.span)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Identifies the source-independent music fallback replaced during refinement.
+fn is_unknown_music_error(error: &Rich<'_, char, SimpleSpan<usize>>) -> bool {
+    matches!(
+        error.reason(),
+        RichReason::Custom(message)
+            if message == combinators::UNKNOWN_MUSIC_DIAGNOSTIC
+    )
 }
 
 /// Parses a complete ABC document, failing if any syntax error is found.
@@ -1046,12 +1093,35 @@ pub fn parse_music_line(
 }
 
 fn chumsky_error(error: &Rich<'_, char, SimpleSpan<usize>>) -> ParseError {
-    let span = error.span().into_range();
+    chumsky_error_with_offset(error, 0)
+}
+
+/// Converts a line-local Chumsky error to a document-relative parse error.
+fn chumsky_error_with_offset(
+    error: &Rich<'_, char, SimpleSpan<usize>>,
+    offset: usize,
+) -> ParseError {
+    let span = error.span();
     ParseError {
         kind: ErrorKind::InvalidMusic,
-        message: error.to_string(),
-        span,
+        message: rich_error_message(error),
+        span: span.start.saturating_add(offset)..span.end.saturating_add(offset),
     }
+}
+
+/// Formats Chumsky's reason and production contexts without internal spans.
+fn rich_error_message(error: &Rich<'_, char, SimpleSpan<usize>>) -> String {
+    let mut message = error.reason().to_string();
+    let contexts = error
+        .contexts()
+        .map(|(context, _)| context.to_string())
+        .filter(|context| context != "music element")
+        .collect::<Vec<_>>();
+    for context in contexts.iter().skip(contexts.len().saturating_sub(2)) {
+        write!(message, " while parsing {context}")
+            .expect("writing diagnostic context to a String cannot fail");
+    }
+    message
 }
 
 fn field_kind(key: char) -> FieldKind {
@@ -1219,6 +1289,93 @@ mod tests {
                 ..
             }) if value == "not-a-length"
         ));
+    }
+
+    #[test]
+    fn malformed_structured_fields_report_expected_syntax() {
+        for (source, context) in [
+            ("L:1/x", "L: unit note length"),
+            ("M:6/x", "M: meter"),
+            ("Q:1/4=x", "Q: tempo"),
+            ("K:?", "K: key signature"),
+            ("X:nope", "X: reference number"),
+            ("V:", "V: voice definition"),
+            ("P:@", "P: part sequence"),
+            ("U:symbol", "U: user symbol definition"),
+            ("m:pattern", "m: macro definition"),
+        ] {
+            let report = parse_line(source);
+            assert!(!report.is_valid(), "{source}");
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.message.contains("found") && error.message.contains(context)
+                }),
+                "{source}: {:#?}",
+                report.errors
+            );
+            assert!(matches!(
+                report.output,
+                Line::Field(Field {
+                    value: FieldValue::Unparsed(_),
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_music_reports_expected_syntax_and_recovers() {
+        for (source, expected) in [
+            ("[CEG", "chord"),
+            ("{C", "grace group"),
+            ("\"Am", "annotation"),
+            ("!trill", "decoration"),
+            ("(999", "tuplet"),
+            ("[M:6/x]", "inline M: meter"),
+            ("?", "music element"),
+        ] {
+            let report = parse_music_line(source);
+            assert!(!report.is_valid(), "{source}");
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.message.contains(expected)),
+                "{source}: {:#?}",
+                report.errors
+            );
+        }
+
+        let document = parse_recovering("X:1\nK:C\n[CEG\nC |\n");
+        assert!(!document.is_valid());
+        assert!(
+            document
+                .errors
+                .iter()
+                .any(|error| { error.message.contains("']'") && error.message.contains("chord") }),
+            "{:#?}",
+            document.errors
+        );
+    }
+
+    #[test]
+    fn malformed_directives_report_expected_syntax() {
+        let error = parse_directive("%%").unwrap_err();
+        assert!(
+            error.message.contains("stylesheet directive name"),
+            "{error}"
+        );
+
+        let report = parse_line("%%");
+        assert!(!report.is_valid());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message.contains("stylesheet directive name")),
+            "{:#?}",
+            report.errors
+        );
     }
 
     #[test]

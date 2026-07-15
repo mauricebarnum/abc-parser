@@ -79,6 +79,7 @@ use chumsky::prelude::empty;
 use chumsky::prelude::end;
 use chumsky::prelude::just;
 use chumsky::prelude::one_of;
+use chumsky::recovery::via_parser;
 use chumsky::span::Span as ChumskySpan;
 use std::fmt;
 
@@ -86,14 +87,9 @@ type Extra<'src, I> = extra::Err<Rich<'src, char, <I as Input<'src>>::Span>>;
 type ParsedMusic<S> = Vec<Spanned<MusicElement<SourceText<S>>, S>>;
 type ParsedLine<S> = Spanned<Line<S, SourceText<S>>, S>;
 
-/// Controls whether the fallback music parser diagnoses an unknown token.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReportUnknown {
-    /// Emit a diagnostic while retaining the token as an extension node.
-    Yes,
-    /// Retain the token without diagnosing it during preliminary classification.
-    No,
-}
+/// Source-independent fallback used until tune lines can be reparsed.
+pub(super) const UNKNOWN_MUSIC_DIAGNOSTIC: &str =
+    "unrecognized music token; expected music element";
 
 /// Parses a character other than a physical line ending.
 fn line_character<'src, I>() -> impl Parser<'src, I, char, Extra<'src, I>> + Clone
@@ -132,6 +128,7 @@ where
                     .ok_or_else(|| Rich::custom(extra.span(), "integer is too large"))
             },
         )
+        .labelled("integer")
 }
 
 /// Parses a positive fraction used by fields and tempo marks.
@@ -151,6 +148,8 @@ where
                 })
                 .ok_or_else(|| Rich::custom(span, "fraction denominator must not be zero"))
         })
+        .labelled("fraction such as 1/8")
+        .as_context()
 }
 
 /// Parses an optional ABC note-length suffix and computes its rational value.
@@ -178,6 +177,8 @@ where
                 denominator,
             })
         })
+        .labelled("note length")
+        .as_context()
 }
 
 /// Parses one sharp or flat spelling, including microtonal fractions.
@@ -225,6 +226,8 @@ where
         raised_accidental('^'),
         raised_accidental('_'),
     ))
+    .labelled("accidental")
+    .as_context()
 }
 
 /// Parses a pitch class while preserving upper/lowercase octave semantics.
@@ -288,6 +291,8 @@ where
                 length,
             },
         )
+        .labelled("note")
+        .as_context()
 }
 
 /// Parses a visible or invisible single rest.
@@ -306,6 +311,8 @@ where
             },
             length,
         })
+        .labelled("rest")
+        .as_context()
 }
 
 /// Parses a multi-measure rest, defaulting its measure count to one.
@@ -320,6 +327,8 @@ where
             invisible: marker == 'X',
             measures: measures.unwrap_or(1),
         })
+        .labelled("multi-measure rest")
+        .as_context()
 }
 
 /// Parses a quoted text body and returns only its interior span.
@@ -337,6 +346,8 @@ where
         )
         .then_ignore(just('"'))
         .map(SourceText::Span)
+        .labelled("quoted text")
+        .as_context()
 }
 
 /// Parses a non-whitespace token as a source span.
@@ -387,6 +398,7 @@ where
         named,
         token_text().map(|value| FieldParameter { name: None, value }),
     ))
+    .labelled("field parameter")
 }
 
 /// Builds a field with a preselected semantic kind and value.
@@ -569,31 +581,39 @@ where
     let structured = choice((
         just("L:")
             .ignore_then(horizontal_space())
-            .ignore_then(fraction())
+            .ignore_then(fraction().labelled("L: unit note length").as_context())
             .map(|value| field('L', FieldValue::UnitLength(value))),
         just("M:")
             .ignore_then(horizontal_space())
-            .ignore_then(meter())
+            .ignore_then(
+                meter()
+                    .labelled("M: meter (C, C|, none, or a fraction such as 6/8)")
+                    .as_context(),
+            )
             .map(|value| field('M', FieldValue::Meter(value))),
         just("Q:")
             .ignore_then(horizontal_space())
-            .ignore_then(tempo())
+            .ignore_then(
+                tempo()
+                    .labelled("Q: tempo (for example 1/4=120)")
+                    .as_context(),
+            )
             .map(|value| field('Q', FieldValue::Tempo(value))),
         just("K:")
             .ignore_then(horizontal_space())
-            .ignore_then(key_signature())
+            .ignore_then(key_signature().labelled("K: key signature").as_context())
             .map(|value| field('K', FieldValue::Key(value))),
         just("X:")
             .ignore_then(horizontal_space())
-            .ignore_then(unsigned())
+            .ignore_then(unsigned().labelled("X: reference number").as_context())
             .map(|value| field('X', FieldValue::Reference(value))),
         just("V:")
             .ignore_then(horizontal_space())
-            .ignore_then(voice())
+            .ignore_then(voice().labelled("V: voice definition").as_context())
             .map(|value| field('V', FieldValue::Voice(value))),
         just("P:")
             .ignore_then(horizontal_space())
-            .ignore_then(parts())
+            .ignore_then(parts().labelled("P: part sequence").as_context())
             .map(|value| field('P', FieldValue::Parts(value))),
         just("U:")
             .ignore_then(horizontal_space())
@@ -607,7 +627,9 @@ where
                         replacement,
                     }),
                 )
-            }),
+            })
+            .labelled("U: user symbol definition (symbol=replacement)")
+            .as_context(),
         just("m:")
             .ignore_then(horizontal_space())
             .ignore_then(
@@ -628,7 +650,9 @@ where
                         replacement,
                     }),
                 )
-            }),
+            })
+            .labelled("m: macro definition (pattern=replacement)")
+            .as_context(),
     ));
     let textual = any()
         .filter(|key: &char| {
@@ -648,17 +672,12 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    field_parser().or(any()
+    let fallback = any()
         .filter(char::is_ascii_alphabetic)
         .then_ignore(just(':'))
         .then(remaining_text())
-        .validate(|(key, value), extra, emitter| {
-            emitter.emit(Rich::custom(
-                extra.span(),
-                format!("invalid {key}: field value"),
-            ));
-            field(key, FieldValue::Unparsed(value))
-        }))
+        .map(|(key, value)| field(key, FieldValue::Unparsed(value)));
+    field_parser().recover_with(via_parser(fallback))
 }
 
 /// Parses one bracketed chord directly from member and duration parsers.
@@ -674,6 +693,8 @@ where
         .delimited_by(just('['), just(']'))
         .then(note_length())
         .map(|(members, length)| Chord { members, length })
+        .labelled("chord")
+        .as_context()
 }
 
 /// Parses a variant-ending selector list such as [1,3-5.
@@ -698,6 +719,8 @@ where
                 .collect::<Vec<_>>(),
         )
         .map(|selectors| VariantEnding { selectors })
+        .labelled("variant ending")
+        .as_context()
 }
 
 /// Parses standard bar spellings first, then accepts liberal bar sequences.
@@ -728,6 +751,7 @@ where
         kind,
         source: SourceText::Span(extra.span()),
     })
+    .labelled("bar line")
 }
 
 /// Parses a grace group, including the optional acciaccatura slash.
@@ -744,6 +768,8 @@ where
             acciaccatura: slash.is_some(),
             notes,
         })
+        .labelled("grace group")
+        .as_context()
 }
 
 /// Parses inline structured fields whose values terminate at a closing bracket.
@@ -757,22 +783,36 @@ where
         .ignore_then(choice((
             just("L:")
                 .ignore_then(horizontal_space())
-                .ignore_then(fraction())
+                .ignore_then(
+                    fraction()
+                        .labelled("inline L: unit note length")
+                        .as_context(),
+                )
                 .map(|value| field('L', FieldValue::UnitLength(value))),
             just("M:")
                 .ignore_then(horizontal_space())
-                .ignore_then(meter())
+                .ignore_then(meter().labelled("inline M: meter").as_context())
                 .map(|value| field('M', FieldValue::Meter(value))),
             just("K:")
                 .ignore_then(horizontal_space())
-                .ignore_then(key_signature())
+                .ignore_then(
+                    key_signature()
+                        .labelled("inline K: key signature")
+                        .as_context(),
+                )
                 .map(|value| field('K', FieldValue::Key(value))),
             just("X:")
                 .ignore_then(horizontal_space())
-                .ignore_then(unsigned())
+                .ignore_then(
+                    unsigned()
+                        .labelled("inline X: reference number")
+                        .as_context(),
+                )
                 .map(|value| field('X', FieldValue::Reference(value))),
         )))
         .then_ignore(just(']'))
+        .labelled("inline field")
+        .as_context()
 }
 
 /// Parses named, legacy, and shorthand decorations.
@@ -821,6 +861,8 @@ where
         legacy_delimiter: false,
     });
     choice((named('!'), named('+'), shorthand))
+        .labelled("decoration")
+        .as_context()
 }
 
 /// Parses a quoted chord symbol or positioned annotation.
@@ -851,6 +893,8 @@ where
             },
             text,
         })
+        .labelled("annotation")
+        .as_context()
 }
 
 /// Parses compact and extended tuplet prefixes.
@@ -863,20 +907,23 @@ where
         .ignore_then(unsigned())
         .then(just(':').ignore_then(unsigned().or_not()).or_not())
         .then(just(':').ignore_then(unsigned().or_not()).or_not())
-        .try_map(|((p, q), r), span: I::Span| {
-            Ok(Tuplet {
-                p: u8::try_from(p)
-                    .map_err(|_| Rich::custom(span.clone(), "tuplet value exceeds u8"))?,
-                q: q.flatten()
-                    .map(u8::try_from)
-                    .transpose()
-                    .map_err(|_| Rich::custom(span.clone(), "tuplet value exceeds u8"))?,
-                r: r.flatten()
-                    .map(u8::try_from)
-                    .transpose()
-                    .map_err(|_| Rich::custom(span, "tuplet value exceeds u8"))?,
-            })
+        .validate(|((p, q), r), extra, emitter| {
+            let mut convert = |value| {
+                if let Ok(value) = u8::try_from(value) {
+                    value
+                } else {
+                    emitter.emit(Rich::custom(extra.span(), "tuplet value exceeds u8"));
+                    u8::MAX
+                }
+            };
+            Tuplet {
+                p: convert(p),
+                q: q.flatten().map(&mut convert),
+                r: r.flatten().map(convert),
+            }
         })
+        .labelled("tuplet")
+        .as_context()
 }
 
 /// Parses repeated broken-rhythm operators while retaining direction.
@@ -902,12 +949,12 @@ where
                 count: u8::try_from(count).unwrap_or(u8::MAX),
             }),
     ))
+    .labelled("broken-rhythm marker")
 }
 
-/// Parses one semantic music-code element and attaches its native span.
-fn music_element_parser_configured<'src, I>(
-    report_unknown: ReportUnknown,
-) -> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
+/// Parses one recognized music-code element without an extension fallback.
+fn semantic_music_element_parser<'src, I>()
+-> impl Parser<'src, I, MusicElement<SourceText<I::Span>>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
@@ -918,12 +965,6 @@ where
         .to_span()
         .map(SourceText::Span)
         .map(MusicElement::BeamBreak);
-    let extension = line_character().validate(move |_, extra, emitter| {
-        if report_unknown == ReportUnknown::Yes {
-            emitter.emit(Rich::custom(extra.span(), "unrecognized music token"));
-        }
-        MusicElement::Extension(SourceText::Span(extra.span()))
-    });
     let line_break = choice((
         just('\\').to(LineBreak::Continue),
         just("$$").to(LineBreak::Paragraph),
@@ -931,6 +972,18 @@ where
         just('y').to(LineBreak::Space),
     ))
     .map(MusicElement::LineBreak);
+    let plain_open_slur = just('(')
+        .then_ignore(
+            any()
+                .filter(|character: &char| !character.is_ascii_digit())
+                .rewind()
+                .ignored()
+                .or(end()),
+        )
+        .to(MusicElement::Slur(Slur {
+            opening: true,
+            dotted: false,
+        }));
     choice((
         inline_field().map(MusicElement::InlineField),
         chord_parser().map(MusicElement::Chord),
@@ -954,10 +1007,7 @@ where
             opening: false,
             dotted: true,
         })),
-        just('(').to(MusicElement::Slur(Slur {
-            opening: true,
-            dotted: false,
-        })),
+        plain_open_slur,
         just(')').to(MusicElement::Slur(Slur {
             opening: false,
             dotted: false,
@@ -972,12 +1022,43 @@ where
             .map(MusicElement::BeamContinuation),
         line_break,
         beam_break,
-        extension,
     ))
-    .map_with(|value, extra| Spanned {
-        value,
-        span: extra.span(),
-    })
+    .labelled("music element")
+    .as_context()
+}
+
+/// Parses one music element quietly during preliminary line classification.
+fn quiet_music_element_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let extension = line_character()
+        .map_with(|_, extra| MusicElement::Extension(SourceText::Span(extra.span())));
+    semantic_music_element_parser()
+        .or(extension)
+        .map_with(|value, extra| Spanned {
+            value,
+            span: extra.span(),
+        })
+}
+
+/// Parses one music element while preserving the strict parser's failure.
+fn diagnostic_music_element_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let fallback = line_character()
+        .map_with(|_, extra| MusicElement::Extension(SourceText::Span(extra.span())));
+    semantic_music_element_parser()
+        .recover_with(via_parser(fallback))
+        .map_with(|value, extra| Spanned {
+            value,
+            span: extra.span(),
+        })
 }
 
 /// Builds a validating parser for one semantic music-code element.
@@ -987,7 +1068,7 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    music_element_parser_configured::<I>(ReportUnknown::Yes)
+    diagnostic_music_element_parser::<I>()
 }
 
 /// Builds a parser for a complete physical music-code line.
@@ -997,7 +1078,7 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    music_element_parser_configured::<I>(ReportUnknown::Yes)
+    diagnostic_music_element_parser::<I>()
         .repeated()
         .at_least(1)
         .collect()
@@ -1033,7 +1114,11 @@ where
         .to_span()
         .map(|span| (SourceText::Span(span), DirectiveKind::Other));
     let semantic = just("%%")
-        .ignore_then(choice((known_name, other_name)))
+        .ignore_then(
+            choice((known_name, other_name))
+                .labelled("stylesheet directive name")
+                .as_context(),
+        )
         .then(
             one_of(" \t")
                 .repeated()
@@ -1046,7 +1131,9 @@ where
                 arguments.unwrap_or_else(|| SourceText::Synthesized(String::new())),
                 kind,
             )
-        });
+        })
+        .labelled("stylesheet directive")
+        .as_context();
     semantic
         .rewind()
         .then(just("%%").ignore_then(remaining_text()))
@@ -1059,9 +1146,8 @@ where
 }
 
 /// Classifies a physical line using ordered ABC prefix alternatives.
-fn unspanned_line_parser<'src, I>(
-    report_unknown: ReportUnknown,
-) -> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+fn unspanned_line_parser<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
@@ -1074,7 +1160,34 @@ where
         just('%').ignore_then(remaining_text()).map(Line::Comment),
         recovering_field_parser().map(Line::Field),
         one_of(" \t").repeated().at_least(1).to(Line::Blank),
-        music_element_parser_configured::<I>(report_unknown)
+        quiet_music_element_parser::<I>()
+            .repeated()
+            .at_least(1)
+            .collect()
+            .map(Line::Music),
+        empty().to(Line::Blank),
+    ))
+}
+
+/// Classifies one physical line while preserving music parser failures.
+fn diagnostic_unspanned_line_parser<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let directive_fallback = just("%%")
+        .ignore_then(remaining_text())
+        .map(Line::DirectiveText);
+    let directive = directive_parser()
+        .map(Line::Directive)
+        .recover_with(via_parser(directive_fallback));
+    choice((
+        directive,
+        just('%').ignore_then(remaining_text()).map(Line::Comment),
+        recovering_field_parser().map(Line::Field),
+        one_of(" \t").repeated().at_least(1).to(Line::Blank),
+        diagnostic_music_element_parser::<I>()
             .repeated()
             .at_least(1)
             .collect()
@@ -1089,7 +1202,7 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    unspanned_line_parser::<I>(ReportUnknown::Yes).map_with(|value, extra| Spanned {
+    diagnostic_unspanned_line_parser::<I>().map_with(|value, extra| Spanned {
         value,
         span: extra.span(),
     })
@@ -1170,7 +1283,7 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
-    unspanned_line_parser::<I>(ReportUnknown::No)
+    unspanned_line_parser::<I>()
         .map_with(|value, extra| Spanned {
             value,
             span: extra.span(),
@@ -1296,7 +1409,7 @@ where
                                     if matches!(element.value, MusicElement::Extension(_)) {
                                         emitter.emit(Rich::custom(
                                             element.span.clone(),
-                                            "unrecognized music token",
+                                            UNKNOWN_MUSIC_DIAGNOSTIC,
                                         ));
                                     }
                                 }

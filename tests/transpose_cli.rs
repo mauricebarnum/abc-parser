@@ -164,13 +164,25 @@ fn non_half_step_values_are_rejected() {
 
 #[test]
 fn invalid_input_reports_source_context() {
-    let output = run_stdin("X:1\nM:nope\nK:C\nC |\n", &["--semitones", "1"]);
+    let output = run_stdin("X:1\nM:6/x\nK:C\nC |\n", &["--semitones", "1"]);
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(
-        error.contains("<stdin>:2:1: invalid M: field value"),
+        error.contains("<stdin>:2:5: found 'x' expected integer"),
         "{error}"
     );
-    assert!(error.contains("2 | M:nope"), "{error}");
-    assert!(error.contains("| ^^^^^^"), "{error}");
+    assert!(error.contains("while parsing M: meter"), "{error}");
+    assert!(error.contains("2 | M:6/x"), "{error}");
+    assert!(error.contains("|     ^"), "{error}");
+}
+
+#[test]
+fn malformed_music_reports_the_enclosing_production() {
+    let output = run_stdin("X:1\nK:C\n[CEG\nC |\n", &["--semitones", "1"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("<stdin>:3:5: found end of input"), "{error}");
+    assert!(error.contains("while parsing chord"), "{error}");
+    assert!(error.contains("3 | [CEG"), "{error}");
+    assert!(error.contains("|     ^"), "{error}");
 }
