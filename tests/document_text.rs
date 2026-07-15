@@ -216,6 +216,63 @@ C |
 }
 
 #[test]
+fn typeset_block_diagnostics_are_shared_across_document_contexts() {
+    let file_report = parse_owned(
+        "%%begintext\ninvalid body line\n%%endtext\n",
+        ParserOptions::default(),
+    );
+    assert_eq!(file_report.errors.len(), 1);
+    assert!(
+        file_report.errors[0]
+            .message
+            .contains("typeset block lines must begin with %%")
+    );
+
+    let tune_report = parse_owned(
+        "X:1\nK:C\n%%begintext\ninvalid body line\n%%endtext\nC |\n",
+        ParserOptions::default(),
+    );
+    assert!(tune_report.errors.iter().any(|error| {
+        error
+            .message
+            .contains("typeset block lines must begin with %%")
+    }));
+    assert_eq!(document(&tune_report).tunes().count(), 1);
+}
+
+#[test]
+fn disabling_typeset_retention_preserves_block_validation() {
+    let source = "%%begintext\ninvalid body line\n";
+    let retained = parse_owned(source, ParserOptions::default());
+    let discarded = parse_owned(source, ParserOptions::new().retain_typeset_text(false));
+
+    let retained_messages = retained
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+    let discarded_messages = discarded
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(discarded_messages, retained_messages);
+    assert_eq!(discarded_messages.len(), 2);
+    assert_eq!(typeset_text_count(document(&discarded)), 0);
+}
+
+#[test]
+fn stray_endtext_is_reported_outside_a_typeset_block() {
+    let report = parse_owned("%%endtext\n", ParserOptions::default());
+    assert_eq!(report.errors.len(), 1);
+    assert!(
+        report.errors[0]
+            .message
+            .contains("%%endtext without %%begintext")
+    );
+}
+
+#[test]
 fn character_input_preserves_character_index_spans_for_free_text() {
     let characters: Vec<char> = TEXT_DOCUMENT.chars().collect();
     let result = parse(characters.as_slice());

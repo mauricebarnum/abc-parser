@@ -71,6 +71,7 @@ use chumsky::ParseResult;
 use chumsky::Parser;
 use chumsky::error::Rich;
 use chumsky::extra;
+use chumsky::input::Emitter;
 use chumsky::input::Input;
 use chumsky::input::ValueInput;
 use chumsky::prelude::any;
@@ -1419,11 +1420,276 @@ fn push_free_text<S>(
     });
 }
 
+/// Finishes a free-text run, retaining or discarding it according to the options.
+fn finish_free_text<S>(
+    items: &mut Vec<Spanned<DocumentItem<S, SourceText<S>>, S>>,
+    lines: &mut Vec<ParsedLine<S>>,
+    options: ParserOptions,
+) where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+{
+    if options.keeps_free_text() {
+        push_free_text(items, lines);
+    } else {
+        lines.clear();
+    }
+}
+
+/// Consumes one typeset block and reports structural errors even when it is discarded.
+fn consume_typeset_block<S, I>(
+    start: &S,
+    lines: &mut I,
+    emitter: &mut Emitter<Rich<'_, char, S>>,
+) -> Spanned<TypesetText<SourceText<S>>, S>
+where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+    I: Iterator<Item = ParsedLine<S>>,
+{
+    let mut end = start.clone();
+    let mut body = Vec::new();
+    let mut closed = false;
+    for body_line in lines.by_ref() {
+        end = body_line.span.clone();
+        match body_line.value {
+            Line::Directive(value) if value.kind == DirectiveKind::EndText => {
+                closed = true;
+                break;
+            }
+            Line::Directive(value) => body.push(value.body),
+            Line::DirectiveText(value) => body.push(value),
+            _ => emitter.emit(Rich::custom(
+                body_line.span,
+                "typeset block lines must begin with %%",
+            )),
+        }
+    }
+    if !closed {
+        emitter.emit(Rich::custom(start.clone(), "unclosed %%begintext block"));
+    }
+    Spanned {
+        value: TypesetText::Block(body),
+        span: start.clone().union(end),
+    }
+}
+
+/// Appends one free-text-mode block while preserving source order and diagnostics.
+fn append_text_block<S>(
+    document: &mut ParsedDocument<S>,
+    lines: Vec<ParsedLine<S>>,
+    options: ParserOptions,
+    emitter: &mut Emitter<Rich<'_, char, S>>,
+) where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+{
+    let mut free_lines = Vec::new();
+    let mut iterator = lines.into_iter();
+    while let Some(line) = iterator.next() {
+        match line.value {
+            Line::Directive(directive)
+                if directive.kind == DirectiveKind::Text
+                    || directive.kind == DirectiveKind::Center =>
+            {
+                finish_free_text(&mut document.items, &mut free_lines, options);
+                if options.keeps_typeset_text() {
+                    let text = if directive.kind == DirectiveKind::Text {
+                        TypesetText::Text(directive.arguments)
+                    } else {
+                        TypesetText::Centered(directive.arguments)
+                    };
+                    document.items.push(Spanned {
+                        value: DocumentItem::TypesetText(text),
+                        span: line.span,
+                    });
+                }
+            }
+            Line::Directive(directive) if directive.kind == DirectiveKind::BeginText => {
+                finish_free_text(&mut document.items, &mut free_lines, options);
+                let block = consume_typeset_block(&line.span, &mut iterator, emitter);
+                if options.keeps_typeset_text() {
+                    document.items.push(Spanned {
+                        value: DocumentItem::TypesetText(block.value),
+                        span: block.span,
+                    });
+                }
+            }
+            Line::Comment(text) => {
+                finish_free_text(&mut document.items, &mut free_lines, options);
+                document.items.push(Spanned {
+                    value: DocumentItem::Comment(text),
+                    span: line.span,
+                });
+            }
+            Line::Directive(directive) => {
+                finish_free_text(&mut document.items, &mut free_lines, options);
+                if directive.kind == DirectiveKind::EndText {
+                    emitter.emit(Rich::custom(
+                        line.span.clone(),
+                        "%%endtext without %%begintext",
+                    ));
+                }
+                document.items.push(Spanned {
+                    value: DocumentItem::Directive(directive),
+                    span: line.span,
+                });
+            }
+            Line::Field(_) => {
+                emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "information fields are not allowed in free text",
+                ));
+                free_lines.push(line);
+            }
+            Line::DirectiveText(_) => {
+                emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "invalid stylesheet directive",
+                ));
+                free_lines.push(line);
+            }
+            _ => free_lines.push(line),
+        }
+    }
+    finish_free_text(&mut document.items, &mut free_lines, options);
+}
+
+/// Converts a tune-mode block, including tune-local typeset directives.
+fn build_tune<S>(
+    lines: Vec<ParsedLine<S>>,
+    options: ParserOptions,
+    emitter: &mut Emitter<Rich<'_, char, S>>,
+) -> Spanned<DocumentItem<S, SourceText<S>>, S>
+where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+{
+    let span = block_span(&lines);
+    let mut tune_lines = Vec::new();
+    let mut iterator = lines.into_iter();
+    while let Some(line) = iterator.next() {
+        match line.value {
+            Line::Directive(directive) if directive.kind == DirectiveKind::Text => {
+                if options.keeps_typeset_text() {
+                    tune_lines.push(Spanned {
+                        value: Line::TypesetText(TypesetText::Text(directive.arguments)),
+                        span: line.span,
+                    });
+                }
+            }
+            Line::Directive(directive) if directive.kind == DirectiveKind::Center => {
+                if options.keeps_typeset_text() {
+                    tune_lines.push(Spanned {
+                        value: Line::TypesetText(TypesetText::Centered(directive.arguments)),
+                        span: line.span,
+                    });
+                }
+            }
+            Line::Directive(directive) if directive.kind == DirectiveKind::BeginText => {
+                let block = consume_typeset_block(&line.span, &mut iterator, emitter);
+                if options.keeps_typeset_text() {
+                    tune_lines.push(Spanned {
+                        value: Line::TypesetText(block.value),
+                        span: block.span,
+                    });
+                }
+            }
+            Line::DirectiveText(_) => {
+                emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "invalid stylesheet directive; expected stylesheet directive name",
+                ));
+                tune_lines.push(line);
+            }
+            _ => tune_lines.push(line),
+        }
+    }
+    Spanned {
+        value: DocumentItem::Tune(Tune { lines: tune_lines }),
+        span,
+    }
+}
+
+/// Places comments attached to a tune in the header or document item stream.
+fn append_leading_comments<S>(
+    document: &mut ParsedDocument<S>,
+    comments: Vec<ParsedLine<S>>,
+    is_first_block: bool,
+) {
+    if is_first_block {
+        document.header = comments;
+    } else {
+        document
+            .items
+            .extend(comments.into_iter().filter_map(|line| {
+                if let Line::Comment(text) = line.value {
+                    Some(Spanned {
+                        value: DocumentItem::Comment(text),
+                        span: line.span,
+                    })
+                } else {
+                    None
+                }
+            }));
+    }
+}
+
+/// Assembles classified blocks into a document without changing recovery semantics.
+fn assemble_document<S>(
+    blocks: Vec<ParsedBlock<S>>,
+    options: ParserOptions,
+    warnings: &mut WarningState<S>,
+    emitter: &mut Emitter<Rich<'_, char, S>>,
+) -> ParsedDocument<S>
+where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+{
+    let mut document = Document {
+        header: Vec::new(),
+        items: Vec::new(),
+    };
+
+    for (block_index, block) in blocks.into_iter().enumerate() {
+        let is_first_block = block_index == 0;
+        match block {
+            ParsedBlock::Tune {
+                mut leading_comments,
+                lines,
+            } => {
+                if is_first_block && is_initial_header(&lines) {
+                    leading_comments.extend(lines);
+                    document.header = leading_comments;
+                    continue;
+                }
+                append_leading_comments(&mut document, leading_comments, is_first_block);
+                document.items.push(build_tune(lines, options, emitter));
+            }
+            ParsedBlock::Text {
+                lines,
+                possible_music,
+            } => {
+                if let Some(span) = possible_music {
+                    warnings.push(span);
+                }
+                if is_first_block && is_initial_header(&lines) {
+                    document.header = lines;
+                    continue;
+                }
+                append_text_block(&mut document, lines, options, emitter);
+            }
+        }
+    }
+    document
+}
+
 /// Builds a complete-document parser with explicit text-retention behavior.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the document state machine keeps context-sensitive recovery in one Chumsky validation pass"
-)]
 fn document_parser<'src, I>(
     options: ParserOptions,
 ) -> impl Parser<'src, I, ParsedDocument<I::Span>, Extra<'src, I>> + Clone
@@ -1449,247 +1715,7 @@ where
         .then_ignore(horizontal_space())
         .then_ignore(end())
         .validate(move |blocks, extra, emitter| {
-            let mut document = Document {
-                header: Vec::new(),
-                items: Vec::new(),
-            };
-
-            for (block_index, block) in blocks.into_iter().enumerate() {
-                let block = match block {
-                    ParsedBlock::Tune {
-                        mut leading_comments,
-                        lines,
-                    } => {
-                        if block_index == 0 && is_initial_header(&lines) {
-                            leading_comments.extend(lines);
-                            document.header = leading_comments;
-                            continue;
-                        }
-                        if block_index == 0 {
-                            document.header = leading_comments;
-                        } else {
-                            for line in leading_comments {
-                                if let Line::Comment(text) = line.value {
-                                    document.items.push(Spanned {
-                                        value: DocumentItem::Comment(text),
-                                        span: line.span,
-                                    });
-                                }
-                            }
-                        }
-                        lines
-                    }
-                    ParsedBlock::Text {
-                        lines,
-                        possible_music,
-                    } => {
-                        if let Some(span) = possible_music {
-                            extra.state().push(span);
-                        }
-                        if block_index == 0 && is_initial_header(&lines) {
-                            document.header = lines;
-                            continue;
-                        }
-
-                        let mut free_lines = Vec::new();
-                        let mut iterator = lines.into_iter();
-                        while let Some(line) = iterator.next() {
-                            match line.value {
-                                Line::Directive(directive)
-                                    if directive.kind == DirectiveKind::Text
-                                        || directive.kind == DirectiveKind::Center =>
-                                {
-                                    if options.keeps_free_text() {
-                                        push_free_text(&mut document.items, &mut free_lines);
-                                    } else {
-                                        free_lines.clear();
-                                    }
-                                    if options.keeps_typeset_text() {
-                                        let text = if directive.kind == DirectiveKind::Text {
-                                            TypesetText::Text(directive.arguments)
-                                        } else {
-                                            TypesetText::Centered(directive.arguments)
-                                        };
-                                        document.items.push(Spanned {
-                                            value: DocumentItem::TypesetText(text),
-                                            span: line.span,
-                                        });
-                                    }
-                                }
-                                Line::Directive(directive)
-                                    if directive.kind == DirectiveKind::BeginText =>
-                                {
-                                    if options.keeps_free_text() {
-                                        push_free_text(&mut document.items, &mut free_lines);
-                                    } else {
-                                        free_lines.clear();
-                                    }
-                                    let start = line.span;
-                                    let mut end = start.clone();
-                                    let mut body = Vec::new();
-                                    let mut closed = false;
-                                    for body_line in iterator.by_ref() {
-                                        end = body_line.span.clone();
-                                        match body_line.value {
-                                            Line::Directive(value)
-                                                if value.kind == DirectiveKind::EndText =>
-                                            {
-                                                closed = true;
-                                                break;
-                                            }
-                                            Line::Directive(value) => body.push(value.body),
-                                            Line::DirectiveText(value) => body.push(value),
-                                            _ => emitter.emit(Rich::custom(
-                                                body_line.span,
-                                                "typeset block lines must begin with %%",
-                                            )),
-                                        }
-                                    }
-                                    if !closed {
-                                        emitter.emit(Rich::custom(
-                                            start.clone(),
-                                            "unclosed %%begintext block",
-                                        ));
-                                    }
-                                    if options.keeps_typeset_text() {
-                                        document.items.push(Spanned {
-                                            value: DocumentItem::TypesetText(TypesetText::Block(
-                                                body,
-                                            )),
-                                            span: start.union(end),
-                                        });
-                                    }
-                                }
-                                Line::Comment(text) => {
-                                    if options.keeps_free_text() {
-                                        push_free_text(&mut document.items, &mut free_lines);
-                                    } else {
-                                        free_lines.clear();
-                                    }
-                                    document.items.push(Spanned {
-                                        value: DocumentItem::Comment(text),
-                                        span: line.span,
-                                    });
-                                }
-                                Line::Directive(directive) => {
-                                    if options.keeps_free_text() {
-                                        push_free_text(&mut document.items, &mut free_lines);
-                                    } else {
-                                        free_lines.clear();
-                                    }
-                                    if directive.kind == DirectiveKind::EndText {
-                                        emitter.emit(Rich::custom(
-                                            line.span.clone(),
-                                            "%%endtext without %%begintext",
-                                        ));
-                                    }
-                                    document.items.push(Spanned {
-                                        value: DocumentItem::Directive(directive),
-                                        span: line.span,
-                                    });
-                                }
-                                Line::Field(_) => {
-                                    emitter.emit(Rich::custom(
-                                        line.span.clone(),
-                                        "information fields are not allowed in free text",
-                                    ));
-                                    free_lines.push(line);
-                                }
-                                Line::DirectiveText(_) => {
-                                    emitter.emit(Rich::custom(
-                                        line.span.clone(),
-                                        "invalid stylesheet directive",
-                                    ));
-                                    free_lines.push(line);
-                                }
-                                _ => free_lines.push(line),
-                            }
-                        }
-                        if options.keeps_free_text() {
-                            push_free_text(&mut document.items, &mut free_lines);
-                        }
-                        continue;
-                    }
-                };
-
-                let span = block_span(&block);
-                let mut tune_lines = Vec::new();
-                let mut iterator = block.into_iter();
-                while let Some(line) = iterator.next() {
-                    match line.value {
-                        Line::Directive(directive) if directive.kind == DirectiveKind::Text => {
-                            if options.keeps_typeset_text() {
-                                tune_lines.push(Spanned {
-                                    value: Line::TypesetText(TypesetText::Text(
-                                        directive.arguments,
-                                    )),
-                                    span: line.span,
-                                });
-                            }
-                        }
-                        Line::Directive(directive) if directive.kind == DirectiveKind::Center => {
-                            if options.keeps_typeset_text() {
-                                tune_lines.push(Spanned {
-                                    value: Line::TypesetText(TypesetText::Centered(
-                                        directive.arguments,
-                                    )),
-                                    span: line.span,
-                                });
-                            }
-                        }
-                        Line::Directive(directive)
-                            if directive.kind == DirectiveKind::BeginText =>
-                        {
-                            let start = line.span;
-                            let mut end = start.clone();
-                            let mut body = Vec::new();
-                            let mut closed = false;
-                            for body_line in iterator.by_ref() {
-                                end = body_line.span.clone();
-                                match body_line.value {
-                                    Line::Directive(value)
-                                        if value.kind == DirectiveKind::EndText =>
-                                    {
-                                        closed = true;
-                                        break;
-                                    }
-                                    Line::Directive(value) => body.push(value.body),
-                                    Line::DirectiveText(value) => body.push(value),
-                                    _ => emitter.emit(Rich::custom(
-                                        body_line.span,
-                                        "typeset block lines must begin with %%",
-                                    )),
-                                }
-                            }
-                            if !closed {
-                                emitter.emit(Rich::custom(
-                                    start.clone(),
-                                    "unclosed %%begintext block",
-                                ));
-                            }
-                            if options.keeps_typeset_text() {
-                                tune_lines.push(Spanned {
-                                    value: Line::TypesetText(TypesetText::Block(body)),
-                                    span: start.union(end),
-                                });
-                            }
-                        }
-                        Line::DirectiveText(_) => {
-                            emitter.emit(Rich::custom(
-                                line.span.clone(),
-                                "invalid stylesheet directive; expected stylesheet directive name",
-                            ));
-                            tune_lines.push(line);
-                        }
-                        _ => tune_lines.push(line),
-                    }
-                }
-                document.items.push(Spanned {
-                    value: DocumentItem::Tune(Tune { lines: tune_lines }),
-                    span,
-                });
-            }
-            document
+            assemble_document(blocks, options, extra.state(), emitter)
         })
 }
 
