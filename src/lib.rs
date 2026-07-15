@@ -1164,6 +1164,13 @@ mod tests {
                 denominator: 16
             })
         );
+        assert_eq!(
+            parse_field("L: 1/16").unwrap().value,
+            FieldValue::UnitLength(Fraction {
+                numerator: 1,
+                denominator: 16
+            })
+        );
         assert!(matches!(
             parse_field("M:(2+3)/8").unwrap().value,
             FieldValue::Meter(Meter::Compound {
@@ -1173,6 +1180,13 @@ mod tests {
         ));
         assert_eq!(
             parse_field("M:3/4").unwrap().value,
+            FieldValue::Meter(Meter::Simple(Fraction {
+                numerator: 3,
+                denominator: 4
+            }))
+        );
+        assert_eq!(
+            parse_field("M: 3/4").unwrap().value,
             FieldValue::Meter(Meter::Simple(Fraction {
                 numerator: 3,
                 denominator: 4

@@ -568,9 +568,11 @@ where
 {
     let structured = choice((
         just("L:")
+            .ignore_then(horizontal_space())
             .ignore_then(fraction())
             .map(|value| field('L', FieldValue::UnitLength(value))),
         just("M:")
+            .ignore_then(horizontal_space())
             .ignore_then(meter())
             .map(|value| field('M', FieldValue::Meter(value))),
         just("Q:")
@@ -754,9 +756,11 @@ where
     just('[')
         .ignore_then(choice((
             just("L:")
+                .ignore_then(horizontal_space())
                 .ignore_then(fraction())
                 .map(|value| field('L', FieldValue::UnitLength(value))),
             just("M:")
+                .ignore_then(horizontal_space())
                 .ignore_then(meter())
                 .map(|value| field('M', FieldValue::Meter(value))),
             just("K:")
