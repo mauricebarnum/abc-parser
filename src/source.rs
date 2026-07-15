@@ -387,9 +387,10 @@ impl<S> IntoOwnedAst<S> for FieldValue<SourceText<S>> {
             Self::Parts(value) => FieldValue::Parts(value.into_owned(resolver)?),
             Self::UserSymbol(value) => FieldValue::UserSymbol(value.into_owned(resolver)?),
             Self::Macro(value) => FieldValue::Macro(value.into_owned(resolver)?),
-            Self::Unparsed(text) => {
-                FieldValue::Unparsed(text.into_owned(resolver)?.trim().to_owned())
-            }
+            Self::Unparsed(text) => FieldValue::Unparsed(match text {
+                SourceText::Span(span) => resolver.resolve(&span)?.trim().to_owned(),
+                SourceText::Synthesized(text) => text.trim().to_owned(),
+            }),
         })
     }
 }

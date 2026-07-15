@@ -1310,7 +1310,7 @@ mod tests {
         ));
 
         assert!(parse_field("L:not-a-length").is_err());
-        let report = parse_line("L:not-a-length");
+        let report = parse_line("L:  not-a-length  ");
         assert_eq!(report.errors.len(), 1);
         assert!(matches!(
             report.output,

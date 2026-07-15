@@ -266,19 +266,18 @@ impl TranspositionState {
 
     /// Applies a source key change and transposes its emitted key field.
     fn transpose_key(&mut self, key: &mut KeySignature<String>) -> Result<(), String> {
-        let source_key = key.clone();
-        self.source_signature = signature_offsets(&source_key)?;
+        self.source_signature = signature_offsets(key)?;
         self.source_measure_accidentals.clear();
         self.destination_measure_accidentals.clear();
 
         if self.first_key_pending {
             self.first_key_pending = false;
-            if let Some(destination) = &self.destination {
+            if let Some(destination) = self.destination.take() {
                 self.prefer_flats = self
                     .spelling
                     .forced_flats()
-                    .unwrap_or_else(|| key_prefers_flats(destination));
-                *key = destination.clone();
+                    .unwrap_or_else(|| key_prefers_flats(&destination));
+                *key = destination;
                 self.destination_signature = signature_offsets(key).unwrap_or([Offset::ZERO; 7]);
                 return Ok(());
             }
@@ -431,7 +430,7 @@ fn transpose_tune<S>(
             Line::Field(Field {
                 value: FieldValue::Key(key),
                 ..
-            }) => Some(key.clone()),
+            }) => Some(key),
             _ => None,
         })
         .ok_or_else(|| "a tune has no K: field".to_owned())?;
@@ -450,7 +449,7 @@ fn transpose_tune<S>(
             )
         }
     };
-    let mut state = TranspositionState::new(interval, &source_key, destination, spelling, octave)?;
+    let mut state = TranspositionState::new(interval, source_key, destination, spelling, octave)?;
     for line in &mut tune.lines {
         transpose_line(&mut line.value, &mut state)?;
     }
