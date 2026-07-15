@@ -45,6 +45,8 @@ fn help_describes_transposition_and_spelling_options() {
     assert!(help.contains("--key <KEY>"), "{help}");
     assert!(help.contains("--semitones <N>"), "{help}");
     assert!(help.contains("--steps <N>"), "{help}");
+    assert!(help.contains("--octave <OCTAVE>"), "{help}");
+    assert!(help.contains("[default: 0]"), "{help}");
     assert!(help.contains("--prefer-flats <BOOL>"), "{help}");
     assert!(help.contains("--out <FILE>"), "{help}");
     assert!(help.contains("Possible values:"), "{help}");
@@ -70,6 +72,17 @@ fn zero_semitones_are_a_byte_preserving_no_op() {
     let output = run(&["--semitones", "0"]);
     assert!(output.status.success());
     assert_eq!(output.stdout, KITCHEN_SINK.as_bytes());
+}
+
+#[test]
+fn octave_accepts_positive_and_negative_values() {
+    let upward = run(&["--semitones", "0", "--octave", "1"]);
+    let downward = run(&["--semitones", "0", "--octave", "-1"]);
+    assert!(upward.status.success(), "{upward:?}");
+    assert!(downward.status.success(), "{downward:?}");
+    assert_ne!(upward.stdout, KITCHEN_SINK.as_bytes());
+    assert_ne!(downward.stdout, KITCHEN_SINK.as_bytes());
+    assert_ne!(upward.stdout, downward.stdout);
 }
 
 #[test]

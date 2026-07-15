@@ -15,8 +15,9 @@
 //! Transposes every tune in an ABC file.
 //!
 //! The command accepts either a destination key for each tune or a signed
-//! chromatic interval. Transposed notes use explicit accidentals, making the
-//! emitted result independent of accidental propagation in the destination.
+//! chromatic interval, plus an optional octave displacement. Transposed notes
+//! use explicit accidentals, making the emitted result independent of
+//! accidental propagation in the destination.
 
 use abc_parser::Accidental;
 use abc_parser::BarLine;
@@ -86,7 +87,7 @@ impl SpellingPreference {
 #[command(
     name = "abc-transpose",
     about = "Transpose every tune in an ABC file",
-    long_about = "Transpose every tune in an ABC file and write canonical ABC to standard output."
+    long_about = "Transpose every tune in an ABC file and write canonical ABC to standard output or a selected file."
 )]
 #[command(group(
     ArgGroup::new("transposition")
@@ -106,6 +107,9 @@ struct Arguments {
     /// Signed whole-tone steps, in exact multiples of 0.5.
     #[arg(long, value_name = "N", allow_hyphen_values = true, value_parser = parse_steps)]
     steps: Option<i16>,
+    /// Raise or lower every note by this many octaves.
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    octave: i16,
     /// Override automatic enharmonic spelling selection.
     #[arg(
         long = "prefer-flats",
@@ -178,15 +182,18 @@ impl Offset {
     }
 }
 
-/// Accidental state for one written pitch and octave within the current bar.
-type MeasureAccidentals = Vec<((PitchClass, i8), Offset)>;
+/// Accidental state for each written pitch class within the current bar.
+type MeasureAccidentals = Vec<(PitchClass, Offset)>;
 
 /// Mutable musical state while one tune is traversed in source order.
 struct TranspositionState {
     interval: i16,
+    pitch_interval: i16,
     spelling: SpellingPreference,
     source_signature: [Offset; 7],
-    measure_accidentals: MeasureAccidentals,
+    source_measure_accidentals: MeasureAccidentals,
+    destination_signature: [Offset; 7],
+    destination_measure_accidentals: MeasureAccidentals,
     prefer_flats: bool,
     first_key_pending: bool,
     destination: Option<KeySignature<String>>,
@@ -199,12 +206,20 @@ impl TranspositionState {
         source_key: &KeySignature<String>,
         destination: Option<KeySignature<String>>,
         spelling: SpellingPreference,
+        octave: i16,
     ) -> Result<Self, String> {
+        let pitch_interval = octave
+            .checked_mul(12)
+            .and_then(|octave_interval| interval.checked_add(octave_interval))
+            .ok_or_else(|| "combined transposition interval is out of range".to_owned())?;
         Ok(Self {
             interval,
+            pitch_interval,
             spelling,
             source_signature: signature_offsets(source_key)?,
-            measure_accidentals: Vec::new(),
+            source_measure_accidentals: Vec::new(),
+            destination_signature: signature_offsets(source_key)?,
+            destination_measure_accidentals: Vec::new(),
             prefer_flats: spelling.forced_flats().unwrap_or_else(|| {
                 destination
                     .as_ref()
@@ -221,18 +236,31 @@ impl TranspositionState {
         let offset = match source.accidental {
             Some(accidental) => {
                 let offset = accidental_offset(accidental);
-                set_measure_accidental(
-                    &mut self.measure_accidentals,
-                    source.class,
-                    source.octave,
-                    offset,
-                );
+                set_measure_accidental(&mut self.source_measure_accidentals, source.class, offset);
                 offset
             }
-            None => find_measure_accidental(&self.measure_accidentals, source.class, source.octave)
+            None => find_measure_accidental(&self.source_measure_accidentals, source.class)
                 .unwrap_or(self.source_signature[class_index(source.class)]),
         };
-        *pitch = spell_absolute_pitch(source, offset, self.interval, self.prefer_flats)?;
+        let mut destination =
+            spell_absolute_pitch(source, offset, self.pitch_interval, self.prefer_flats)?;
+        let destination_offset = destination
+            .accidental
+            .map(accidental_offset)
+            .expect("spell_absolute_pitch always emits an accidental");
+        let active_offset =
+            find_measure_accidental(&self.destination_measure_accidentals, destination.class)
+                .unwrap_or(self.destination_signature[class_index(destination.class)]);
+        if destination_offset == active_offset {
+            destination.accidental = None;
+        } else {
+            set_measure_accidental(
+                &mut self.destination_measure_accidentals,
+                destination.class,
+                destination_offset,
+            );
+        }
+        *pitch = destination;
         Ok(())
     }
 
@@ -240,7 +268,8 @@ impl TranspositionState {
     fn transpose_key(&mut self, key: &mut KeySignature<String>) -> Result<(), String> {
         let source_key = key.clone();
         self.source_signature = signature_offsets(&source_key)?;
-        self.measure_accidentals.clear();
+        self.source_measure_accidentals.clear();
+        self.destination_measure_accidentals.clear();
 
         if self.first_key_pending {
             self.first_key_pending = false;
@@ -250,10 +279,12 @@ impl TranspositionState {
                     .forced_flats()
                     .unwrap_or_else(|| key_prefers_flats(destination));
                 *key = destination.clone();
+                self.destination_signature = signature_offsets(key).unwrap_or([Offset::ZERO; 7]);
                 return Ok(());
             }
         }
         self.prefer_flats = transpose_key_tonic(key, self.interval, self.spelling)?;
+        self.destination_signature = signature_offsets(key)?;
         Ok(())
     }
 }
@@ -284,13 +315,16 @@ fn run(arguments: &Arguments) -> Result<(), String> {
         return Err(format!("input is not valid ABC:\n{diagnostics}"));
     }
 
-    if request == Request::Semitones(0) && arguments.spelling == SpellingPreference::Auto {
+    if request == Request::Semitones(0)
+        && arguments.octave == 0
+        && arguments.spelling == SpellingPreference::Auto
+    {
         return write_output(&source, arguments.out.as_ref());
     }
 
     let mut document = parsed.output;
     for tune in document.tunes_mut() {
-        transpose_tune(tune, &request, arguments.spelling)?;
+        transpose_tune(tune, &request, arguments.spelling, arguments.octave)?;
     }
     write_output(&document.to_abc(), arguments.out.as_ref())
 }
@@ -377,6 +411,7 @@ fn transpose_tune<S>(
     tune: &mut Tune<S, String>,
     request: &Request,
     spelling: SpellingPreference,
+    octave: i16,
 ) -> Result<(), String> {
     let source_key = tune
         .lines
@@ -404,7 +439,7 @@ fn transpose_tune<S>(
             )
         }
     };
-    let mut state = TranspositionState::new(interval, &source_key, destination, spelling)?;
+    let mut state = TranspositionState::new(interval, &source_key, destination, spelling, octave)?;
     for line in &mut tune.lines {
         transpose_line(&mut line.value, &mut state)?;
     }
@@ -462,7 +497,8 @@ fn transpose_music_element(
         }
         MusicElement::InlineField(field) => transpose_field(field, state),
         MusicElement::Bar(BarLine { .. }) => {
-            state.measure_accidentals.clear();
+            state.source_measure_accidentals.clear();
+            state.destination_measure_accidentals.clear();
             Ok(())
         }
         _ => Ok(()),
@@ -903,35 +939,22 @@ const fn natural_semitone(class: PitchClass) -> i16 {
 }
 
 /// Records an explicitly written source accidental for subsequent notes.
-fn set_measure_accidental(
-    accidentals: &mut MeasureAccidentals,
-    class: PitchClass,
-    octave: i8,
-    offset: Offset,
-) {
+fn set_measure_accidental(accidentals: &mut MeasureAccidentals, class: PitchClass, offset: Offset) {
     if let Some((_, stored)) = accidentals
         .iter_mut()
-        .find(|((stored_class, stored_octave), _)| {
-            *stored_class == class && *stored_octave == octave
-        })
+        .find(|(stored_class, _)| *stored_class == class)
     {
         *stored = offset;
     } else {
-        accidentals.push(((class, octave), offset));
+        accidentals.push((class, offset));
     }
 }
 
 /// Finds a source accidental carried earlier in the current measure.
-fn find_measure_accidental(
-    accidentals: &MeasureAccidentals,
-    class: PitchClass,
-    octave: i8,
-) -> Option<Offset> {
+fn find_measure_accidental(accidentals: &MeasureAccidentals, class: PitchClass) -> Option<Offset> {
     accidentals
         .iter()
-        .find(|((stored_class, stored_octave), _)| {
-            *stored_class == class && *stored_octave == octave
-        })
+        .find(|(stored_class, _)| *stored_class == class)
         .map(|(_, offset)| *offset)
 }
 
@@ -949,7 +972,7 @@ mod tests {
 
     /// Parses and transposes the only tune in a compact fixture.
     fn transpose(source: &str, request: &Request) -> String {
-        transpose_with_spelling(source, request, SpellingPreference::Auto)
+        transpose_with_options(source, request, SpellingPreference::Auto, 0)
     }
 
     /// Parses and transposes the only tune using an explicit spelling policy.
@@ -958,12 +981,22 @@ mod tests {
         request: &Request,
         spelling: SpellingPreference,
     ) -> String {
+        transpose_with_options(source, request, spelling, 0)
+    }
+
+    /// Parses and transposes the only tune using all pitch options.
+    fn transpose_with_options(
+        source: &str,
+        request: &Request,
+        spelling: SpellingPreference,
+        octave: i16,
+    ) -> String {
         let mut document = parse_recovering(source).output;
         {
             let mut tunes = document.tunes_mut();
             let tune = tunes.next().unwrap();
             assert!(tunes.next().is_none());
-            transpose_tune(tune, request, spelling).unwrap();
+            transpose_tune(tune, request, spelling, octave).unwrap();
         }
         document.to_abc()
     }
@@ -972,7 +1005,46 @@ mod tests {
     fn signed_semitones_transpose_keys_notes_chords_and_graces() {
         let output = transpose("X:1\nK:C\nC ^C C | [EG] {B} |\n", &Request::Semitones(1));
         assert!(output.contains("K:Db"), "{output}");
-        assert!(output.contains("_D =D =D | [=F_A] {=c} |"), "{output}");
+        assert!(output.contains("D =D D | [FA] {c} |"), "{output}");
+    }
+
+    #[test]
+    fn octave_transposition_changes_notes_without_changing_the_key() {
+        let upward = transpose_with_options(
+            "X:1\nK:C\nC [EG] {B} |\n",
+            &Request::Semitones(0),
+            SpellingPreference::Auto,
+            1,
+        );
+        assert!(upward.contains("K:C\nc [eg] {b} |"), "{upward}");
+
+        let downward = transpose_with_options(
+            "X:1\nK:C\nC [EG] {B} |\n",
+            &Request::Semitones(0),
+            SpellingPreference::Auto,
+            -1,
+        );
+        assert!(downward.contains("K:C\nC, [E,G,] {B,} |"), "{downward}");
+    }
+
+    #[test]
+    fn destination_key_and_measure_state_suppress_redundant_accidentals() {
+        let output = transpose_with_options(
+            "X:1\nK:Bb\nBcde fgab | bbag f=e^fg |\n",
+            &Request::Key(parse_key("Eb").unwrap()),
+            SpellingPreference::Auto,
+            -1,
+        );
+        assert!(
+            output.contains("K:Eb\nEFGA Bcde | eedc B=A=Bc |"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn measure_accidentals_carry_across_octaves_until_the_bar_line() {
+        let output = transpose("X:1\nK:C\n^C c =C c | C |\n", &Request::Semitones(0));
+        assert!(output.contains("^C c =C c | C |"), "{output}");
     }
 
     #[test]
@@ -982,14 +1054,14 @@ mod tests {
             &Request::Key(parse_key("D").unwrap()),
         );
         assert!(output.contains("K:D"));
-        assert!(output.contains("=D ^F =A |"));
+        assert!(output.contains("D F A |"));
     }
 
     #[test]
     fn source_key_and_measure_accidentals_affect_sounding_pitch() {
         let output = transpose("X:1\nK:G\nF =F F | F |\n", &Request::Semitones(1));
         assert!(output.contains("K:Ab"), "{output}");
-        assert!(output.contains("=G _G _G | =G |"), "{output}");
+        assert!(output.contains("G _G G | G |"), "{output}");
     }
 
     #[test]
@@ -1002,11 +1074,11 @@ mod tests {
     fn semitone_transposition_chooses_the_smallest_destination_signature() {
         let upward = transpose("X:1\nK:F\nF ^F |\n", &Request::Semitones(2));
         assert!(upward.contains("K:G"), "{upward}");
-        assert!(upward.contains("=G ^G |"), "{upward}");
+        assert!(upward.contains("G ^G |"), "{upward}");
 
         let downward = transpose("X:1\nK:F\nF ^F |\n", &Request::Semitones(-2));
         assert!(downward.contains("K:Eb"), "{downward}");
-        assert!(downward.contains("_E =E |"), "{downward}");
+        assert!(downward.contains("E =E |"), "{downward}");
     }
 
     #[test]
@@ -1031,18 +1103,18 @@ mod tests {
     fn equal_signature_sizes_follow_transposition_direction() {
         let upward = transpose("X:1\nK:C\nC |\n", &Request::Semitones(6));
         assert!(upward.contains("K:F#"), "{upward}");
-        assert!(upward.contains("^F |"), "{upward}");
+        assert!(upward.contains("F |"), "{upward}");
 
         let downward = transpose("X:1\nK:C\nC |\n", &Request::Semitones(-6));
         assert!(downward.contains("K:Gb"), "{downward}");
-        assert!(downward.contains("_G, |"), "{downward}");
+        assert!(downward.contains("G, |"), "{downward}");
     }
 
     #[test]
     fn key_changes_recompute_the_enharmonic_orientation() {
         let output = transpose("X:1\nK:C\n^C |\nK:F\nF ^F |\n", &Request::Semitones(1));
         assert!(output.contains("K:Db\n=D |"), "{output}");
-        assert!(output.contains("K:F#\n^F =G |"), "{output}");
+        assert!(output.contains("K:F#\nF =G |"), "{output}");
     }
 
     #[test]
@@ -1050,13 +1122,13 @@ mod tests {
         let source = "X:1\nK:C\nC |\nK:F\nF ^F |\n";
         let sharps =
             transpose_with_spelling(source, &Request::Semitones(1), SpellingPreference::Sharps);
-        assert!(sharps.contains("K:C#\n^C |"), "{sharps}");
-        assert!(sharps.contains("K:F#\n^F =G |"), "{sharps}");
+        assert!(sharps.contains("K:C#\nC |"), "{sharps}");
+        assert!(sharps.contains("K:F#\nF =G |"), "{sharps}");
 
         let flats =
             transpose_with_spelling(source, &Request::Semitones(1), SpellingPreference::Flats);
-        assert!(flats.contains("K:Db\n_D |"), "{flats}");
-        assert!(flats.contains("K:Gb\n_G =G |"), "{flats}");
+        assert!(flats.contains("K:Db\nD |"), "{flats}");
+        assert!(flats.contains("K:Gb\nG =G |"), "{flats}");
     }
 
     #[test]
@@ -1067,7 +1139,7 @@ mod tests {
             SpellingPreference::Sharps,
         );
         assert!(output.contains("K:Eb"), "{output}");
-        assert!(output.contains("_E |"), "{output}");
+        assert!(output.contains("E |"), "{output}");
     }
 
     #[test]
