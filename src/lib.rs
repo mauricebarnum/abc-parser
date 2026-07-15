@@ -443,9 +443,10 @@ impl ParserOptions {
 
     /// Selects strict validation for complete ABC documents.
     ///
-    /// Strict validation currently requires every tune to contain an `X:`
-    /// reference field. Parsing remains recovering when this requirement is
-    /// not met.
+    /// Strict validation requires every tune to contain an `X:` reference
+    /// field. It also warns when `X:` is not the first information field or a
+    /// header-level `K:` is not the last. Parsing remains recovering when
+    /// these requirements are not met.
     #[must_use]
     pub const fn strict(mut self, strict: bool) -> Self {
         self.strict = strict;
@@ -804,6 +805,8 @@ pub enum ErrorKind {
     InvalidMusic,
     /// A free-text block looks like tune material without an opening field.
     MissingReference,
+    /// A tune-header field does not appear in its recommended position.
+    InvalidFieldOrder,
 }
 
 /// A recoverable syntax error with an exact source location.

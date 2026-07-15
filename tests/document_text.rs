@@ -419,8 +419,42 @@ fn strict_mode_requires_x_without_requiring_it_to_be_first() {
         ParserOptions::new().strict(true),
     );
     assert!(out_of_order.is_valid(), "{:#?}", out_of_order.errors);
-    assert!(out_of_order.warnings.is_empty());
+    assert_eq!(out_of_order.warnings.len(), 1);
     assert_eq!(document(&out_of_order).tunes().count(), 1);
+}
+
+#[test]
+fn strict_mode_warns_about_tune_header_field_order() {
+    let source = "% leading comment\nT:Title first\nX:7\nK:C\nM:4/4\nC |\n";
+    let report = parse_owned(source, ParserOptions::new().strict(true));
+
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert_eq!(report.warnings.len(), 2, "{:#?}", report.warnings);
+    assert!(report.warnings.iter().all(|warning| {
+        warning.kind == ErrorKind::InvalidFieldOrder
+            && (warning.message.contains("X: reference") || warning.message.contains("K: key"))
+    }));
+
+    let permissive = parse_owned(source, ParserOptions::default());
+    assert!(permissive.warnings.is_empty(), "{:#?}", permissive.warnings);
+}
+
+#[test]
+fn strict_field_order_ignores_non_fields_and_body_key_changes() {
+    let report = parse_owned(
+        "% comment before reference\nX:1\n%%staves 1\nT:Title\nK:C\nC |\nK:G\nG |\n",
+        ParserOptions::new().strict(true),
+    );
+
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert!(report.warnings.is_empty(), "{:#?}", report.warnings);
+
+    let no_key = parse_owned(
+        "X:1\nT:Tune without a key\n",
+        ParserOptions::new().strict(true),
+    );
+    assert!(no_key.is_valid(), "{:#?}", no_key.errors);
+    assert!(no_key.warnings.is_empty(), "{:#?}", no_key.warnings);
 }
 
 #[test]

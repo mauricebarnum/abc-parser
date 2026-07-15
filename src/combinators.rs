@@ -1684,6 +1684,64 @@ fn is_header_candidate<S>(candidate: &ParsedTuneCandidate<S>) -> bool {
     })
 }
 
+/// Emits strict, non-fatal guidance for tune-header field ordering.
+fn validate_tune_header_order<S>(units: &[ParsedTuneUnit<S>], state: &mut ParserState<S>)
+where
+    S: Clone,
+{
+    let fields = units.iter().filter_map(|unit| match unit {
+        ParsedTuneUnit::Line(Spanned {
+            value: Line::Field(field),
+            span,
+        }) => Some((field.key, span)),
+        _ => None,
+    });
+    let first_field = fields.clone().next();
+    let reference = fields.clone().find(|(key, _)| *key == 'X');
+    if let (Some((first_key, _)), Some((_, span))) = (first_field, reference)
+        && first_key != 'X'
+    {
+        state.0.1.push(ParseWarning {
+            kind: ErrorKind::InvalidFieldOrder,
+            message: "X: reference field should be the first information field in a tune"
+                .to_owned(),
+            span: span.clone(),
+        });
+    }
+
+    let header_fields = units
+        .iter()
+        .take_while(|unit| {
+            !matches!(
+                unit,
+                ParsedTuneUnit::Line(Spanned {
+                    value: Line::Music(_),
+                    ..
+                })
+            )
+        })
+        .filter_map(|unit| match unit {
+            ParsedTuneUnit::Line(Spanned {
+                value: Line::Field(field),
+                span,
+            }) => Some((field.key, span)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let (Some((last_key, _)), Some((_, key_span))) = (
+        header_fields.last(),
+        header_fields.iter().rev().find(|(key, _)| *key == 'K'),
+    ) && *last_key != 'K'
+    {
+        state.0.1.push(ParseWarning {
+            kind: ErrorKind::InvalidFieldOrder,
+            message: "K: key field should be the last information field in a tune header"
+                .to_owned(),
+            span: (*key_span).clone(),
+        });
+    }
+}
+
 /// Converts a resolved tune candidate and applies retention and strict validation.
 fn resolve_tune_candidate<S>(
     candidate: ParsedTuneCandidate<S>,
@@ -1718,6 +1776,9 @@ where
             message: "tune is missing required X: reference field".to_owned(),
             span: first_span.clone(),
         });
+    }
+    if options.is_strict() {
+        validate_tune_header_order(&candidate.units, state);
     }
     let lines = candidate
         .units

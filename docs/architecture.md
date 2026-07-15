@@ -107,6 +107,10 @@ retention choices never hide diagnostics.
 [`ParserOptions::strict`] additionally requires each tune to contain an `X:`
 reference field. The field may occur anywhere in the tune; a missing field is a
 recoverable error, so the tune remains available in the returned document.
+Strict mode also warns when `X:` is not the first information field or when a
+header-level `K:` is present but is not the last information field before music
+code. Comments and stylesheet directives do not affect field ordering, and key
+changes in the tune body are excluded.
 
 ## Information-field flow
 
