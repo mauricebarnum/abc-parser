@@ -25,6 +25,7 @@ use abc_parser::Spanned;
 use abc_parser::ToAbc;
 use abc_parser::TypesetText;
 use abc_parser::parse;
+use abc_parser::parse_with_options;
 use chumsky::span::SimpleSpan;
 
 const TEXT_DOCUMENT: &str = "%abc-2.1
@@ -70,7 +71,7 @@ fn parse_owned(
     source: &str,
     options: ParserOptions,
 ) -> ParseReport<OwnedDocument<SimpleSpan<usize>>, SimpleSpan<usize>> {
-    let report = parse(source, options);
+    let report = parse_with_options(source, options);
     ParseReport {
         output: report
             .output
@@ -217,7 +218,7 @@ C |
 #[test]
 fn character_input_preserves_character_index_spans_for_free_text() {
     let characters: Vec<char> = TEXT_DOCUMENT.chars().collect();
-    let result = parse(characters.as_slice(), ParserOptions::default());
+    let result = parse(characters.as_slice());
     assert!(result.errors.is_empty());
     let document = result.output.as_ref().unwrap();
     let free = document
@@ -232,7 +233,7 @@ fn character_input_preserves_character_index_spans_for_free_text() {
 fn character_input_diagnostics_use_native_spans_and_render_unicode() {
     let source = "é\nM:6/x\n";
     let characters = source.chars().collect::<Vec<_>>();
-    let report = parse(characters.as_slice(), ParserOptions::default());
+    let report = parse(characters.as_slice());
 
     assert_eq!(report.errors.len(), 2);
     assert!(report.output.is_some());
@@ -345,7 +346,7 @@ fn music_like_text_warns_without_becoming_invalid_or_a_tune() {
     assert_eq!(report.warnings[0].span, SimpleSpan::from(25..31));
     assert_eq!(document(&report).tunes().count(), 0);
     assert!(report.warnings[0].diagnostic(source).contains("2 | CDEF |"));
-    assert!(parse(source, ParserOptions::default()).is_valid());
+    assert!(parse(source).is_valid());
 
     let ambiguous = parse_owned("CAGE\n", ParserOptions::default());
     assert!(ambiguous.is_valid());

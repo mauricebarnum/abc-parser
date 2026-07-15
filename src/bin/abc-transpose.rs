@@ -33,7 +33,6 @@ use abc_parser::KeyTonic;
 use abc_parser::Line;
 use abc_parser::MusicElement;
 use abc_parser::NoteLengthStyle;
-use abc_parser::ParserOptions;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
 use abc_parser::ToAbc;
@@ -312,7 +311,7 @@ fn main() -> ExitCode {
 fn run(arguments: &Arguments) -> Result<(), String> {
     let request = arguments.request();
     let source = read_source(&arguments.input)?;
-    let parsed = parse(source.as_str(), ParserOptions::default());
+    let parsed = parse(source.as_str());
     let input_name = if arguments.input.as_os_str() == "-" {
         "<stdin>".to_owned()
     } else {
@@ -1033,7 +1032,6 @@ mod tests {
     use super::parse_steps;
     use super::transpose_tune;
     use abc_parser::IntoOwnedAst;
-    use abc_parser::ParserOptions;
     use abc_parser::ToAbc;
     use abc_parser::parse;
     use clap::Parser;
@@ -1059,11 +1057,7 @@ mod tests {
         spelling: SpellingPreference,
         octave: i16,
     ) -> String {
-        let mut document = parse(source, ParserOptions::default())
-            .output
-            .unwrap()
-            .into_owned(source)
-            .unwrap();
+        let mut document = parse(source).output.unwrap().into_owned(source).unwrap();
         {
             let mut tunes = document.tunes_mut();
             let tune = tunes.next().unwrap();

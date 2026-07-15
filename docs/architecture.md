@@ -9,12 +9,13 @@ input's native `Input::Span`: `&str` therefore reports UTF-8 byte offsets while
 
 ## Entry points
 
-[`parse`] is the complete-document API. It accepts any compatible character
-input plus [`ParserOptions`] and returns a [`ParseReport`] whose optional output
-is a source-backed [`ParsedDocument`]. Errors and warnings use the input's native
-span type. Recovery normally supplies output alongside diagnostics; an
-unrecoverable failure returns no output. Advisory [`ParseReport::warnings`] do
-not make the report invalid.
+[`parse`] is the default complete-document API. [`parse_with_options`] accepts
+an additional [`ParserOptions`] value for configurable text retention. Both
+return a [`ParseReport`] whose optional output is a source-backed
+[`ParsedDocument`]. Errors and warnings use the input's native span type.
+Recovery normally supplies output alongside diagnostics; an unrecoverable
+failure returns no output. Advisory [`ParseReport::warnings`] do not make the
+report invalid.
 
 Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 [`music_element_parser`], [`field_parser`], [`directive_parser`], and
@@ -25,7 +26,7 @@ Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 ```mermaid
 flowchart TD
     source["ValueInput Token=char"] --> entry{Public entry point}
-    entry -->|document| recovering[parse]
+    entry -->|document| recovering[parse / parse_with_options]
     entry -->|physical line| line[line_parser]
     entry -->|music fragment| music[music_line_parser]
     entry -->|field/directive/chord| partial[Partial parser combinators]
@@ -283,6 +284,6 @@ order. Recovery maintains these invariants:
 - an unclosed delimited music construct consumes no later physical line;
 - a later tune can still be discovered after faults in an earlier tune.
 
-All complete-document callers use [`parse`]. Batch tools may reject reports with
-errors, while interactive tools can inspect recovered output and render every
-diagnostic.
+Complete-document callers use [`parse`] or [`parse_with_options`]. Batch tools
+may reject reports with errors, while interactive tools can inspect recovered
+output and render every diagnostic.

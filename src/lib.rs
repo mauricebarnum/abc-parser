@@ -971,7 +971,7 @@ impl<T, S> ParseReport<T, S> {
     }
 }
 
-/// Parses a complete ABC document with physical-line error recovery.
+/// Parses a complete ABC document with default options and physical-line error recovery.
 ///
 /// The returned AST uses the input's native spans and retains source-derived
 /// text as [`SourceText`] values. Use [`IntoOwnedAst::into_owned`] with the
@@ -981,16 +981,29 @@ impl<T, S> ParseReport<T, S> {
 ///
 /// ```
 /// use abc_parser::IntoOwnedAst;
-/// use abc_parser::ParserOptions;
 /// use abc_parser::parse;
 ///
 /// let source = "X:1\nT:Example\nK:C\nCDEF |\n";
-/// let report = parse(source, ParserOptions::default());
+/// let report = parse(source);
 /// assert!(report.is_valid());
 /// let document = report.output.unwrap().into_owned(source).unwrap();
 /// assert_eq!(document.tunes().count(), 1);
 /// ```
-pub fn parse<'src, I>(
+pub fn parse<'src, I>(input: I) -> ParseReport<ParsedDocument<I::Span>, I::Span>
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord + fmt::Display,
+{
+    parse_with_options(input, ParserOptions::default())
+}
+
+/// Parses a complete ABC document using the supplied options.
+///
+/// Like [`parse`], this parser uses physical-line error recovery and returns
+/// source-backed text with the input's native spans.
+pub fn parse_with_options<'src, I>(
     input: I,
     options: ParserOptions,
 ) -> ParseReport<ParsedDocument<I::Span>, I::Span>
@@ -1400,7 +1413,7 @@ mod tests {
             );
         }
 
-        let document = parse("X:1\nK:C\n[CEG\nC |\n", ParserOptions::default());
+        let document = parse("X:1\nK:C\n[CEG\nC |\n");
         assert!(!document.is_valid());
         assert!(
             document
@@ -1442,7 +1455,7 @@ mod tests {
 
     #[test]
     fn recovers_on_the_next_line() {
-        let report = parse("X:1\nK:C\n[CEG\nCDEF |\n", ParserOptions::default());
+        let report = parse("X:1\nK:C\n[CEG\nCDEF |\n");
         assert_eq!(report.errors.len(), 1);
         let tune = report.output.as_ref().unwrap().tunes().next().unwrap();
         assert_eq!(tune.lines.len(), 4);
@@ -1455,7 +1468,7 @@ mod tests {
         for index in 0..original.len() {
             let mut mutated = original.to_owned();
             mutated.replace_range(index..=index, "@");
-            let report = parse(mutated.as_str(), ParserOptions::default());
+            let report = parse(mutated.as_str());
             assert!(
                 report
                     .errors

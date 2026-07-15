@@ -14,7 +14,6 @@
 
 //! Prints a source-spanned AST for an ABC file.
 
-use abc_parser::ParserOptions;
 use abc_parser::parse;
 use std::env;
 use std::fs;
@@ -32,7 +31,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let report = parse(source.as_str(), ParserOptions::default());
+    let report = parse(source.as_str());
     println!("{:#?}", report.output);
     for error in &report.errors {
         eprintln!("{error}");

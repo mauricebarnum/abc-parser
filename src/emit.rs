@@ -161,12 +161,11 @@ impl Write for AbcEmitter<'_> {
 /// use abc_parser::EmitOptions;
 /// use abc_parser::IntoOwnedAst;
 /// use abc_parser::NoteLengthStyle;
-/// use abc_parser::ParserOptions;
 /// use abc_parser::ToAbc;
 /// use abc_parser::parse;
 ///
 /// let source = "X:1\nM:2+3/8\nK:C\nCDEF |\n";
-/// let document = parse(source, ParserOptions::default())
+/// let document = parse(source)
 ///     .output
 ///     .unwrap()
 ///     .into_owned(source)
@@ -178,7 +177,7 @@ impl Write for AbcEmitter<'_> {
 /// let options = EmitOptions::new()
 ///     .with_note_length_style(NoteLengthStyle::ExplicitDenominator);
 /// let source = "X:1\nK:C\nA/\n";
-/// let document = parse(source, ParserOptions::default())
+/// let document = parse(source)
 ///     .output
 ///     .unwrap()
 ///     .into_owned(source)
@@ -1158,7 +1157,6 @@ fn write_repeated(character: char, count: usize, output: &mut dyn Write) -> fmt:
 mod tests {
     use super::*;
     use crate::IntoOwnedAst;
-    use crate::ParserOptions;
     use crate::parse;
     use crate::parse_field;
     use crate::parse_music_line;
@@ -1302,11 +1300,7 @@ mod tests {
     #[test]
     fn configured_emitter_reaches_nested_music_lengths() {
         let source = "X:1\nK:C\nA/ z// [B/z//]/// {c/}\n";
-        let document = parse(source, ParserOptions::default())
-            .output
-            .unwrap()
-            .into_owned(source)
-            .unwrap();
+        let document = parse(source).output.unwrap().into_owned(source).unwrap();
         let explicit =
             EmitOptions::new().with_note_length_style(NoteLengthStyle::ExplicitDenominator);
         assert_eq!(document.to_abc(), "X:1\nK:C\nA/ z// [B/z//]/// {c/}");

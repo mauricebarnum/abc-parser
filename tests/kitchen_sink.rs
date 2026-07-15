@@ -18,7 +18,6 @@ use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
 use abc_parser::OwnedDocument;
 use abc_parser::ParseReport;
-use abc_parser::ParserOptions;
 use abc_parser::PlaceholderResolver;
 use abc_parser::Spanned;
 use abc_parser::ToAbc;
@@ -31,7 +30,7 @@ const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 type OwnedLine = Spanned<Line<SimpleSpan<usize>, String>, SimpleSpan<usize>>;
 
 fn parse_owned(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>, SimpleSpan<usize>> {
-    let report = parse(source, ParserOptions::default());
+    let report = parse(source);
     ParseReport {
         output: report
             .output
@@ -105,7 +104,7 @@ fn mutations_report_bounded_faults_and_keep_later_tunes() {
 
 #[test]
 fn chumsky_document_parser_accepts_string_and_character_inputs() {
-    let string_result = parse(KITCHEN_SINK, ParserOptions::default());
+    let string_result = parse(KITCHEN_SINK);
     assert!(
         string_result.errors.is_empty(),
         "{:#?}",
@@ -120,7 +119,7 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
     assert_eq!(string_owned.tunes().count(), 2);
 
     let characters: Vec<char> = KITCHEN_SINK.chars().collect();
-    let character_result = parse(characters.as_slice(), ParserOptions::default());
+    let character_result = parse(characters.as_slice());
     assert!(
         character_result.errors.is_empty(),
         "{:#?}",
@@ -137,9 +136,7 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
 
 #[test]
 fn document_can_be_detached_without_retaining_the_source() {
-    let parsed = parse(KITCHEN_SINK, ParserOptions::default())
-        .output
-        .unwrap();
+    let parsed = parse(KITCHEN_SINK).output.unwrap();
     let detached = parsed.into_owned(&PlaceholderResolver).unwrap();
     let first_title = detached
         .tunes()

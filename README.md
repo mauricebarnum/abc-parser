@@ -4,11 +4,12 @@ A source-spanned, error-recovering parser for ABC music notation 2.1. The crate
 offers whole-file recovering parsing as well as entry points for fields,
 directives, chords, and individual music lines.
 
-The primary `parse` API accepts any Chumsky `ValueInput<Token = char>` plus
-`ParserOptions` and returns a `ParseReport`. Its optional source-backed AST and
-diagnostics retain the input's native span type, so the same API accepts strings,
-character slices, mapped inputs, and value streams without first converting them
-to `&str`.
+The primary `parse` API accepts any Chumsky `ValueInput<Token = char>` and
+returns a `ParseReport` using default `ParserOptions`. Use
+`parse_with_options` to configure text retention. The optional source-backed AST
+and diagnostics retain the input's native span type, so the same API accepts
+strings, character slices, mapped inputs, and value streams without first
+converting them to `&str`.
 
 ```sh
 cargo run -p abc-parser --example kitchen_sink -- test_kitchen_sink.abc

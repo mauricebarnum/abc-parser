@@ -26,7 +26,6 @@ use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
 use abc_parser::MusicElement;
 use abc_parser::Note;
-use abc_parser::ParserOptions;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
 use abc_parser::ToAbc;
@@ -38,7 +37,7 @@ const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 
 /// Parses, prints, transposes, and reprints the bundled ABC fixture.
 fn main() -> ExitCode {
-    let report = parse(KITCHEN_SINK, ParserOptions::default());
+    let report = parse(KITCHEN_SINK);
     for error in &report.errors {
         eprintln!("{error}");
     }
