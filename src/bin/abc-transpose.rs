@@ -278,11 +278,13 @@ impl TranspositionState {
                     .forced_flats()
                     .unwrap_or_else(|| key_prefers_flats(&destination));
                 *key = destination;
+                normalize_key_mode(key);
                 self.destination_signature = signature_offsets(key).unwrap_or([Offset::ZERO; 7]);
                 return Ok(());
             }
         }
         self.prefer_flats = transpose_key_tonic(key, self.interval, self.spelling)?;
+        normalize_key_mode(key);
         self.destination_signature = signature_offsets(key)?;
         Ok(())
     }
@@ -854,6 +856,28 @@ fn mode_degree(mode: &str) -> i8 {
     }
 }
 
+/// Replaces a recognized ABC mode alias with its canonical short spelling.
+fn normalize_key_mode(key: &mut KeySignature<String>) {
+    let mode = key.mode.trim().to_ascii_lowercase();
+    key.mode = if mode.is_empty() || mode.starts_with("maj") || mode.starts_with("ion") {
+        String::new()
+    } else if mode == "m" || mode.starts_with("min") || mode.starts_with("aeo") {
+        "m".to_owned()
+    } else if mode.starts_with("dor") {
+        "dor".to_owned()
+    } else if mode.starts_with("phr") {
+        "phr".to_owned()
+    } else if mode.starts_with("lyd") {
+        "lyd".to_owned()
+    } else if mode.starts_with("mix") {
+        "mix".to_owned()
+    } else if mode.starts_with("loc") {
+        "loc".to_owned()
+    } else {
+        key.mode.clone()
+    };
+}
+
 /// Returns the major-scale semitone distance for a diatonic degree.
 const fn mode_semitones(degree: i8) -> i16 {
     match degree {
@@ -1100,6 +1124,16 @@ mod tests {
         let explicit = transpose("X:1\nK:C\n^C |\n", &Request::Key(parse_key("F").unwrap()));
         assert!(explicit.contains("K:F"), "{explicit}");
         assert!(explicit.contains("_G |"), "{explicit}");
+    }
+
+    #[test]
+    fn destination_and_interval_transposition_normalize_key_modes() {
+        let source = "X:1\nK:Dmin\nD E F |\n";
+        let destination = transpose(source, &Request::Key(parse_key("Em").unwrap()));
+        let interval = transpose(source, &Request::Semitones(2));
+
+        assert_eq!(destination, interval);
+        assert!(destination.contains("K:Em"), "{destination}");
     }
 
     #[test]
