@@ -393,6 +393,37 @@ fn initial_metadata_only_block_remains_the_file_header() {
 }
 
 #[test]
+fn tune_only_fields_disambiguate_an_initial_block_without_x() {
+    let source = "T:Recoverable tune\nK:C\n";
+    let report = parse_owned(source, ParserOptions::default());
+
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert!(document(&report).header.is_empty());
+    assert_eq!(document(&report).tunes().count(), 1);
+}
+
+#[test]
+fn strict_mode_requires_x_without_requiring_it_to_be_first() {
+    let missing = parse_owned(
+        "T:Missing reference\nK:C\n",
+        ParserOptions::new().strict(true),
+    );
+    assert!(!missing.is_valid());
+    assert_eq!(document(&missing).tunes().count(), 1);
+    assert!(missing.errors.iter().any(|error| {
+        error.kind == ErrorKind::MissingReference && error.message.contains("missing required X:")
+    }));
+
+    let out_of_order = parse_owned(
+        "T:Reference follows title\nX:7\nK:C\n",
+        ParserOptions::new().strict(true),
+    );
+    assert!(out_of_order.is_valid(), "{:#?}", out_of_order.errors);
+    assert!(out_of_order.warnings.is_empty());
+    assert_eq!(document(&out_of_order).tunes().count(), 1);
+}
+
+#[test]
 fn music_like_text_warns_without_becoming_invalid_or_a_tune() {
     let source = "% classification comment\nCDEF |\n";
     let report = parse_owned(source, ParserOptions::default());

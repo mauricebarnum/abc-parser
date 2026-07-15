@@ -414,6 +414,7 @@ pub enum DirectiveKind {
 pub struct ParserOptions {
     retain_free_text: bool,
     retain_typeset_text: bool,
+    strict: bool,
 }
 
 impl ParserOptions {
@@ -422,6 +423,7 @@ impl ParserOptions {
         Self {
             retain_free_text: true,
             retain_typeset_text: true,
+            strict: false,
         }
     }
 
@@ -439,6 +441,17 @@ impl ParserOptions {
         self
     }
 
+    /// Selects strict validation for complete ABC documents.
+    ///
+    /// Strict validation currently requires every tune to contain an `X:`
+    /// reference field. Parsing remains recovering when this requirement is
+    /// not met.
+    #[must_use]
+    pub const fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
     /// Returns whether free text is retained.
     pub const fn keeps_free_text(self) -> bool {
         self.retain_free_text
@@ -447,6 +460,11 @@ impl ParserOptions {
     /// Returns whether typeset text is retained.
     pub const fn keeps_typeset_text(self) -> bool {
         self.retain_typeset_text
+    }
+
+    /// Returns whether strict document validation is enabled.
+    pub const fn is_strict(self) -> bool {
+        self.strict
     }
 }
 
@@ -1015,19 +1033,12 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord + fmt::Display,
 {
-    let (result, warning_spans) = combinators::parse_document(input, options);
+    let (result, diagnostics) = combinators::parse_document(input, options);
     let (output, faults) = result.into_output_errors();
     let mut errors = faults.iter().map(chumsky_error).collect::<Vec<_>>();
+    errors.extend(diagnostics.0);
     errors.sort_by_key(|error| (error.span.start(), error.span.end()));
-    let mut warnings = warning_spans
-        .into_iter()
-        .map(|span| ParseWarning {
-            kind: ErrorKind::MissingReference,
-            message: "block parses as music but has no leading information field; treating it as free text"
-                .to_owned(),
-            span,
-        })
-        .collect::<Vec<_>>();
+    let mut warnings = diagnostics.1;
     warnings.sort_by_key(|warning| (warning.span.start(), warning.span.end()));
     ParseReport {
         output,

@@ -13,6 +13,12 @@
 // limitations under the License.
 
 //! Chumsky parser constructors for ABC syntax.
+//!
+//! Document-level semantic parsers are intentionally boxed at selected
+//! composition boundaries. Erasing those large concrete combinator types keeps
+//! optimized-build monomorphization and code generation tractable. Token-level
+//! music and field parsers remain unboxed so dynamic dispatch stays outside the
+//! hottest character-by-character paths.
 
 use super::Accidental;
 use super::Annotation;
@@ -28,6 +34,7 @@ use super::DirectiveKind;
 use super::Document;
 use super::DocumentItem;
 use super::EndingSelector;
+use super::ErrorKind;
 use super::Field;
 use super::FieldParameter;
 use super::FieldValue;
@@ -46,6 +53,8 @@ use super::MusicElement;
 use super::Note;
 use super::NoteLength;
 use super::Overlay;
+use super::ParseError;
+use super::ParseWarning;
 use super::ParsedDocument;
 use super::ParserOptions;
 use super::PartSequence;
@@ -71,7 +80,6 @@ use chumsky::ParseResult;
 use chumsky::Parser;
 use chumsky::error::Rich;
 use chumsky::extra;
-use chumsky::input::Emitter;
 use chumsky::input::Input;
 use chumsky::input::ValueInput;
 use chumsky::prelude::any;
@@ -84,30 +92,59 @@ use chumsky::recovery::via_parser;
 use chumsky::span::Span as ChumskySpan;
 use std::fmt;
 
-type WarningState<S> = extra::SimpleState<Vec<S>>;
+type ParserDiagnostics<S> = (Vec<ParseError<S>>, Vec<ParseWarning<S>>);
+type ParserState<S> = extra::SimpleState<ParserDiagnostics<S>>;
+
 type Extra<'src, I> = extra::Full<
     Rich<'src, char, <I as Input<'src>>::Span>,
-    WarningState<<I as Input<'src>>::Span>,
+    ParserState<<I as Input<'src>>::Span>,
     (),
 >;
 type ParsedMusic<S> = Vec<Spanned<MusicElement<SourceText<S>>, S>>;
 type ParsedLine<S> = Spanned<Line<S, SourceText<S>>, S>;
+type ParsedDocumentItem<S> = Spanned<DocumentItem<S, SourceText<S>>, S>;
 type DocumentParse<'src, I> = ParseResult<
     ParsedDocument<<I as Input<'src>>::Span>,
     Rich<'src, char, <I as Input<'src>>::Span>,
 >;
-type DocumentParseWithWarnings<'src, I> = (DocumentParse<'src, I>, Vec<<I as Input<'src>>::Span>);
+type DocumentParseWithDiagnostics<'src, I> = (
+    DocumentParse<'src, I>,
+    ParserDiagnostics<<I as Input<'src>>::Span>,
+);
 
 /// A blank-delimited document block parsed in its selected grammar mode.
 enum ParsedBlock<S> {
     Tune {
         leading_comments: Vec<ParsedLine<S>>,
-        lines: Vec<ParsedLine<S>>,
+        tune: Spanned<Tune<S, SourceText<S>>, S>,
     },
     Text {
-        lines: Vec<ParsedLine<S>>,
-        possible_music: Option<S>,
+        items: Vec<Spanned<DocumentItem<S, SourceText<S>>, S>>,
     },
+}
+
+/// The first physical block, which alone may be a file header.
+enum ParsedFirstBlock<S> {
+    Header(Vec<ParsedLine<S>>),
+    Content(ParsedBlock<S>),
+}
+
+/// One line or grouped typeset construct in a tune block.
+enum ParsedTuneUnit<S> {
+    Line(ParsedLine<S>),
+    Typeset(Spanned<TypesetText<SourceText<S>>, S>),
+}
+
+/// A field-led block awaiting first-block header resolution.
+struct ParsedTuneCandidate<S> {
+    leading_comments: Vec<ParsedLine<S>>,
+    units: Vec<ParsedTuneUnit<S>>,
+}
+
+/// One body line retained while parsing a grouped typeset block.
+struct ParsedTypesetBodyLine<S> {
+    text: Option<SourceText<S>>,
+    span: S,
 }
 
 /// Parses a character other than a physical line ending.
@@ -1265,85 +1302,558 @@ where
         })
 }
 
-/// Parses a blank-delimited block directly in tune or text mode.
-fn block_parser<'src, I>() -> impl Parser<'src, I, ParsedBlock<I::Span>, Extra<'src, I>> + Clone
+/// Returns whether a field unambiguously belongs to a tune rather than a file header.
+const fn is_tune_only_header_field(key: char) -> bool {
+    matches!(key, 'K' | 'P' | 'Q' | 'T' | 'V' | 'W' | 'X' | 's' | 'w')
+}
+
+/// Recognizes the boundary following a nonblank block without consuming it.
+fn block_end<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    choice((
+        end(),
+        newline()
+            .ignore_then(horizontal_space())
+            .then_ignore(newline().rewind().or(end()))
+            .rewind(),
+    ))
+    .ignored()
+}
+
+/// Parses a complete `%%begintext` construct as one semantic node.
+fn typeset_block_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<TypesetText<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    let directive_line = spanned_nonblank_line::<I, _>(
+        directive_parser()
+            .filter(|directive| directive.kind == DirectiveKind::BeginText)
+            .map(Line::Directive),
+    );
+    let closing_line = spanned_nonblank_line::<I, _>(
+        directive_parser()
+            .filter(|directive| directive.kind == DirectiveKind::EndText)
+            .map(Line::Directive),
+    );
+    let body_line = closing_line
+        .clone()
+        .rewind()
+        .not()
+        .ignore_then(spanned_nonblank_line::<I, _>(text_line_parser()))
+        .validate(|line, _, emitter| {
+            let span = line.span;
+            let text = match line.value {
+                Line::Directive(value) => Some(value.body),
+                Line::DirectiveText(value) => Some(value),
+                _ => {
+                    emitter.emit(Rich::custom(
+                        span.clone(),
+                        "typeset block lines must begin with %%",
+                    ));
+                    None
+                }
+            };
+            ParsedTypesetBodyLine { text, span }
+        });
+
+    directive_line
+        .then(
+            newline()
+                .ignore_then(body_line)
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .then(newline().ignore_then(closing_line).or_not())
+        .validate(|((opening, body), closing), _, emitter| {
+            let start = opening.span;
+            let end = closing.as_ref().map_or_else(
+                || {
+                    body.last()
+                        .map_or_else(|| start.clone(), |line| line.span.clone())
+                },
+                |line| line.span.clone(),
+            );
+            if closing.is_none() {
+                emitter.emit(Rich::custom(start.clone(), "unclosed %%begintext block"));
+            }
+            Spanned {
+                value: TypesetText::Block(body.into_iter().filter_map(|line| line.text).collect()),
+                span: start.union(end),
+            }
+        })
+        // Erase this multi-line grammar before it is reused by text and tune parsers.
+        .boxed()
+}
+
+/// Parses one `%%text` or `%%center` line as semantic typeset text.
+fn inline_typeset_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<TypesetText<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let comment = just('%')
-        .then_ignore(just('%').not())
-        .ignore_then(remaining_text())
-        .map(Line::Comment);
-    let spanned_comment = spanned_nonblank_line::<I, _>(comment);
-    let tune_line = spanned_nonblank_line::<I, _>(tune_line_parser());
-    let text_line = spanned_nonblank_line::<I, _>(text_line_parser());
-    let possible_music_line = spanned_nonblank_line::<I, _>(
-        strict_music_line_parser().then_ignore(newline().rewind().or(end())),
+    spanned_nonblank_line::<I, _>(
+        directive_parser()
+            .filter(|directive| {
+                matches!(directive.kind, DirectiveKind::Text | DirectiveKind::Center)
+            })
+            .map(Line::Directive),
+    )
+    .map(|line| {
+        let Line::Directive(directive) = line.value else {
+            unreachable!("inline typeset parser only accepts directives")
+        };
+        let value = if directive.kind == DirectiveKind::Text {
+            TypesetText::Text(directive.arguments)
+        } else {
+            TypesetText::Centered(directive.arguments)
+        };
+        Spanned {
+            value,
+            span: line.span,
+        }
+    })
+    // Keep the directive grammar from expanding every semantic text-item branch.
+    .boxed()
+}
+
+/// Parses one ordinary free-text line while reserving semantic line starts.
+fn free_text_line_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<SourceText<I::Span>, I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let semantic_start = choice((
+        directive_parser().ignored(),
+        just('%').then_ignore(just('%').not()).ignored(),
+    ));
+    semantic_start
+        .rewind()
+        .not()
+        .ignore_then(spanned_nonblank_line::<I, _>(text_line_parser()))
+        .validate(|line, _, emitter| {
+            match &line.value {
+                Line::Field(_) => emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "information fields are not allowed in free text",
+                )),
+                Line::DirectiveText(_) => emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "invalid stylesheet directive",
+                )),
+                _ => {}
+            }
+            Spanned {
+                value: SourceText::Span(line.span.clone()),
+                span: line.span,
+            }
+        })
+        // Bound the type passed into the repeated free-text grammar below.
+        .boxed()
+}
+
+/// Parses one or more adjacent ordinary lines as a single free-text item.
+fn free_text_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<FreeText<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    let line = free_text_line_parser::<I>();
+    line.clone()
+        .then(newline().ignore_then(line).repeated().collect::<Vec<_>>())
+        .map(|(first, rest)| {
+            let span = rest
+                .last()
+                .map_or_else(|| first.span.clone(), |line| line.span.clone());
+            let lines = std::iter::once(first.value)
+                .chain(rest.into_iter().map(|line| line.value))
+                .collect();
+            Spanned {
+                value: FreeText { lines },
+                span: first.span.union(span),
+            }
+        })
+        // Hide the repeated-line combinator type before composing document items.
+        .boxed()
+}
+
+/// Parses one semantic file-level text item.
+fn text_item_parser<'src, I>(
+    options: ParserOptions,
+) -> impl Parser<'src, I, Option<ParsedDocumentItem<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    let block = typeset_block_parser::<I>().map(move |block| {
+        options.keeps_typeset_text().then(|| Spanned {
+            value: DocumentItem::TypesetText(block.value),
+            span: block.span,
+        })
+    });
+    let inline = inline_typeset_parser::<I>().map(move |text| {
+        options.keeps_typeset_text().then(|| Spanned {
+            value: DocumentItem::TypesetText(text.value),
+            span: text.span,
+        })
+    });
+    let comment = spanned_nonblank_line::<I, _>(
+        just('%')
+            .then_ignore(just('%').not())
+            .ignore_then(remaining_text())
+            .map(Line::Comment),
+    )
+    .map(|line| {
+        let Line::Comment(text) = line.value else {
+            unreachable!("comment parser only accepts comments")
+        };
+        Some(Spanned {
+            value: DocumentItem::Comment(text),
+            span: line.span,
+        })
+    });
+    let directive = spanned_nonblank_line::<I, _>(directive_parser().map(Line::Directive))
+        .validate(|line, _, emitter| {
+            let Line::Directive(directive) = line.value else {
+                unreachable!("directive parser only accepts directives")
+            };
+            if directive.kind == DirectiveKind::EndText {
+                emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "%%endtext without %%begintext",
+                ));
+            }
+            Some(Spanned {
+                value: DocumentItem::Directive(directive),
+                span: line.span,
+            })
+        });
+    let free_text = free_text_parser::<I>().map(move |text| {
+        options.keeps_free_text().then(|| Spanned {
+            value: DocumentItem::FreeText(text.value),
+            span: text.span,
+        })
+    });
+
+    // This wide choice is cloned by block parsing, so erase its concrete type here.
+    choice((block, inline, comment, directive, free_text)).boxed()
+}
+
+/// Parses a text-mode block directly into document items.
+fn text_block_parser<'src, I>(
+    options: ParserOptions,
+) -> impl Parser<'src, I, ParsedBlock<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    let comment = spanned_nonblank_line::<I, _>(
+        just('%')
+            .then_ignore(just('%').not())
+            .ignore_then(remaining_text())
+            .map(Line::Comment),
     );
+    let possible_music = comment
+        .then_ignore(newline())
+        .repeated()
+        .ignore_then(spanned_nonblank_line::<I, _>(
+            strict_music_line_parser().then_ignore(newline().rewind().or(end())),
+        ))
+        .map(|line| line.span)
+        .or_not()
+        .rewind();
+    let item = text_item_parser::<I>(options);
+
+    possible_music
+        .then(
+            item.clone().then(
+                newline()
+                    .ignore_then(item)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .map_with(|(possible_music, (first, rest)), extra| {
+            if let Some(span) = possible_music {
+                extra.state().0.1.push(ParseWarning {
+                    kind: ErrorKind::MissingReference,
+                    message: "block parses as music but has no leading information field; treating it as free text"
+                        .to_owned(),
+                    span,
+                });
+            }
+            ParsedBlock::Text {
+                items: std::iter::once(first).chain(rest).flatten().collect(),
+            }
+        })
+        // Prevent the repeated item grammar from propagating into document_parser.
+        .boxed()
+}
+
+/// Parses a field-led block into semantic tune units before header resolution.
+fn tune_candidate_parser<'src, I>()
+-> impl Parser<'src, I, ParsedTuneCandidate<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    let comment = spanned_nonblank_line::<I, _>(
+        just('%')
+            .then_ignore(just('%').not())
+            .ignore_then(remaining_text())
+            .map(Line::Comment),
+    );
+    let tune_line =
+        spanned_nonblank_line::<I, _>(tune_line_parser()).validate(|line, _, emitter| {
+            if matches!(line.value, Line::DirectiveText(_)) {
+                emitter.emit(Rich::custom(
+                    line.span.clone(),
+                    "invalid stylesheet directive; expected stylesheet directive name",
+                ));
+            }
+            line
+        });
+    let ordinary_unit = tune_line.map(|line| match line.value {
+        Line::Directive(directive)
+            if matches!(directive.kind, DirectiveKind::Text | DirectiveKind::Center) =>
+        {
+            let value = if directive.kind == DirectiveKind::Text {
+                TypesetText::Text(directive.arguments)
+            } else {
+                TypesetText::Centered(directive.arguments)
+            };
+            ParsedTuneUnit::Typeset(Spanned {
+                value,
+                span: line.span,
+            })
+        }
+        _ => ParsedTuneUnit::Line(line),
+    });
+    let unit = choice((
+        typeset_block_parser::<I>().map(ParsedTuneUnit::Typeset),
+        ordinary_unit.clone(),
+    ));
     let field_start = any()
         .filter(char::is_ascii_alphabetic)
         .then_ignore(just(':'))
         .rewind();
 
-    let tune = spanned_comment
-        .clone()
+    comment
         .then_ignore(newline())
         .repeated()
         .collect::<Vec<_>>()
         .then(
-            field_start.ignore_then(tune_line.clone()).then(
-                newline()
-                    .ignore_then(tune_line)
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            ),
+            field_start
+                .ignore_then(ordinary_unit)
+                .then(newline().ignore_then(unit).repeated().collect::<Vec<_>>()),
         )
-        .map(|(leading_comments, (reference, mut lines))| {
-            lines.insert(0, reference);
-            ParsedBlock::Tune {
-                leading_comments,
-                lines,
-            }
-        });
-    let possible_music = spanned_comment
-        .then_ignore(newline())
-        .repeated()
-        .collect::<Vec<_>>()
-        .then(
-            possible_music_line.then(
-                newline()
-                    .ignore_then(text_line.clone())
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .map(|(mut leading_comments, (first, mut lines))| {
-            let possible_music = first.span.clone();
-            leading_comments.push(first);
-            leading_comments.append(&mut lines);
-            ParsedBlock::Text {
-                lines: leading_comments,
-                possible_music: Some(possible_music),
-            }
-        });
-    let text = text_line
-        .clone()
-        .then(
-            newline()
-                .ignore_then(text_line)
-                .repeated()
-                .collect::<Vec<_>>(),
-        )
-        .map(|(first, mut lines)| {
-            lines.insert(0, first);
-            ParsedBlock::Text {
-                lines,
-                possible_music: None,
-            }
-        });
+        .map(|(leading_comments, (first, rest))| ParsedTuneCandidate {
+            leading_comments,
+            units: std::iter::once(first).chain(rest).collect(),
+        })
+        // Tune candidates combine the largest line grammars; cap their type here.
+        .boxed()
+}
 
-    choice((tune, possible_music, text))
+/// Returns whether a field-led first block contains only file-header material.
+fn is_header_candidate<S>(candidate: &ParsedTuneCandidate<S>) -> bool {
+    candidate.units.iter().all(|unit| match unit {
+        ParsedTuneUnit::Line(line) => match &line.value {
+            Line::Comment(_) => true,
+            Line::Directive(directive) => directive.kind == DirectiveKind::Other,
+            Line::Field(field) => !is_tune_only_header_field(field.key),
+            _ => false,
+        },
+        ParsedTuneUnit::Typeset(_) => false,
+    })
+}
+
+/// Converts a resolved tune candidate and applies retention and strict validation.
+fn resolve_tune_candidate<S>(
+    candidate: ParsedTuneCandidate<S>,
+    options: ParserOptions,
+    state: &mut ParserState<S>,
+) -> ParsedBlock<S>
+where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+{
+    let first_span = match &candidate.units[0] {
+        ParsedTuneUnit::Line(line) => line.span.clone(),
+        ParsedTuneUnit::Typeset(text) => text.span.clone(),
+    };
+    let end_span = match &candidate.units[candidate.units.len() - 1] {
+        ParsedTuneUnit::Line(line) => line.span.clone(),
+        ParsedTuneUnit::Typeset(text) => text.span.clone(),
+    };
+    let has_reference = candidate.units.iter().any(|unit| {
+        matches!(
+            unit,
+            ParsedTuneUnit::Line(Spanned {
+                value: Line::Field(Field { key: 'X', .. }),
+                ..
+            })
+        )
+    });
+    if options.is_strict() && !has_reference {
+        state.0.0.push(ParseError {
+            kind: ErrorKind::MissingReference,
+            message: "tune is missing required X: reference field".to_owned(),
+            span: first_span.clone(),
+        });
+    }
+    let lines = candidate
+        .units
+        .into_iter()
+        .filter_map(|unit| match unit {
+            ParsedTuneUnit::Line(line) => Some(line),
+            ParsedTuneUnit::Typeset(text) => options.keeps_typeset_text().then(|| Spanned {
+                value: Line::TypesetText(text.value),
+                span: text.span,
+            }),
+        })
+        .collect();
+    ParsedBlock::Tune {
+        leading_comments: candidate.leading_comments,
+        tune: Spanned {
+            value: Tune { lines },
+            span: first_span.union(end_span),
+        },
+    }
+}
+
+/// Resolves a field-led first block as either a file header or a tune.
+fn resolve_first_tune_candidate<S>(
+    candidate: ParsedTuneCandidate<S>,
+    options: ParserOptions,
+    state: &mut ParserState<S>,
+) -> ParsedFirstBlock<S>
+where
+    S: ChumskySpan + Clone,
+    S::Context: PartialEq + fmt::Debug,
+    S::Offset: Ord,
+{
+    if is_header_candidate(&candidate) {
+        ParsedFirstBlock::Header(
+            candidate
+                .leading_comments
+                .into_iter()
+                .chain(candidate.units.into_iter().filter_map(|unit| match unit {
+                    ParsedTuneUnit::Line(line) => Some(line),
+                    ParsedTuneUnit::Typeset(_) => None,
+                }))
+                .collect(),
+        )
+    } else {
+        ParsedFirstBlock::Content(resolve_tune_candidate(candidate, options, state))
+    }
+}
+
+/// Parses a tune-mode block directly into semantic tune lines.
+fn tune_block_parser<'src, I>(
+    options: ParserOptions,
+) -> impl Parser<'src, I, ParsedBlock<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    tune_candidate_parser::<I>()
+        .map_with(move |candidate, extra| resolve_tune_candidate(candidate, options, extra.state()))
+        // Keep candidate resolution opaque when tune and text blocks are combined.
+        .boxed()
+}
+
+/// Parses a field-led first block and resolves its file-header ambiguity.
+fn first_tune_or_header_parser<'src, I>(
+    options: ParserOptions,
+) -> impl Parser<'src, I, ParsedFirstBlock<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    tune_candidate_parser::<I>()
+        .map_with(move |candidate, extra| {
+            resolve_first_tune_candidate(candidate, options, extra.state())
+        })
+        // The first-block branch is composed separately from later tune blocks.
+        .boxed()
+}
+
+/// Parses an initial block that is unambiguously eligible as a file header.
+fn initial_header_parser<'src, I>()
+-> impl Parser<'src, I, Vec<ParsedLine<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let comment_value = just('%')
+        .then_ignore(just('%').not())
+        .ignore_then(remaining_text());
+    let directive_value =
+        directive_parser().filter(|directive| directive.kind == DirectiveKind::Other);
+    let field_start = any()
+        .filter(|key: &char| key.is_ascii_alphabetic() && !is_tune_only_header_field(*key))
+        .then_ignore(just(':'))
+        .rewind();
+    let shape_line = choice((
+        comment_value.clone().ignored(),
+        directive_value.clone().ignored(),
+        field_start.ignore_then(line_character().repeated().ignored()),
+    ));
+    let shape = shape_line
+        .clone()
+        .then(newline().ignore_then(shape_line).repeated())
+        .then_ignore(block_end::<I>())
+        .rewind();
+    let line = spanned_nonblank_line::<I, _>(choice((
+        comment_value.map(Line::Comment),
+        directive_value.map(Line::Directive),
+        field_start.ignore_then(tune_line_parser()),
+    )));
+
+    shape
+        .ignore_then(
+            line.clone()
+                .then(newline().ignore_then(line).repeated().collect::<Vec<_>>())
+                .map(|(first, rest)| std::iter::once(first).chain(rest).collect()),
+        )
+        // Isolate the speculative header grammar from the top-level choice type.
+        .boxed()
+}
+
+/// Parses one non-header document block in tune or text mode.
+fn block_parser<'src, I>(
+    options: ParserOptions,
+) -> impl Parser<'src, I, ParsedBlock<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    // Erase both substantial alternatives before repeated document composition.
+    choice((tune_block_parser(options), text_block_parser(options))).boxed()
 }
 
 /// Builds a parser for one source-spanned physical ABC line.
@@ -1371,322 +1881,65 @@ where
     just('\r').or_not().then_ignore(just('\n')).ignored()
 }
 
-/// Computes the encompassing span for a non-empty physical-line block.
-fn block_span<S, T>(lines: &[Spanned<Line<S, T>, S>]) -> S
-where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-{
-    lines[0].span.union(lines[lines.len() - 1].span.clone())
-}
-
-/// Returns whether the first block contains only non-tune header material.
-fn is_initial_header<S, T>(lines: &[Spanned<Line<S, T>, S>]) -> bool {
-    !lines.iter().any(|line| {
-        matches!(
-            &line.value,
-            Line::Field(field) if field.key == 'X'
-        )
-    }) && lines.iter().all(|line| {
-        matches!(&line.value, Line::Comment(_) | Line::Field(_))
-            || matches!(
-                &line.value,
-                Line::Directive(directive) if directive.kind == DirectiveKind::Other
-            )
+/// Converts tune-leading comments into file-level comment items.
+fn comment_items<S>(
+    comments: Vec<ParsedLine<S>>,
+) -> impl Iterator<Item = Spanned<DocumentItem<S, SourceText<S>>, S>> {
+    comments.into_iter().filter_map(|line| {
+        if let Line::Comment(text) = line.value {
+            Some(Spanned {
+                value: DocumentItem::Comment(text),
+                span: line.span,
+            })
+        } else {
+            None
+        }
     })
 }
 
-/// Converts unclassified physical lines into one lossless free-text item.
-fn push_free_text<S>(
-    items: &mut Vec<Spanned<DocumentItem<S, SourceText<S>>, S>>,
-    lines: &mut Vec<Spanned<Line<S, SourceText<S>>, S>>,
-) where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-{
-    if lines.is_empty() {
-        return;
-    }
-    let span = block_span(lines);
-    let text = lines
-        .drain(..)
-        .map(|line| SourceText::Span(line.span))
-        .collect();
-    items.push(Spanned {
-        value: DocumentItem::FreeText(FreeText { lines: text }),
-        span,
-    });
-}
-
-/// Finishes a free-text run, retaining or discarding it according to the options.
-fn finish_free_text<S>(
-    items: &mut Vec<Spanned<DocumentItem<S, SourceText<S>>, S>>,
-    lines: &mut Vec<ParsedLine<S>>,
-    options: ParserOptions,
-) where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-{
-    if options.keeps_free_text() {
-        push_free_text(items, lines);
-    } else {
-        lines.clear();
+/// Returns the document items represented by one non-initial block.
+fn block_items<S>(block: ParsedBlock<S>) -> Vec<Spanned<DocumentItem<S, SourceText<S>>, S>> {
+    match block {
+        ParsedBlock::Tune {
+            leading_comments,
+            tune,
+        } => comment_items(leading_comments)
+            .chain(std::iter::once(Spanned {
+                value: DocumentItem::Tune(tune.value),
+                span: tune.span,
+            }))
+            .collect(),
+        ParsedBlock::Text { items } => items,
     }
 }
 
-/// Consumes one typeset block and reports structural errors even when it is discarded.
-fn consume_typeset_block<S, I>(
-    start: &S,
-    lines: &mut I,
-    emitter: &mut Emitter<Rich<'_, char, S>>,
-) -> Spanned<TypesetText<SourceText<S>>, S>
-where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-    I: Iterator<Item = ParsedLine<S>>,
-{
-    let mut end = start.clone();
-    let mut body = Vec::new();
-    let mut closed = false;
-    for body_line in lines.by_ref() {
-        end = body_line.span.clone();
-        match body_line.value {
-            Line::Directive(value) if value.kind == DirectiveKind::EndText => {
-                closed = true;
-                break;
-            }
-            Line::Directive(value) => body.push(value.body),
-            Line::DirectiveText(value) => body.push(value),
-            _ => emitter.emit(Rich::custom(
-                body_line.span,
-                "typeset block lines must begin with %%",
-            )),
-        }
-    }
-    if !closed {
-        emitter.emit(Rich::custom(start.clone(), "unclosed %%begintext block"));
-    }
-    Spanned {
-        value: TypesetText::Block(body),
-        span: start.clone().union(end),
-    }
-}
-
-/// Appends one free-text-mode block while preserving source order and diagnostics.
-fn append_text_block<S>(
-    document: &mut ParsedDocument<S>,
-    lines: Vec<ParsedLine<S>>,
-    options: ParserOptions,
-    emitter: &mut Emitter<Rich<'_, char, S>>,
-) where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-{
-    let mut free_lines = Vec::new();
-    let mut iterator = lines.into_iter();
-    while let Some(line) = iterator.next() {
-        match line.value {
-            Line::Directive(directive)
-                if directive.kind == DirectiveKind::Text
-                    || directive.kind == DirectiveKind::Center =>
-            {
-                finish_free_text(&mut document.items, &mut free_lines, options);
-                if options.keeps_typeset_text() {
-                    let text = if directive.kind == DirectiveKind::Text {
-                        TypesetText::Text(directive.arguments)
-                    } else {
-                        TypesetText::Centered(directive.arguments)
-                    };
-                    document.items.push(Spanned {
-                        value: DocumentItem::TypesetText(text),
-                        span: line.span,
-                    });
-                }
-            }
-            Line::Directive(directive) if directive.kind == DirectiveKind::BeginText => {
-                finish_free_text(&mut document.items, &mut free_lines, options);
-                let block = consume_typeset_block(&line.span, &mut iterator, emitter);
-                if options.keeps_typeset_text() {
-                    document.items.push(Spanned {
-                        value: DocumentItem::TypesetText(block.value),
-                        span: block.span,
-                    });
-                }
-            }
-            Line::Comment(text) => {
-                finish_free_text(&mut document.items, &mut free_lines, options);
-                document.items.push(Spanned {
-                    value: DocumentItem::Comment(text),
-                    span: line.span,
-                });
-            }
-            Line::Directive(directive) => {
-                finish_free_text(&mut document.items, &mut free_lines, options);
-                if directive.kind == DirectiveKind::EndText {
-                    emitter.emit(Rich::custom(
-                        line.span.clone(),
-                        "%%endtext without %%begintext",
-                    ));
-                }
-                document.items.push(Spanned {
-                    value: DocumentItem::Directive(directive),
-                    span: line.span,
-                });
-            }
-            Line::Field(_) => {
-                emitter.emit(Rich::custom(
-                    line.span.clone(),
-                    "information fields are not allowed in free text",
-                ));
-                free_lines.push(line);
-            }
-            Line::DirectiveText(_) => {
-                emitter.emit(Rich::custom(
-                    line.span.clone(),
-                    "invalid stylesheet directive",
-                ));
-                free_lines.push(line);
-            }
-            _ => free_lines.push(line),
-        }
-    }
-    finish_free_text(&mut document.items, &mut free_lines, options);
-}
-
-/// Converts a tune-mode block, including tune-local typeset directives.
-fn build_tune<S>(
-    lines: Vec<ParsedLine<S>>,
-    options: ParserOptions,
-    emitter: &mut Emitter<Rich<'_, char, S>>,
-) -> Spanned<DocumentItem<S, SourceText<S>>, S>
-where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-{
-    let span = block_span(&lines);
-    let mut tune_lines = Vec::new();
-    let mut iterator = lines.into_iter();
-    while let Some(line) = iterator.next() {
-        match line.value {
-            Line::Directive(directive) if directive.kind == DirectiveKind::Text => {
-                if options.keeps_typeset_text() {
-                    tune_lines.push(Spanned {
-                        value: Line::TypesetText(TypesetText::Text(directive.arguments)),
-                        span: line.span,
-                    });
-                }
-            }
-            Line::Directive(directive) if directive.kind == DirectiveKind::Center => {
-                if options.keeps_typeset_text() {
-                    tune_lines.push(Spanned {
-                        value: Line::TypesetText(TypesetText::Centered(directive.arguments)),
-                        span: line.span,
-                    });
-                }
-            }
-            Line::Directive(directive) if directive.kind == DirectiveKind::BeginText => {
-                let block = consume_typeset_block(&line.span, &mut iterator, emitter);
-                if options.keeps_typeset_text() {
-                    tune_lines.push(Spanned {
-                        value: Line::TypesetText(block.value),
-                        span: block.span,
-                    });
-                }
-            }
-            Line::DirectiveText(_) => {
-                emitter.emit(Rich::custom(
-                    line.span.clone(),
-                    "invalid stylesheet directive; expected stylesheet directive name",
-                ));
-                tune_lines.push(line);
-            }
-            _ => tune_lines.push(line),
-        }
-    }
-    Spanned {
-        value: DocumentItem::Tune(Tune { lines: tune_lines }),
-        span,
-    }
-}
-
-/// Places comments attached to a tune in the header or document item stream.
-fn append_leading_comments<S>(
-    document: &mut ParsedDocument<S>,
-    comments: Vec<ParsedLine<S>>,
-    is_first_block: bool,
-) {
-    if is_first_block {
-        document.header = comments;
-    } else {
-        document
-            .items
-            .extend(comments.into_iter().filter_map(|line| {
-                if let Line::Comment(text) = line.value {
-                    Some(Spanned {
-                        value: DocumentItem::Comment(text),
-                        span: line.span,
-                    })
-                } else {
-                    None
-                }
-            }));
-    }
-}
-
-/// Assembles classified blocks into a document without changing recovery semantics.
+/// Assembles already-semantic blocks while applying first-block comment placement.
 fn assemble_document<S>(
-    blocks: Vec<ParsedBlock<S>>,
-    options: ParserOptions,
-    warnings: &mut WarningState<S>,
-    emitter: &mut Emitter<Rich<'_, char, S>>,
-) -> ParsedDocument<S>
-where
-    S: ChumskySpan + Clone,
-    S::Context: PartialEq + fmt::Debug,
-    S::Offset: Ord,
-{
-    let mut document = Document {
-        header: Vec::new(),
-        items: Vec::new(),
+    first: Option<ParsedFirstBlock<S>>,
+    rest: Vec<ParsedBlock<S>>,
+) -> ParsedDocument<S> {
+    let (header, first_items) = match first {
+        None => (Vec::new(), Vec::new()),
+        Some(ParsedFirstBlock::Header(lines)) => (lines, Vec::new()),
+        Some(ParsedFirstBlock::Content(ParsedBlock::Tune {
+            leading_comments,
+            tune,
+        })) => (
+            leading_comments,
+            vec![Spanned {
+                value: DocumentItem::Tune(tune.value),
+                span: tune.span,
+            }],
+        ),
+        Some(ParsedFirstBlock::Content(ParsedBlock::Text { items })) => (Vec::new(), items),
     };
-
-    for (block_index, block) in blocks.into_iter().enumerate() {
-        let is_first_block = block_index == 0;
-        match block {
-            ParsedBlock::Tune {
-                mut leading_comments,
-                lines,
-            } => {
-                if is_first_block && is_initial_header(&lines) {
-                    leading_comments.extend(lines);
-                    document.header = leading_comments;
-                    continue;
-                }
-                append_leading_comments(&mut document, leading_comments, is_first_block);
-                document.items.push(build_tune(lines, options, emitter));
-            }
-            ParsedBlock::Text {
-                lines,
-                possible_music,
-            } => {
-                if let Some(span) = possible_music {
-                    warnings.push(span);
-                }
-                if is_first_block && is_initial_header(&lines) {
-                    document.header = lines;
-                    continue;
-                }
-                append_text_block(&mut document, lines, options, emitter);
-            }
-        }
+    Document {
+        header,
+        items: first_items
+            .into_iter()
+            .chain(rest.into_iter().flat_map(block_items))
+            .collect(),
     }
-    document
 }
 
 /// Builds a complete-document parser with explicit text-retention behavior.
@@ -1703,34 +1956,42 @@ where
     let block_separator = newline()
         .ignore_then(blank_line.clone().repeated().at_least(1))
         .ignored();
+    let block = block_parser::<I>(options);
+    let first = choice((
+        first_tune_or_header_parser::<I>(options),
+        initial_header_parser::<I>().map(ParsedFirstBlock::Header),
+        text_block_parser::<I>(options).map(ParsedFirstBlock::Content),
+    ));
     blank_line
         .repeated()
         .ignore_then(
-            block_parser::<I>()
-                .separated_by(block_separator)
-                .allow_trailing()
-                .collect::<Vec<_>>(),
+            first.or_not().then(
+                block_separator
+                    .ignore_then(block)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            ),
         )
         .then_ignore(newline().or_not())
         .then_ignore(horizontal_space())
         .then_ignore(end())
-        .validate(move |blocks, extra, emitter| {
-            assemble_document(blocks, options, extra.state(), emitter)
-        })
+        .map(|(first, rest)| assemble_document(first, rest))
+        // Cap the public parse entry point's monomorphized type and codegen cost.
+        .boxed()
 }
 
-/// Parses a document while retaining advisory block-classification spans.
+/// Parses a document while retaining typed recovering diagnostics.
 pub(super) fn parse_document<'src, I>(
     input: I,
     options: ParserOptions,
-) -> DocumentParseWithWarnings<'src, I>
+) -> DocumentParseWithDiagnostics<'src, I>
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
-    let mut warnings = WarningState::default();
-    let result = document_parser(options).parse_with_state(input, &mut warnings);
-    (result, warnings.0)
+    let mut state = extra::SimpleState((Vec::new(), Vec::new()));
+    let result = document_parser(options).parse_with_state(input, &mut state);
+    (result, state.0)
 }

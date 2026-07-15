@@ -44,8 +44,9 @@ flowchart TD
     elements --> ast[Spanned AST nodes]
     field_value --> ast
     directive --> ast
-    ast --> ordered[Assemble header, tunes, free text, and typeset text]
-    ordered --> filter[Apply ParserOptions retention]
+    ast --> grouped[Group semantic text and tune units]
+    grouped --> ordered[Assemble header, tunes, free text, and typeset text]
+    ordered --> filter[Apply ParserOptions retention and strict validation]
     filter --> parsed[ParsedDocument with SourceText spans]
     parsed -->|IntoOwnedAst + source| owned[OwnedDocument with strings]
     parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
@@ -63,17 +64,20 @@ granularity:
 1. Empty lines divide the input into blocks and terminate tunes.
 2. Leading `%` comments are transparent to classification. An ASCII letter
    followed by `:` selects tune mode; directives and raw lines select text mode.
-3. Tune lines are parsed immediately with diagnostic music recovery. Text lines
-   retain raw spans without invoking the music grammar.
+   In the initial block, known tune-only fields distinguish a recoverable tune
+   without `X:` from an ambiguous file header containing shared fields.
+3. Chumsky groups tune lines, free-text runs, comments, directives, and typeset
+   blocks directly into semantic units. Tune lines use diagnostic music
+   recovery, while free text retains raw spans without invoking that grammar.
 4. A strict probe of a raw deciding line records a non-fatal
    [`ErrorKind::MissingReference`] warning when the whole line is valid music;
    the block remains free text.
-5. `map_with` attaches native input spans. Parser state carries advisory spans
-   separately from Chumsky's `Rich` error channel.
+5. `map_with` attaches native input spans. Parser state carries typed document
+   diagnostics separately from Chumsky's `Rich` token-error channel.
 6. The initial metadata-only block remains the file header. Later field-led
    blocks become [`Tune`] values even when their first field is not `X:`.
 7. Typeset text and comments are assembled in source order before applying
-   [`ParserOptions`] retention.
+   [`ParserOptions`] retention and optional strict tune validation.
 
 Physical lines are intentional recovery boundaries. ABC fields, directives,
 comments, and most music layout constructs cannot consume an arbitrary following
@@ -99,6 +103,10 @@ an advisory warning.
 [`ParserOptions::retain_typeset_text`] builders independently omit the
 corresponding AST nodes. Parsing and validation still occur before omission, so
 retention choices never hide diagnostics.
+
+[`ParserOptions::strict`] additionally requires each tune to contain an `X:`
+reference field. The field may occur anywhere in the tune; a missing field is a
+recoverable error, so the tune remains available in the returned document.
 
 ## Information-field flow
 
