@@ -77,6 +77,17 @@ fn destination_key_is_applied_independently_to_every_tune() {
 }
 
 #[test]
+fn spelling_preference_values_are_accepted_by_the_command() {
+    for value in ["true", "false", "auto"] {
+        let output = run(&["--semitones", "1", "--prefer-flats", value]);
+        assert!(output.status.success(), "{value}: {output:?}");
+        let source = String::from_utf8(output.stdout).unwrap();
+        let reparsed = parse_recovering(&source);
+        assert!(reparsed.is_valid(), "{value}: {:#?}", reparsed.errors);
+    }
+}
+
+#[test]
 fn non_half_step_values_are_rejected() {
     let output = run(&["--steps", "0.25"]);
     assert!(!output.status.success());

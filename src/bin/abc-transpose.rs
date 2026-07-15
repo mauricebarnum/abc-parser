@@ -44,7 +44,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: abc-transpose <FILE|-> (--key <KEY> | --semitones <N> | --steps <N>)\n\
+const USAGE: &str = "Usage: abc-transpose <FILE|-> (--key <KEY> | --semitones <N> | --steps <N>) [--prefer-flats <true|false|auto>]\n\
 \n\
 Transpose every tune in an ABC file and write canonical ABC to standard output.\n\
 Use - as FILE to read standard input. KEY accepts ABC K: syntax with or without K:.\n\
@@ -60,11 +60,35 @@ enum Request {
     Semitones(i16),
 }
 
+/// Requested policy for choosing enharmonic spellings.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SpellingPreference {
+    /// Select the conventional destination having the smallest key signature.
+    #[default]
+    Auto,
+    /// Prefer flat-oriented conventional destinations.
+    Flats,
+    /// Prefer sharp-oriented conventional destinations.
+    Sharps,
+}
+
+impl SpellingPreference {
+    /// Returns a forced orientation, or `None` when heuristics should decide.
+    const fn forced_flats(self) -> Option<bool> {
+        match self {
+            Self::Auto => None,
+            Self::Flats => Some(true),
+            Self::Sharps => Some(false),
+        }
+    }
+}
+
 /// Fully validated command-line arguments.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Arguments {
     input: PathBuf,
     request: Request,
+    spelling: SpellingPreference,
 }
 
 /// A rational accidental displacement measured in semitones.
@@ -116,6 +140,7 @@ type MeasureAccidentals = Vec<((PitchClass, i8), Offset)>;
 /// Mutable musical state while one tune is traversed in source order.
 struct TranspositionState {
     interval: i16,
+    spelling: SpellingPreference,
     source_signature: [Offset; 7],
     measure_accidentals: MeasureAccidentals,
     prefer_flats: bool,
@@ -129,16 +154,18 @@ impl TranspositionState {
         interval: i16,
         source_key: &KeySignature<String>,
         destination: Option<KeySignature<String>>,
+        spelling: SpellingPreference,
     ) -> Result<Self, String> {
         Ok(Self {
             interval,
+            spelling,
             source_signature: signature_offsets(source_key)?,
             measure_accidentals: Vec::new(),
-            prefer_flats: destination
-                .as_ref()
-                .and_then(|key| key.tonic)
-                .or(source_key.tonic)
-                .is_some_and(|tonic| tonic.accidental == Some(KeyAccidental::Flat)),
+            prefer_flats: spelling.forced_flats().unwrap_or_else(|| {
+                destination
+                    .as_ref()
+                    .map_or_else(|| key_prefers_flats(source_key), key_prefers_flats)
+            }),
             first_key_pending: true,
             destination,
         })
@@ -174,11 +201,16 @@ impl TranspositionState {
         if self.first_key_pending {
             self.first_key_pending = false;
             if let Some(destination) = &self.destination {
+                self.prefer_flats = self
+                    .spelling
+                    .forced_flats()
+                    .unwrap_or_else(|| key_prefers_flats(destination));
                 *key = destination.clone();
                 return Ok(());
             }
         }
-        transpose_key_tonic(key, self.interval, self.prefer_flats)
+        self.prefer_flats = transpose_key_tonic(key, self.interval, self.spelling)?;
+        Ok(())
     }
 }
 
@@ -218,13 +250,14 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Err(format!("input is not valid ABC:\n{diagnostics}"));
     }
 
-    if arguments.request == Request::Semitones(0) {
+    if arguments.request == Request::Semitones(0) && arguments.spelling == SpellingPreference::Auto
+    {
         return write_output(&source);
     }
 
     let mut document = parsed.output;
     for tune in document.tunes_mut() {
-        transpose_tune(tune, &arguments.request)?;
+        transpose_tune(tune, &arguments.request, arguments.spelling)?;
     }
     write_output(&document.to_abc())
 }
@@ -239,27 +272,54 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Argume
         return Err(USAGE.into());
     }
     let input = PathBuf::from(first);
-    let Some(option) = arguments.next() else {
-        return Err(USAGE.into());
-    };
-    let Some(value) = arguments.next() else {
-        return Err(format!("{option} requires a value\n\n{USAGE}"));
-    };
-    if arguments.next().is_some() {
-        return Err(format!("unexpected additional arguments\n\n{USAGE}"));
+    let mut request = None;
+    let mut spelling = None;
+    while let Some(option) = arguments.next() {
+        let Some(value) = arguments.next() else {
+            return Err(format!("{option} requires a value\n\n{USAGE}"));
+        };
+        match option.as_str() {
+            "--key" | "--semitones" | "--steps" => {
+                if request.is_some() {
+                    return Err(format!(
+                        "specify exactly one transposition operation\n\n{USAGE}"
+                    ));
+                }
+                request = Some(match option.as_str() {
+                    "--key" => Request::Key(parse_key(&value)?),
+                    "--semitones" => Request::Semitones(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid semitone count: {value}"))?,
+                    ),
+                    "--steps" => Request::Semitones(parse_steps(&value)?),
+                    _ => unreachable!("the outer match restricts operation names"),
+                });
+            }
+            "--prefer-flats" => {
+                if spelling.is_some() {
+                    return Err(format!("--prefer-flats may be specified once\n\n{USAGE}"));
+                }
+                spelling = Some(match value.as_str() {
+                    "auto" => SpellingPreference::Auto,
+                    "true" => SpellingPreference::Flats,
+                    "false" => SpellingPreference::Sharps,
+                    _ => {
+                        return Err(format!(
+                            "invalid --prefer-flats value: {value}; expected true, false, or auto"
+                        ));
+                    }
+                });
+            }
+            _ => return Err(format!("unknown option: {option}\n\n{USAGE}")),
+        }
     }
-
-    let request = match option.as_str() {
-        "--key" => Request::Key(parse_key(&value)?),
-        "--semitones" => Request::Semitones(
-            value
-                .parse()
-                .map_err(|_| format!("invalid semitone count: {value}"))?,
-        ),
-        "--steps" => Request::Semitones(parse_steps(&value)?),
-        _ => return Err(format!("unknown option: {option}\n\n{USAGE}")),
-    };
-    Ok(Arguments { input, request })
+    let request = request.ok_or_else(|| USAGE.to_owned())?;
+    Ok(Arguments {
+        input,
+        request,
+        spelling: spelling.unwrap_or_default(),
+    })
 }
 
 /// Converts exact half-step notation into its integral semitone equivalent.
@@ -335,7 +395,11 @@ fn write_output(source: &str) -> Result<(), String> {
 }
 
 /// Transposes one tune using its first structured key field as the source key.
-fn transpose_tune<S>(tune: &mut Tune<S, String>, request: &Request) -> Result<(), String> {
+fn transpose_tune<S>(
+    tune: &mut Tune<S, String>,
+    request: &Request,
+    spelling: SpellingPreference,
+) -> Result<(), String> {
     let source_key = tune
         .lines
         .iter()
@@ -362,7 +426,7 @@ fn transpose_tune<S>(tune: &mut Tune<S, String>, request: &Request) -> Result<()
             )
         }
     };
-    let mut state = TranspositionState::new(interval, &source_key, destination)?;
+    let mut state = TranspositionState::new(interval, &source_key, destination, spelling)?;
     for line in &mut tune.lines {
         transpose_line(&mut line.value, &mut state)?;
     }
@@ -550,29 +614,96 @@ const fn chromatic_spelling(chromatic: u8, prefer_flats: bool) -> (PitchClass, i
     }
 }
 
-/// Moves a key tonic chromatically while preserving its mode and parameters.
+/// Moves a key tonic chromatically and returns its conventional spelling orientation.
 fn transpose_key_tonic(
     key: &mut KeySignature<String>,
     interval: i16,
-    prefer_flats: bool,
-) -> Result<(), String> {
+    spelling: SpellingPreference,
+) -> Result<bool, String> {
     let tonic = key
         .tonic
         .ok_or_else(|| "cannot transpose a key without a pitched tonic".to_owned())?;
     let chromatic = (tonic_semitone(tonic) + interval).rem_euclid(12);
-    let (class, accidental) = chromatic_spelling(
-        u8::try_from(chromatic).expect("a value modulo twelve always fits in u8"),
-        prefer_flats,
-    );
-    key.tonic = Some(KeyTonic {
+    let chromatic = u8::try_from(chromatic).expect("a value modulo twelve always fits in u8");
+    let sharp = chromatic_tonic(chromatic, false);
+    let flat = chromatic_tonic(chromatic, true);
+    let sharp_fifths = conventional_key_fifths(sharp, &key.mode);
+    let flat_fifths = conventional_key_fifths(flat, &key.mode);
+    let source_fifths = conventional_key_fifths(tonic, &key.mode);
+    let selected = match spelling {
+        SpellingPreference::Flats => flat_fifths
+            .map(|count| (flat, count))
+            .or_else(|| sharp_fifths.map(|count| (sharp, count))),
+        SpellingPreference::Sharps => sharp_fifths
+            .map(|count| (sharp, count))
+            .or_else(|| flat_fifths.map(|count| (flat, count))),
+        SpellingPreference::Auto => select_automatic_spelling(
+            sharp,
+            sharp_fifths,
+            flat,
+            flat_fifths,
+            source_fifths,
+            interval,
+        ),
+    }
+    .ok_or_else(|| {
+        format!(
+            "transposed key {} has no conventional seven-accidental spelling",
+            key.to_abc()
+        )
+    })?;
+    key.tonic = Some(selected.0);
+    Ok(match spelling {
+        SpellingPreference::Flats if flat_fifths.is_some() => true,
+        SpellingPreference::Sharps if sharp_fifths.is_some() => false,
+        SpellingPreference::Auto | SpellingPreference::Flats | SpellingPreference::Sharps => {
+            selected.1 < 0
+        }
+    })
+}
+
+/// Chooses the smallest signature, using direction and source orientation for ties.
+fn select_automatic_spelling(
+    sharp: KeyTonic,
+    sharp_fifths: Option<i8>,
+    flat: KeyTonic,
+    flat_fifths: Option<i8>,
+    source_fifths: Option<i8>,
+    interval: i16,
+) -> Option<(KeyTonic, i8)> {
+    match (sharp_fifths, flat_fifths) {
+        (Some(sharp_count), Some(flat_count))
+            if sharp == flat || sharp_count.unsigned_abs() < flat_count.unsigned_abs() =>
+        {
+            Some((sharp, sharp_count))
+        }
+        (Some(sharp_count), Some(flat_count))
+            if flat_count.unsigned_abs() < sharp_count.unsigned_abs() =>
+        {
+            Some((flat, flat_count))
+        }
+        (Some(_), Some(flat_count)) if interval < 0 => Some((flat, flat_count)),
+        (Some(sharp_count), Some(_)) if interval > 0 => Some((sharp, sharp_count)),
+        (Some(_), Some(flat_count)) if source_fifths.is_some_and(|count| count < 0) => {
+            Some((flat, flat_count))
+        }
+        (Some(sharp_count), Some(_) | None) => Some((sharp, sharp_count)),
+        (None, Some(flat_count)) => Some((flat, flat_count)),
+        (None, None) => None,
+    }
+}
+
+/// Creates a key tonic from one sharp- or flat-oriented chromatic spelling.
+const fn chromatic_tonic(chromatic: u8, prefer_flats: bool) -> KeyTonic {
+    let (class, accidental) = chromatic_spelling(chromatic, prefer_flats);
+    KeyTonic {
         class,
         accidental: match accidental {
             -1 => Some(KeyAccidental::Flat),
             1 => Some(KeyAccidental::Sharp),
             _ => None,
         },
-    });
-    Ok(())
+    }
 }
 
 /// Finds the shortest signed tonic interval, preferring upward tritones.
@@ -596,11 +727,7 @@ fn signature_offsets(key: &KeySignature<String>) -> Result<[Offset; 7], String> 
     let tonic = key
         .tonic
         .ok_or_else(|| "cannot resolve a key signature without a pitched tonic".to_owned())?;
-    let degree = mode_degree(&key.mode);
-    let major_class = shift_class(tonic.class, -degree);
-    let major_pitch = (tonic_semitone(tonic) - mode_semitones(degree)).rem_euclid(12);
-    let accidental = normalize_accidental(major_pitch - natural_semitone(major_class));
-    let fifths = major_key_fifths(major_class, accidental).ok_or_else(|| {
+    let fifths = conventional_key_fifths(tonic, &key.mode).ok_or_else(|| {
         format!(
             "key {} has no conventional seven-accidental signature",
             key.to_abc()
@@ -642,6 +769,25 @@ fn signature_offsets(key: &KeySignature<String>) -> Result<[Offset; 7], String> 
         }
     }
     Ok(offsets)
+}
+
+/// Returns whether a key's signature or explicit tonic spelling favors flats.
+fn key_prefers_flats(key: &KeySignature<String>) -> bool {
+    key.tonic.is_some_and(|tonic| {
+        conventional_key_fifths(tonic, &key.mode).map_or_else(
+            || tonic.accidental == Some(KeyAccidental::Flat),
+            |fifths| fifths < 0,
+        )
+    })
+}
+
+/// Finds a modal key's relative-major position on the conventional circle of fifths.
+fn conventional_key_fifths(tonic: KeyTonic, mode: &str) -> Option<i8> {
+    let degree = mode_degree(mode);
+    let major_class = shift_class(tonic.class, -degree);
+    let major_pitch = (tonic_semitone(tonic) - mode_semitones(degree)).rem_euclid(12);
+    let accidental = normalize_accidental(major_pitch - natural_semitone(major_class));
+    major_key_fifths(major_class, accidental)
 }
 
 /// Parses a positional key parameter such as `^F`, `_B`, or `^1/2c`.
@@ -814,6 +960,8 @@ fn find_measure_accidental(
 #[cfg(test)]
 mod tests {
     use super::Request;
+    use super::SpellingPreference;
+    use super::parse_arguments;
     use super::parse_key;
     use super::parse_steps;
     use super::transpose_tune;
@@ -822,12 +970,21 @@ mod tests {
 
     /// Parses and transposes the only tune in a compact fixture.
     fn transpose(source: &str, request: &Request) -> String {
+        transpose_with_spelling(source, request, SpellingPreference::Auto)
+    }
+
+    /// Parses and transposes the only tune using an explicit spelling policy.
+    fn transpose_with_spelling(
+        source: &str,
+        request: &Request,
+        spelling: SpellingPreference,
+    ) -> String {
         let mut document = parse_recovering(source).output;
         {
             let mut tunes = document.tunes_mut();
             let tune = tunes.next().unwrap();
             assert!(tunes.next().is_none());
-            transpose_tune(tune, request).unwrap();
+            transpose_tune(tune, request, spelling).unwrap();
         }
         document.to_abc()
     }
@@ -835,8 +992,8 @@ mod tests {
     #[test]
     fn signed_semitones_transpose_keys_notes_chords_and_graces() {
         let output = transpose("X:1\nK:C\nC ^C C | [EG] {B} |\n", &Request::Semitones(1));
-        assert!(output.contains("K:C#"));
-        assert!(output.contains("^C =D =D | [=F^G] {=c} |"));
+        assert!(output.contains("K:Db"), "{output}");
+        assert!(output.contains("_D =D =D | [=F_A] {=c} |"), "{output}");
     }
 
     #[test]
@@ -852,14 +1009,142 @@ mod tests {
     #[test]
     fn source_key_and_measure_accidentals_affect_sounding_pitch() {
         let output = transpose("X:1\nK:G\nF =F F | F |\n", &Request::Semitones(1));
-        assert!(output.contains("K:G#"));
-        assert!(output.contains("=G ^F ^F | =G |"), "{output}");
+        assert!(output.contains("K:Ab"), "{output}");
+        assert!(output.contains("=G _G _G | =G |"), "{output}");
     }
 
     #[test]
     fn explicit_key_signature_accidentals_are_resolved() {
         let output = transpose("X:1\nK:C exp ^F\nF |\n", &Request::Semitones(1));
         assert!(output.contains("=G |"), "{output}");
+    }
+
+    #[test]
+    fn semitone_transposition_chooses_the_smallest_destination_signature() {
+        let upward = transpose("X:1\nK:F\nF ^F |\n", &Request::Semitones(2));
+        assert!(upward.contains("K:G"), "{upward}");
+        assert!(upward.contains("=G ^G |"), "{upward}");
+
+        let downward = transpose("X:1\nK:F\nF ^F |\n", &Request::Semitones(-2));
+        assert!(downward.contains("K:Eb"), "{downward}");
+        assert!(downward.contains("_E =E |"), "{downward}");
+    }
+
+    #[test]
+    fn natural_tonic_flat_keys_prefer_flat_note_spellings() {
+        let modal = transpose("X:1\nK:Dm\n^D |\n", &Request::Semitones(0));
+        assert!(modal.contains("K:Dm"), "{modal}");
+        assert!(modal.contains("_E |"), "{modal}");
+
+        let explicit = transpose("X:1\nK:C\n^C |\n", &Request::Key(parse_key("F").unwrap()));
+        assert!(explicit.contains("K:F"), "{explicit}");
+        assert!(explicit.contains("_G |"), "{explicit}");
+    }
+
+    #[test]
+    fn explicit_unconventional_destination_spelling_is_preserved() {
+        let output = transpose("X:1\nK:C\nC |\n", &Request::Key(parse_key("D#").unwrap()));
+        assert!(output.contains("K:D#"), "{output}");
+        assert!(output.contains("^D |"), "{output}");
+    }
+
+    #[test]
+    fn equal_signature_sizes_follow_transposition_direction() {
+        let upward = transpose("X:1\nK:C\nC |\n", &Request::Semitones(6));
+        assert!(upward.contains("K:F#"), "{upward}");
+        assert!(upward.contains("^F |"), "{upward}");
+
+        let downward = transpose("X:1\nK:C\nC |\n", &Request::Semitones(-6));
+        assert!(downward.contains("K:Gb"), "{downward}");
+        assert!(downward.contains("_G, |"), "{downward}");
+    }
+
+    #[test]
+    fn key_changes_recompute_the_enharmonic_orientation() {
+        let output = transpose("X:1\nK:C\n^C |\nK:F\nF ^F |\n", &Request::Semitones(1));
+        assert!(output.contains("K:Db\n=D |"), "{output}");
+        assert!(output.contains("K:F#\n^F =G |"), "{output}");
+    }
+
+    #[test]
+    fn forced_spelling_applies_to_every_key_change() {
+        let source = "X:1\nK:C\nC |\nK:F\nF ^F |\n";
+        let sharps =
+            transpose_with_spelling(source, &Request::Semitones(1), SpellingPreference::Sharps);
+        assert!(sharps.contains("K:C#\n^C |"), "{sharps}");
+        assert!(sharps.contains("K:F#\n^F =G |"), "{sharps}");
+
+        let flats =
+            transpose_with_spelling(source, &Request::Semitones(1), SpellingPreference::Flats);
+        assert!(flats.contains("K:Db\n_D |"), "{flats}");
+        assert!(flats.contains("K:Gb\n_G =G |"), "{flats}");
+    }
+
+    #[test]
+    fn forced_spelling_falls_back_to_a_conventional_enharmonic() {
+        let output = transpose_with_spelling(
+            "X:1\nK:C\nC |\n",
+            &Request::Semitones(3),
+            SpellingPreference::Sharps,
+        );
+        assert!(output.contains("K:Eb"), "{output}");
+        assert!(output.contains("_E |"), "{output}");
+    }
+
+    #[test]
+    fn prefer_flats_accepts_all_values_in_either_option_order() {
+        let before = parse_arguments([
+            "input.abc".to_owned(),
+            "--prefer-flats".to_owned(),
+            "true".to_owned(),
+            "--steps".to_owned(),
+            "1".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(before.spelling, SpellingPreference::Flats);
+
+        let after = parse_arguments([
+            "input.abc".to_owned(),
+            "--semitones".to_owned(),
+            "-2".to_owned(),
+            "--prefer-flats".to_owned(),
+            "false".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(after.spelling, SpellingPreference::Sharps);
+
+        let automatic = parse_arguments([
+            "input.abc".to_owned(),
+            "--key".to_owned(),
+            "F".to_owned(),
+            "--prefer-flats".to_owned(),
+            "auto".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(automatic.spelling, SpellingPreference::Auto);
+    }
+
+    #[test]
+    fn prefer_flats_rejects_invalid_and_duplicate_values() {
+        let invalid = parse_arguments([
+            "input.abc".to_owned(),
+            "--steps".to_owned(),
+            "1".to_owned(),
+            "--prefer-flats".to_owned(),
+            "yes".to_owned(),
+        ]);
+        assert!(invalid.is_err());
+
+        let duplicate = parse_arguments([
+            "input.abc".to_owned(),
+            "--semitones".to_owned(),
+            "1".to_owned(),
+            "--prefer-flats".to_owned(),
+            "true".to_owned(),
+            "--prefer-flats".to_owned(),
+            "false".to_owned(),
+        ]);
+        assert!(duplicate.is_err());
     }
 
     #[test]
