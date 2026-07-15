@@ -15,3 +15,17 @@
 - **Imports**: Prefer unmerged `use` statements (one item per line). Do not merge imports (e.g. avoid `use std::{foo, bar};`).
 - **Docs**: Terse, idiomatic Rust API guidelines; prefer `const fn` when possible.
 - **Formatting**: Run `rustfmt` from the nightly toolchain
+
+# Commit Messages
+
+- Wrap commit-message lines at 72 characters, except for exposition that
+  syntactically needs to be longer.
+- Include a trailer block in every commit that identifies the actual AI
+  contributor, tool, and model used. Do not copy example values when they do
+  not describe the commit:
+
+  ```text
+  Co-authored-by: <AI contributor name> <AI contributor email>
+  AI-Tool: <AI tool used>
+  AI-Model: <AI model used>
+  ```
