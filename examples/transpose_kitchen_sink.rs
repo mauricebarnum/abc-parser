@@ -95,7 +95,7 @@ fn transpose_line<S>(line: &mut Line<S, String>) {
 }
 
 /// Transposes key tonics while leaving non-key field values unchanged.
-fn transpose_field(field: &mut Field<String>) {
+const fn transpose_field(field: &mut Field<String>) {
     if let FieldValue::Key(key) = &mut field.value
         && let Some(tonic) = &mut key.tonic
     {
@@ -125,7 +125,7 @@ fn transpose_music_element(element: &mut MusicElement<String>) {
 }
 
 /// Moves a note up one diatonic class and crosses an octave after B.
-fn transpose_note(note: &mut Note) {
+const fn transpose_note(note: &mut Note) {
     note.pitch = transpose_pitch(note.pitch);
 }
 

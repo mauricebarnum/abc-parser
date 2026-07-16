@@ -246,7 +246,7 @@ impl TranspositionState {
                 offset
             }
             None => find_measure_accidental(&self.source_measure_accidentals, source.class)
-                .unwrap_or(self.source_signature[class_index(source.class)]),
+                .unwrap_or_else(|| self.source_signature[class_index(source.class)]),
         };
         let mut destination =
             spell_absolute_pitch(source, offset, self.pitch_interval, self.prefer_flats)?;
@@ -256,7 +256,7 @@ impl TranspositionState {
             .expect("spell_absolute_pitch always emits an accidental");
         let active_offset =
             find_measure_accidental(&self.destination_measure_accidentals, destination.class)
-                .unwrap_or(self.destination_signature[class_index(destination.class)]);
+                .unwrap_or_else(|| self.destination_signature[class_index(destination.class)]);
         if destination_offset == active_offset {
             destination.accidental = None;
         } else {

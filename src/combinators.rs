@@ -266,7 +266,7 @@ where
                 ));
             }
             let amount = Fraction {
-                numerator: numerator.unwrap_or(u32::try_from(markers).unwrap_or(u32::MAX)),
+                numerator: numerator.unwrap_or_else(|| u32::try_from(markers).unwrap_or(u32::MAX)),
                 denominator,
             };
             Ok(if marker == '^' {
@@ -465,7 +465,7 @@ where
 }
 
 /// Builds a field with a preselected semantic kind and value.
-fn field<T>(key: char, value: FieldValue<T>) -> Field<T> {
+const fn field<T>(key: char, value: FieldValue<T>) -> Field<T> {
     Field {
         key,
         kind: field_kind(key),
@@ -2051,7 +2051,7 @@ where
 }
 
 /// Parses a document while retaining typed recovering diagnostics.
-pub(super) fn parse_document<'src, I>(
+pub fn parse_document<'src, I>(
     input: I,
     options: ParserOptions,
 ) -> DocumentParseWithDiagnostics<'src, I>

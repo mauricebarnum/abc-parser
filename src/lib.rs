@@ -1259,7 +1259,7 @@ fn rich_error_message<S>(error: &Rich<'_, char, S>) -> String {
     message
 }
 
-fn field_kind(key: char) -> FieldKind {
+const fn field_kind(key: char) -> FieldKind {
     match key {
         'A' => FieldKind::Area,
         'B' => FieldKind::Book,

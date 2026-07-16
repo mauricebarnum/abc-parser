@@ -81,7 +81,7 @@ fn parse_owned(
     }
 }
 
-fn document(
+const fn document(
     report: &ParseReport<OwnedDocument<SimpleSpan<usize>>, SimpleSpan<usize>>,
 ) -> &OwnedDocument<SimpleSpan<usize>> {
     report.output.as_ref().unwrap()
