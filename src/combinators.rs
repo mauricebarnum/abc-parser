@@ -147,6 +147,12 @@ struct ParsedTypesetBodyLine<S> {
     span: S,
 }
 
+/// A pitch letter and the octave offset implied by its case.
+struct ParsedPitchLetter {
+    class: PitchClass,
+    octave_offset: i8,
+}
+
 /// Parses a character other than a physical line ending.
 fn line_character<'src, I>() -> impl Parser<'src, I, char, Extra<'src, I>> + Clone
 where
@@ -286,8 +292,8 @@ where
     .as_context()
 }
 
-/// Parses a pitch class while preserving upper/lowercase octave semantics.
-fn pitch_class<'src, I>() -> impl Parser<'src, I, (PitchClass, i8), Extra<'src, I>> + Clone
+/// Parses a pitch letter with offset zero for uppercase and one for lowercase.
+fn pitch_letter<'src, I>() -> impl Parser<'src, I, ParsedPitchLetter, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
 {
@@ -302,12 +308,15 @@ where
             'G' | 'g' => PitchClass::G,
             _ => unreachable!("one_of restricts the pitch alphabet"),
         };
-        (class, i8::from(letter.is_ascii_lowercase()))
+        ParsedPitchLetter {
+            class,
+            octave_offset: i8::from(letter.is_ascii_lowercase()),
+        }
     })
 }
 
-/// Parses apostrophe/comma octave modifiers as a signed displacement.
-fn octave<'src, I>() -> impl Parser<'src, I, i8, Extra<'src, I>> + Clone
+/// Parses apostrophes as positive and commas as negative octave modifiers.
+fn octave_modifier<'src, I>() -> impl Parser<'src, I, i8, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
 {
@@ -334,19 +343,17 @@ where
 {
     accidental()
         .or_not()
-        .then(pitch_class())
-        .then(octave())
+        .then(pitch_letter())
+        .then(octave_modifier())
         .then(note_length())
-        .map(
-            |(((accidental, (class, base_octave)), modifier), length)| Note {
-                pitch: Pitch {
-                    class,
-                    octave: base_octave.saturating_add(modifier),
-                    accidental,
-                },
-                length,
+        .map(|(((accidental, letter), octave_modifier), length)| Note {
+            pitch: Pitch {
+                class: letter.class,
+                octave: letter.octave_offset.saturating_add(octave_modifier),
+                accidental,
             },
-        )
+            length,
+        })
         .labelled("note")
         .as_context()
 }
@@ -540,8 +547,8 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let tonic = pitch_class()
-        .map(|(class, _)| class)
+    let tonic = pitch_letter()
+        .map(|letter| letter.class)
         .then(one_of("#b").or_not())
         .map(|(class, accidental)| {
             Some(KeyTonic {
