@@ -11,7 +11,8 @@
 
 # Coding Style
 
-- **Clippy**: Strict workspace Cargo.toml settings must be followed.
+- **Clippy**: Strict workspace Cargo.toml settings must be followed. Set
+  `CARGO_BUILD_WARNINGS=deny` when running Clippy.
 - **Imports**: Prefer unmerged `use` statements (one item per line). Do not merge imports (e.g. avoid `use std::{foo, bar};`).
 - **Docs**: Terse, idiomatic Rust API guidelines; prefer `const fn` when possible.
 - **Formatting**: Run `rustfmt` from the nightly toolchain
