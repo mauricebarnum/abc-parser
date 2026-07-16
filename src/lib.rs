@@ -716,15 +716,64 @@ pub struct Annotation<T = String> {
     pub text: T,
 }
 
-/// Tuplet timing and extent.
+/// A tuplet timing ratio and the number of following notes it affects.
+///
+/// `actual` notes occupy the normal duration of `normal` notes. For example,
+/// `(3:2:2` applies three-in-the-time-of-two timing to the next two notes.
+///
+/// # Examples
+///
+/// ```
+/// use abc_parser::Tuplet;
+///
+/// let tuplet = Tuplet {
+///     actual: 3,
+///     normal: Some(2),
+///     affected: Some(2),
+/// };
+/// assert_eq!(tuplet.normal_note_count(false), Some(2));
+/// assert_eq!(tuplet.affected_note_count(), 2);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Tuplet {
-    /// Notes written.
-    pub p: u8,
-    /// Time occupied, or context-dependent default.
-    pub q: Option<u8>,
-    /// Number of affected notes, defaulting to `p`.
-    pub r: Option<u8>,
+    /// Number of tuplet notes in the timing ratio (`p` in `(p:q:r`).
+    pub actual: u8,
+    /// Explicit number of ordinary notes whose duration they occupy (`q`).
+    ///
+    /// When omitted, the default depends on `actual` and whether the active
+    /// meter is compound.
+    pub normal: Option<u8>,
+    /// Explicit number of following notes governed by the tuplet (`r`).
+    ///
+    /// When omitted, this defaults to `actual`.
+    pub affected: Option<u8>,
+}
+
+impl Tuplet {
+    /// Returns the number of following notes governed by this tuplet.
+    pub const fn affected_note_count(self) -> u8 {
+        match self.affected {
+            Some(affected_notes) => affected_notes,
+            None => self.actual,
+        }
+    }
+
+    /// Returns the ordinary-note count used by the tuplet timing ratio.
+    ///
+    /// `compound_meter` selects the ABC default for compact tuplets with five,
+    /// seven, or nine actual notes. Returns `None` when no explicit value or
+    /// standard compact default exists.
+    pub const fn normal_note_count(self, compound_meter: bool) -> Option<u8> {
+        if let Some(normal_notes) = self.normal {
+            return Some(normal_notes);
+        }
+        match self.actual {
+            3 | 6 => Some(2),
+            2 | 4 | 8 => Some(3),
+            5 | 7 | 9 => Some(if compound_meter { 3 } else { 2 }),
+            _ => None,
+        }
+    }
 }
 
 /// An opening or closing slur marker.
@@ -1299,9 +1348,9 @@ mod tests {
         assert!(output.iter().any(|item| matches!(
             item.value,
             MusicElement::Tuplet(Tuplet {
-                p: 3,
-                q: Some(2),
-                r: Some(3)
+                actual: 3,
+                normal: Some(2),
+                affected: Some(3)
             })
         )));
         assert!(
@@ -1309,6 +1358,42 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item.value, MusicElement::BrokenRhythm(_)))
         );
+    }
+
+    #[test]
+    fn tuplet_defaults_resolve_from_ratio_and_meter() {
+        let compact = |actual_notes| Tuplet {
+            actual: actual_notes,
+            normal: None,
+            affected: None,
+        };
+        for (actual_notes, normal_notes) in [
+            (2, 3),
+            (3, 2),
+            (4, 3),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+            (8, 3),
+            (9, 2),
+        ] {
+            let tuplet = compact(actual_notes);
+            assert_eq!(tuplet.normal_note_count(false), Some(normal_notes));
+            assert_eq!(tuplet.affected_note_count(), actual_notes);
+        }
+        for actual_notes in [5, 7, 9] {
+            assert_eq!(compact(actual_notes).normal_note_count(true), Some(3));
+        }
+
+        let explicit = Tuplet {
+            actual: 10,
+            normal: Some(7),
+            affected: Some(4),
+        };
+        assert_eq!(explicit.normal_note_count(false), Some(7));
+        assert_eq!(explicit.normal_note_count(true), Some(7));
+        assert_eq!(explicit.affected_note_count(), 4);
+        assert_eq!(compact(10).normal_note_count(false), None);
     }
 
     #[test]

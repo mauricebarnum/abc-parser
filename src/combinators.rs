@@ -970,21 +970,23 @@ where
         .ignore_then(unsigned())
         .then(just(':').ignore_then(unsigned().or_not()).or_not())
         .then(just(':').ignore_then(unsigned().or_not()).or_not())
-        .validate(|((p, q), r), extra, emitter| {
-            let mut convert = |value| {
-                if let Ok(value) = u8::try_from(value) {
-                    value
-                } else {
-                    emitter.emit(Rich::custom(extra.span(), "tuplet value exceeds u8"));
-                    u8::MAX
+        .validate(
+            |((actual_notes, normal_notes), affected_notes), extra, emitter| {
+                let mut convert = |value| {
+                    if let Ok(value) = u8::try_from(value) {
+                        value
+                    } else {
+                        emitter.emit(Rich::custom(extra.span(), "tuplet value exceeds u8"));
+                        u8::MAX
+                    }
+                };
+                Tuplet {
+                    actual: convert(actual_notes),
+                    normal: normal_notes.flatten().map(&mut convert),
+                    affected: affected_notes.flatten().map(convert),
                 }
-            };
-            Tuplet {
-                p: convert(p),
-                q: q.flatten().map(&mut convert),
-                r: r.flatten().map(convert),
-            }
-        })
+            },
+        )
         .labelled("tuplet")
         .as_context()
 }

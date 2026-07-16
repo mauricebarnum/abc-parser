@@ -1083,15 +1083,15 @@ where
 
 impl ToAbc for Tuplet {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
-        write!(output, "({}", self.p)?;
-        if self.q.is_some() || self.r.is_some() {
+        write!(output, "({}", self.actual)?;
+        if self.normal.is_some() || self.affected.is_some() {
             output.write_char(':')?;
-            if let Some(q) = self.q {
-                write!(output, "{q}")?;
+            if let Some(normal_notes) = self.normal {
+                write!(output, "{normal_notes}")?;
             }
         }
-        if let Some(r) = self.r {
-            write!(output, ":{r}")?;
+        if let Some(affected_notes) = self.affected {
+            write!(output, ":{affected_notes}")?;
         }
         Ok(())
     }
