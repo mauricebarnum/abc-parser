@@ -19,7 +19,7 @@ report invalid.
 
 Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 [`music_element_parser`], [`field_parser`], [`directive_parser`], and
-[`chord_parser`]. Convenience functions for `&str` remain available as
+[`chord_parser`]. The `&str` convenience functions are
 [`parse_line`], [`parse_music_line`], [`parse_field`], [`parse_directive`], and
 [`parse_chord`].
 
@@ -52,8 +52,8 @@ flowchart TD
     parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
 ```
 
-The diagrams remain Mermaid source in this file and are rendered as inline SVG
-in the generated documentation. The surrounding text contains the same
+The diagrams are stored as Mermaid source in this file and rendered as inline
+SVG in the generated documentation. The surrounding text contains the same
 information in documentation formats that do not display SVG.
 
 ## Complete-document flow
@@ -71,11 +71,11 @@ granularity:
    recovery, while free text retains raw spans without invoking that grammar.
 4. A strict probe of a raw deciding line records a non-fatal
    [`ErrorKind::MissingReference`] warning when the whole line is valid music;
-   the block remains free text.
+   the parser classifies the block as free text.
 5. `map_with` attaches native input spans. Parser state carries typed document
    diagnostics separately from Chumsky's `Rich` token-error channel.
-6. The initial metadata-only block remains the file header. Later field-led
-   blocks become [`Tune`] values even when their first field is not `X:`.
+6. The initial metadata-only block is the file header. Subsequent field-led
+   blocks are [`Tune`] values even when their first field is not `X:`.
 7. Typeset text and comments are assembled in source order before applying
    [`ParserOptions`] retention and optional strict tune validation.
 
@@ -87,26 +87,26 @@ grace group, decoration, or annotation.
 ## Free text and typeset text
 
 [`Document::items`] preserves the order of tunes, [`FreeText`] blocks,
-file-level [`TypesetText`], comments, and stylesheet directives after the
+file-level [`TypesetText`], comments, and stylesheet directives following the
 optional initial header. A tune ends at an empty line or EOF. This prevents
 letters in inter-tune prose from being interpreted as notes. A fieldless block
-always remains free text; if its deciding line is valid music, [`parse`] reports
+is always free text; if its deciding line is valid music, [`parse`] reports
 an advisory warning.
 
-`%%text` and `%%center` become typed text nodes. `%%begintext` through
-`%%endtext` becomes one block node; each standard body line must begin with
+`%%text` and `%%center` are typed text nodes. A `%%begintext` through
+`%%endtext` sequence is one block node; each standard body line must begin with
 `%%`. The same nodes may occur in tune headers and bodies through
 [`Line::TypesetText`].
 
 [`ParserOptions`] retains both text categories by default. Its
 [`ParserOptions::retain_free_text`] and
 [`ParserOptions::retain_typeset_text`] builders independently omit the
-corresponding AST nodes. Parsing and validation still occur before omission, so
+corresponding AST nodes. Parsing and validation precede omission, so
 retention choices never hide diagnostics.
 
 [`ParserOptions::strict`] additionally requires each tune to contain an `X:`
 reference field. The field may occur anywhere in the tune; a missing field is a
-recoverable error, so the tune remains available in the returned document.
+recoverable error, so the returned document includes the tune.
 Strict mode also warns when `X:` is not the first information field or when a
 header-level `K:` is present but is not the last information field before music
 code. Comments and stylesheet directives do not affect field ordering, and key
@@ -173,7 +173,7 @@ producing semantic members directly; there is no secondary string scanner.
 ## Source-backed text and ownership
 
 [`ParsedDocument`] stores source-derived text as [`SourceText::Span`] using the
-input's native span type. Values introduced or normalized by parsing use
+input's native span type. Parser-generated or normalized values use
 [`SourceText::Synthesized`]. Consequently, parsing does not allocate a `String`
 for every title, comment, directive argument, decoration, or recovery token.
 The span-only AST itself does not borrow the source and may outlive it, although
@@ -184,7 +184,7 @@ to its `String`-backed equivalent. Passing the original `str` resolves
 `SimpleSpan<usize>` as UTF-8 byte offsets; passing the original `[char]` resolves
 the same span type as character indices. Invalid source/span combinations
 return [`ResolveError`]. This operation copies source-backed text into the
-standalone tree; already synthesized strings are moved without copying.
+standalone tree and moves synthesized strings without copying.
 
 When the source is unavailable or unwanted, [`PlaceholderResolver`] emits the
 documented form `[[ABC_SOURCE_REF:<Debug span>]]`. Use
@@ -219,10 +219,10 @@ decorations, and field parameters uses deterministic spellings.
 A [`ParsedDocument`] must first be converted with [`IntoOwnedAst::into_owned`]
 and an appropriate resolver. [`OwnedDocument`] can be emitted directly with
 [`ToAbc::to_abc`]. Emission deliberately produces semantic ABC rather than a
-byte-for-byte reconstruction: comments and metadata remain intact, but optional
-spacing, quote choices, shorthand decorations, and similar presentation details
-may be canonicalized. Text inserted programmatically into a quoted AST position
-must not contain an unescaped quote delimiter.
+byte-for-byte reconstruction: it preserves comments and metadata but may
+canonicalize optional spacing, quote choices, shorthand decorations, and
+similar presentation details. Text inserted programmatically into a quoted AST
+position must not contain an unescaped quote delimiter.
 
 ## AST overview
 
@@ -294,7 +294,7 @@ order. Recovery maintains these invariants:
 - a malformed structured field retains its payload span and ownership
   conversion trims the resulting fallback string;
 - an unclosed delimited music construct consumes no later physical line;
-- a later tune can still be discovered after faults in an earlier tune.
+- tune discovery resumes after faults in an earlier tune.
 
 Complete-document callers use [`parse`] or [`parse_with_options`]. Batch tools
 may reject reports with errors, while interactive tools can inspect recovered
