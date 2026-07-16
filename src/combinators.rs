@@ -292,14 +292,14 @@ where
     I: ValueInput<'src, Token = char>,
 {
     one_of("ABCDEFGabcdefg").map(|letter: char| {
-        let class = match letter.to_ascii_uppercase() {
-            'A' => PitchClass::A,
-            'B' => PitchClass::B,
-            'C' => PitchClass::C,
-            'D' => PitchClass::D,
-            'E' => PitchClass::E,
-            'F' => PitchClass::F,
-            'G' => PitchClass::G,
+        let class = match letter {
+            'A' | 'a' => PitchClass::A,
+            'B' | 'b' => PitchClass::B,
+            'C' | 'c' => PitchClass::C,
+            'D' | 'd' => PitchClass::D,
+            'E' | 'e' => PitchClass::E,
+            'F' | 'f' => PitchClass::F,
+            'G' | 'g' => PitchClass::G,
             _ => unreachable!("one_of restricts the pitch alphabet"),
         };
         (class, i8::from(letter.is_ascii_lowercase()))
