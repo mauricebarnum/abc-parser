@@ -16,6 +16,13 @@
 - **Docs**: Terse, idiomatic Rust API guidelines; prefer `const fn` when possible.
 - **Formatting**: Run `rustfmt` from the nightly toolchain
 
+# Testing
+
+- Prefer `cargo nextest run` over `cargo test` for running unit and integration
+  tests.
+- Use `cargo test` only when the task is particularly suited to it, such as
+  running documentation tests that Nextest does not support.
+
 # Commit Messages
 
 - Wrap commit-message lines at 72 characters, except for exposition that
