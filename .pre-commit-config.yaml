@@ -1,0 +1,37 @@
+repos:
+  - repo: local
+    hooks:
+      - id: git-diff-check
+        name: Check staged changes for whitespace errors
+        entry: git diff --cached --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: rustfmt
+        name: Check Rust formatting with nightly rustfmt
+        entry: cargo +nightly fmt --all -- --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: clippy
+        name: Run Clippy for all targets and features
+        entry: env CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --all-features
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: nextest
+        name: Run unit and integration tests with Nextest
+        entry: cargo nextest run --all-features
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: doctests
+        name: Run documentation tests
+        entry: cargo test --doc --all-features
+        language: system
+        pass_filenames: false
+        always_run: true
