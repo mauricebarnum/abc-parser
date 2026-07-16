@@ -2039,11 +2039,13 @@ where
         .ignore_then(
             first.or_not().then(
                 block_separator
+                    .clone()
                     .ignore_then(block)
                     .repeated()
                     .collect::<Vec<_>>(),
             ),
         )
+        .then_ignore(block_separator.or_not())
         .then_ignore(newline().or_not())
         .then_ignore(horizontal_space())
         .then_ignore(end())

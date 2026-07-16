@@ -183,6 +183,19 @@ fn classifies_ordered_free_and_typeset_text_without_music_errors() {
 }
 
 #[test]
+fn accepts_trailing_blank_lines() {
+    let document = "X:1\nK:C\nC |";
+
+    for suffix in ["", "\n", "\n\n", "\n \t\n\n"] {
+        let source = format!("{document}{suffix}");
+        let report = parse_owned(&source, ParserOptions::default());
+
+        assert!(report.is_valid(), "{suffix:?}: {:#?}", report.errors);
+        assert_eq!(report.output.as_ref().unwrap().tunes().count(), 1);
+    }
+}
+
+#[test]
 fn retention_options_are_independent_and_do_not_change_validation() {
     for (keep_free, keep_typeset, expected_free, expected_typeset) in [
         (true, true, 3, 6),

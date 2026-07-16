@@ -125,6 +125,17 @@ fn output_without_a_source_newline_is_newline_terminated() {
 }
 
 #[test]
+fn trailing_blank_line_is_accepted() {
+    let source = "X: 1\nM: 6/8\nK: Bmin\nF/E/|D>EF d2d/e/|f/e/d/c/B/A/ d2\n\n";
+    let output = run_stdin(source, &["--steps", "1"]);
+
+    assert!(output.status.success(), "{output:?}");
+    let transposed = String::from_utf8(output.stdout).unwrap();
+    let reparsed = parse_owned(&transposed);
+    assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
+}
+
+#[test]
 fn explicit_note_lengths_reemit_a_zero_transposition() {
     let source = "X: 1\nL: 1/8\nK: C\nA/\n";
     let default = run_stdin(source, &["--semitones", "0"]);
