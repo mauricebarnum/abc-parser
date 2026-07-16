@@ -1,0 +1,9 @@
+# WARNING: This configuration uses unstable options and requires nightly rustfmt.
+unstable_features = true
+
+edition = "2024"
+style_edition = "2024"
+max_width = 100
+use_small_heuristics = "Default"
+imports_granularity = "Item"
+group_imports = "StdExternalCrate"

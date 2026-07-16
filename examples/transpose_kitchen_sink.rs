@@ -18,6 +18,8 @@
 //! accidentals, so it demonstrates AST traversal rather than key-aware
 //! chromatic transposition.
 
+use std::process::ExitCode;
+
 use abc_parser::ChordMember;
 use abc_parser::Document;
 use abc_parser::Field;
@@ -31,7 +33,6 @@ use abc_parser::PitchClass;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
 use abc_parser::parse;
-use std::process::ExitCode;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 

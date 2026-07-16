@@ -22,14 +22,15 @@
 //!
 //! See [`architecture`] for parser flows and an overview of the public AST.
 
+use std::fmt;
+use std::fmt::Write as _;
+use std::ops::Range;
+
 use chumsky::Parser;
 use chumsky::error::Rich;
 use chumsky::input::ValueInput;
 use chumsky::span::SimpleSpan;
 use chumsky::span::Span as ChumskySpan;
-use std::fmt;
-use std::fmt::Write as _;
-use std::ops::Range;
 
 mod combinators;
 mod emit;

@@ -19,6 +19,13 @@
 //! use explicit accidentals, making the emitted result independent of
 //! accidental propagation in the destination.
 
+use std::fs;
+use std::io;
+use std::io::Read;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
 use abc_parser::Accidental;
 use abc_parser::BarLine;
 use abc_parser::ChordMember;
@@ -43,12 +50,6 @@ use abc_parser::parse_music_line;
 use clap::ArgGroup;
 use clap::Parser;
 use clap::ValueEnum;
-use std::fs;
-use std::io;
-use std::io::Read;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::ExitCode;
 
 /// A requested transposition operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1025,16 +1026,17 @@ fn find_measure_accidental(accidentals: &MeasureAccidentals, class: PitchClass) 
 
 #[cfg(test)]
 mod tests {
+    use abc_parser::IntoOwnedAst;
+    use abc_parser::ToAbc;
+    use abc_parser::parse;
+    use clap::Parser;
+
     use super::Arguments;
     use super::Request;
     use super::SpellingPreference;
     use super::parse_key;
     use super::parse_steps;
     use super::transpose_tune;
-    use abc_parser::IntoOwnedAst;
-    use abc_parser::ToAbc;
-    use abc_parser::parse;
-    use clap::Parser;
 
     /// Parses and transposes the only tune in a compact fixture.
     fn transpose(source: &str, request: &Request) -> String {

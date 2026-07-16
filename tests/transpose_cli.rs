@@ -14,6 +14,11 @@
 
 //! End-to-end tests for the standalone ABC transposition command.
 
+use std::fs;
+use std::io::Write;
+use std::process::Command;
+use std::process::Stdio;
+
 use abc_parser::FieldValue;
 use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
@@ -22,10 +27,6 @@ use abc_parser::ParseReport;
 use abc_parser::ToAbc;
 use abc_parser::parse;
 use chumsky::span::SimpleSpan;
-use std::fs;
-use std::io::Write;
-use std::process::Command;
-use std::process::Stdio;
 
 const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
 const KITCHEN_SINK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_kitchen_sink.abc");

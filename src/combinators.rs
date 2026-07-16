@@ -20,6 +20,24 @@
 //! music and field parsers remain unboxed so dynamic dispatch stays outside the
 //! hottest character-by-character paths.
 
+use std::fmt;
+
+use chumsky::IterParser;
+use chumsky::ParseResult;
+use chumsky::Parser;
+use chumsky::error::Rich;
+use chumsky::extra;
+use chumsky::input::Input;
+use chumsky::input::ValueInput;
+use chumsky::prelude::any;
+use chumsky::prelude::choice;
+use chumsky::prelude::empty;
+use chumsky::prelude::end;
+use chumsky::prelude::just;
+use chumsky::prelude::one_of;
+use chumsky::recovery::via_parser;
+use chumsky::span::Span as ChumskySpan;
+
 use super::Accidental;
 use super::Annotation;
 use super::AnnotationPlacement;
@@ -75,22 +93,6 @@ use super::TypesetText;
 use super::VariantEnding;
 use super::VoiceDefinition;
 use super::field_kind;
-use chumsky::IterParser;
-use chumsky::ParseResult;
-use chumsky::Parser;
-use chumsky::error::Rich;
-use chumsky::extra;
-use chumsky::input::Input;
-use chumsky::input::ValueInput;
-use chumsky::prelude::any;
-use chumsky::prelude::choice;
-use chumsky::prelude::empty;
-use chumsky::prelude::end;
-use chumsky::prelude::just;
-use chumsky::prelude::one_of;
-use chumsky::recovery::via_parser;
-use chumsky::span::Span as ChumskySpan;
-use std::fmt;
 
 type ParserDiagnostics<S> = (Vec<ParseError<S>>, Vec<ParseWarning<S>>);
 type ParserState<S> = extra::SimpleState<ParserDiagnostics<S>>;

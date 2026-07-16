@@ -14,6 +14,13 @@
 
 //! Source-backed text and standalone AST conversion support.
 
+use std::borrow::Cow;
+use std::convert::Infallible;
+use std::fmt;
+use std::ops::Range;
+
+use chumsky::span::SimpleSpan;
+
 use super::Annotation;
 use super::BarLine;
 use super::Directive;
@@ -35,11 +42,6 @@ use super::Tempo;
 use super::Tune;
 use super::TypesetText;
 use super::VoiceDefinition;
-use chumsky::span::SimpleSpan;
-use std::borrow::Cow;
-use std::convert::Infallible;
-use std::fmt;
-use std::ops::Range;
 
 /// Text retained from source or synthesized while parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]

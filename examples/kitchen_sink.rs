@@ -14,10 +14,11 @@
 
 //! Prints a source-spanned AST for an ABC file.
 
-use abc_parser::parse;
 use std::env;
 use std::fs;
 use std::process::ExitCode;
+
+use abc_parser::parse;
 
 fn main() -> ExitCode {
     let Some(path) = env::args_os().nth(1) else {

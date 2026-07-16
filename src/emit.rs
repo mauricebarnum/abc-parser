@@ -14,6 +14,9 @@
 
 //! Canonical ABC source emission from semantic AST nodes.
 
+use std::fmt;
+use std::fmt::Write;
+
 use super::Accidental;
 use super::Annotation;
 use super::AnnotationPlacement;
@@ -59,8 +62,6 @@ use super::Tuplet;
 use super::TypesetText;
 use super::VariantEnding;
 use super::VoiceDefinition;
-use std::fmt;
-use std::fmt::Write;
 
 /// Selects the canonical spelling used for shortened note lengths.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
