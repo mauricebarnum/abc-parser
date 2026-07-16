@@ -2,6 +2,7 @@
 resolver = "3"
 name = "abc-parser"
 version = "0.1.0"
+publish = false
 description = "A recovering, source-spanned parser for ABC music notation 2.1"
 edition = "2024"
 license = "Apache-2.0"
