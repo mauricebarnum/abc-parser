@@ -1330,8 +1330,19 @@ where
 }
 
 /// Returns whether a field unambiguously belongs to a tune rather than a file header.
-const fn is_tune_only_header_field(key: char) -> bool {
-    matches!(key, 'K' | 'P' | 'Q' | 'T' | 'V' | 'W' | 'X' | 's' | 'w')
+const fn is_tune_only_header_field(kind: FieldKind) -> bool {
+    matches!(
+        kind,
+        FieldKind::Key
+            | FieldKind::Parts
+            | FieldKind::Tempo
+            | FieldKind::Title
+            | FieldKind::Voice
+            | FieldKind::Words
+            | FieldKind::Reference
+            | FieldKind::Symbols
+            | FieldKind::Lyrics
+    )
 }
 
 /// Recognizes the boundary following a nonblank block without consuming it.
@@ -1689,7 +1700,7 @@ fn is_header_candidate<S>(candidate: &ParsedTuneCandidate<S>) -> bool {
         ParsedTuneUnit::Line(line) => match &line.value {
             Line::Comment(_) => true,
             Line::Directive(directive) => directive.kind == DirectiveKind::Other,
-            Line::Field(field) => !is_tune_only_header_field(field.key),
+            Line::Field(field) => !is_tune_only_header_field(field.kind),
             _ => false,
         },
         ParsedTuneUnit::Typeset(_) => false,
@@ -1705,13 +1716,15 @@ where
         ParsedTuneUnit::Line(Spanned {
             value: Line::Field(field),
             span,
-        }) => Some((field.key, span)),
+        }) => Some((field.kind, span)),
         _ => None,
     });
     let first_field = fields.clone().next();
-    let reference = fields.clone().find(|(key, _)| *key == 'X');
-    if let (Some((first_key, _)), Some((_, span))) = (first_field, reference)
-        && first_key != 'X'
+    let reference = fields
+        .clone()
+        .find(|(kind, _)| *kind == FieldKind::Reference);
+    if let (Some((first_kind, _)), Some((_, span))) = (first_field, reference)
+        && first_kind != FieldKind::Reference
     {
         state.0.1.push(ParseWarning {
             kind: ErrorKind::InvalidFieldOrder,
@@ -1736,14 +1749,17 @@ where
             ParsedTuneUnit::Line(Spanned {
                 value: Line::Field(field),
                 span,
-            }) => Some((field.key, span)),
+            }) => Some((field.kind, span)),
             _ => None,
         })
         .collect::<Vec<_>>();
-    if let (Some((last_key, _)), Some((_, key_span))) = (
+    if let (Some((last_kind, _)), Some((_, key_span))) = (
         header_fields.last(),
-        header_fields.iter().rev().find(|(key, _)| *key == 'K'),
-    ) && *last_key != 'K'
+        header_fields
+            .iter()
+            .rev()
+            .find(|(kind, _)| *kind == FieldKind::Key),
+    ) && *last_kind != FieldKind::Key
     {
         state.0.1.push(ParseWarning {
             kind: ErrorKind::InvalidFieldOrder,
@@ -1886,7 +1902,9 @@ where
     let directive_value =
         directive_parser().filter(|directive| directive.kind == DirectiveKind::Other);
     let field_start = any()
-        .filter(|key: &char| key.is_ascii_alphabetic() && !is_tune_only_header_field(*key))
+        .filter(|key: &char| {
+            key.is_ascii_alphabetic() && !is_tune_only_header_field(field_kind(*key))
+        })
         .then_ignore(just(':'))
         .rewind();
     let shape_line = choice((
