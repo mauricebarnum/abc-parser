@@ -23,6 +23,15 @@ Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 [`parse_chord`].
 
 ```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+  flowchart:
+    nodeSpacing: 10
+    wrappingWidth: 140
+---
 flowchart TD
     source["ValueInput Token=char"] --> entry{Public entry point}
     entry -->|document| document[parse / parse_with_options]
@@ -137,6 +146,14 @@ malformed. During document or line recovery, the same payload is retained as
 same rule.
 
 ```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+  flowchart:
+    rankSpacing: 10
+---
 flowchart LR
     raw["L:not-a-length"] --> strict{Mode}
     strict -->|parse_field| error[Err ParseError]
@@ -189,7 +206,13 @@ documented form `[[ABC_SOURCE_REF:<Debug span>]]`. Use
 source can contain the same shape, so detection cannot prove provenance.
 
 ```mermaid
-flowchart LR
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+---
+flowchart TB
     input[Input source] --> parse
     parse --> report[ParseReport]
     report --> parsed[ParsedDocument SourceText spans]
@@ -248,56 +271,64 @@ selects automatic, flat-oriented, or sharp-oriented enharmonic spelling.
 The AST separates document organization, line syntax, structured field values,
 and music syntax. [`Spanned<T>`] is used at line and music-element boundaries;
 semantic children such as [`Pitch`] do not repeat their parent's span.
-Each box lists the node's public fields. Boxes marked as enumerations list
-variants in `Variant: payload` form.
+Unmarked boxes list attributes carried together by a node. Boxes marked
+**variant** list alternatives, one of which the node represents.
 
 Document organization:
 
 ```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+  flowchart:
+    nodeSpacing: 0
+---
 classDiagram
-    direction LR
+    direction TB
     class Document {
-        +header: Vec~SpannedLine~
-        +items: Vec~SpannedDocumentItem~
+        optional file-header lines
+        ordered document items
     }
     class SpannedDocumentItem {
-        +value: DocumentItem
-        +span: S
+        document item
+        source span
     }
     class DocumentItem {
-        <<enumeration>>
-        +Tune: Tune
-        +FreeText: FreeText
-        +TypesetText: TypesetText
-        +Comment: T
-        +Directive: Directive
+        <<variant>>
+        tune
+        free-text block
+        typeset text
+        comment text
+        stylesheet directive
     }
     class Tune {
-        +lines: Vec~SpannedLine~
+        source lines
     }
     class FreeText {
-        +lines: Vec~T~
+        text lines
     }
     class TypesetText {
-        <<enumeration>>
-        +Text: T
-        +Centered: T
-        +Block: Vec~T~
+        <<variant>>
+        text line
+        centered text
+        text block
     }
     class Directive {
-        +name: T
-        +arguments: T
-        +kind: DirectiveKind
-        +body: T
+        name
+        arguments
+        semantic category
+        original body
     }
     class SourceText {
-        <<enumeration>>
-        +Span: S
-        +Synthesized: String
+        <<variant>>
+        source span
+        synthesized text
     }
     class SpannedLine {
-        +value: Line
-        +span: S
+        line
+        source span
     }
     Document *-- SpannedDocumentItem : items
     SpannedDocumentItem *-- DocumentItem
@@ -313,47 +344,53 @@ classDiagram
 Line syntax:
 
 ```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+---
 classDiagram
     direction LR
     class SpannedLine {
-        +value: Line
-        +span: S
+        line
+        source span
     }
     class Line {
-        <<enumeration>>
-        +Blank
-        +Comment: T
-        +Directive: Directive
-        +Field: Field
-        +Music: Vec~SpannedMusicElement~
-        +TypesetText: TypesetText
-        +DirectiveText: T
+        <<variant>>
+        blank line
+        comment text
+        stylesheet directive
+        information field
+        music elements
+        typeset text
+        unparsed directive text
     }
     class Directive {
-        +name: T
-        +arguments: T
-        +kind: DirectiveKind
-        +body: T
+        name
+        arguments
+        semantic category
+        original body
     }
     class Field {
-        +key: char
-        +kind: FieldKind
-        +value: FieldValue
+        field letter
+        standard meaning
+        parsed payload
     }
     class TypesetText {
-        <<enumeration>>
-        +Text: T
-        +Centered: T
-        +Block: Vec~T~
+        <<variant>>
+        text line
+        centered text
+        text block
     }
     class SpannedMusicElement {
-        +value: MusicElement
-        +span: S
+        music element
+        source span
     }
     class SourceText {
-        <<enumeration>>
-        +Span: S
-        +Synthesized: String
+        <<variant>>
+        source span
+        synthesized text
     }
     SpannedLine *-- Line
     Line *-- Directive
@@ -366,88 +403,94 @@ classDiagram
 Structured field values:
 
 ```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+---
 classDiagram
     direction LR
     class Field {
-        +key: char
-        +kind: FieldKind
-        +value: FieldValue
+        field letter
+        standard meaning
+        parsed payload
     }
     class FieldKind {
-        <<enumeration>>
-        +Area
-        +Book
-        +Composer
-        +Discography
-        +FileUrl
-        +Group
-        +History
-        +Instruction
-        +Key
-        +UnitLength
-        +Meter
-        +Notes
-        +Origin
-        +Parts
-        +Tempo
-        +Rhythm
-        +Source
-        +Title
-        +UserSymbol
-        +Voice
-        +Words
-        +Reference
-        +Transcription
-        +Macro
-        +Symbols
-        +Lyrics
-        +Extension: char
+        <<variant>>
+        area
+        book
+        composer
+        discography
+        file URL
+        group
+        history
+        instruction
+        key
+        unit note length
+        meter
+        notes
+        origin
+        parts
+        tempo
+        rhythm
+        source
+        title
+        user-defined symbol
+        voice
+        unaligned words
+        tune reference
+        transcription
+        macro
+        symbol line
+        aligned lyrics
+        extension field letter
     }
     class FieldValue {
-        <<enumeration>>
-        +Text: T
-        +UnitLength: Fraction
-        +Meter: Meter
-        +Tempo: Tempo
-        +Key: KeySignature
-        +Reference: u32
-        +Voice: VoiceDefinition
-        +Parts: PartSequence
-        +UserSymbol: SymbolDefinition
-        +Macro: MacroDefinition
-        +Unparsed: T
+        <<variant>>
+        text
+        unit note length
+        meter
+        tempo
+        key signature
+        tune reference number
+        voice definition
+        part sequence
+        user-defined symbol
+        macro definition
+        unparsed text
     }
     class Fraction {
-        +numerator: u32
-        +denominator: u32
+        numerator
+        denominator
     }
     class Meter {
-        <<enumeration>>
-        +Common
-        +Cut
-        +None
-        +Simple: Fraction
-        +Compound: Vec~u32~ groups, u32 denominator
+        <<variant>>
+        common time
+        cut time
+        no meter
+        simple fraction
+        additive groups and denominator
     }
     class Tempo {
-        +prelude: Option~T~
-        +beats: Vec~Fraction~
-        +bpm: u32
-        +postlude: Option~T~
+        optional leading text
+        beat lengths
+        beats per minute
+        optional trailing text
     }
     class KeySignature {
-        +tonic: Option~KeyTonic~
-        +mode: T
-        +parameters: Vec~FieldParameter~
+        optional tonic
+        mode spelling
+        clef and transposition parameters
     }
     class VoiceDefinition {
-        +id: T
-        +properties: Vec~FieldParameter~
+        voice identifier
+        voice properties
     }
     class SourceText {
-        <<enumeration>>
-        +Span: S
-        +Synthesized: String
+        <<variant>>
+        source span
+        synthesized text
     }
     Field *-- FieldKind
     Field *-- FieldValue
@@ -462,81 +505,69 @@ classDiagram
 Music syntax:
 
 ```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+  flowchart:
+    rankSpacing: 0
+---
 classDiagram
     direction LR
     class SpannedMusicElement {
-        +value: MusicElement
-        +span: S
+        music element
+        source span
     }
     class MusicElement {
-        <<enumeration>>
-        +Note: Note
-        +Rest: Rest
-        +MultiMeasureRest: MultiMeasureRest
-        +Chord: Chord
-        +Bar: BarLine
-        +Ending: VariantEnding
-        +InlineField: Field
-        +Grace: GraceGroup
-        +Decoration: Decoration
-        +Annotation: Annotation
-        +Tuplet: Tuplet
-        +Slur: Slur
-        +Tie: Tie
-        +BrokenRhythm: BrokenRhythm
-        +Overlay: Overlay
-        +BeamBreak: T
-        +BeamContinuation: usize
-        +LineBreak: LineBreak
-        +Extension: T
+        <<variant>>
+        note
+        rest or spacer
+        multi-measure rest
+        chord
+        bar line
+        variant ending
+        inline information field
+        grace-note group
+        decoration
+        annotation
+        tuplet
+        slur
+        tie
+        broken rhythm
+        voice overlay
+        beam break
+        beam continuation
+        line-break control
+        extension syntax
     }
     class Note {
-        +pitch: Pitch
-        +length: NoteLength
+        pitch
+        written duration
     }
     class Rest {
-        +kind: RestKind
-        +length: NoteLength
+        visible rest or invisible spacer
+        written duration
     }
     class Chord {
-        +members: Vec~ChordMember~
-        +length: NoteLength
+        notes and rests
+        written duration
     }
     class BarLine {
-        +kind: BarKind
-        +source: T
+        semantic kind
+        original spelling
     }
     class VariantEnding {
-        +selectors: Vec~EndingSelector~
+        ending numbers and ranges
     }
     class Tuplet {
-        +actual: u8
-        +normal: Option~u8~
-        +affected: Option~u8~
+        actual note count
+        optional normal note count
+        optional affected note count
     }
     class GraceGroup {
-        +acciaccatura: bool
-        +notes: Vec~Note~
-    }
-    class Pitch {
-        +class: PitchClass
-        +octave: i8
-        +accidental: Option~Accidental~
-    }
-    class NoteLength {
-        +numerator: u32
-        +denominator: u32
-    }
-    class Accidental {
-        <<enumeration>>
-        +Natural
-        +Sharp: Fraction
-        +Flat: Fraction
-    }
-    class ChordMember {
-        <<enumeration>>
-        +Note: Note
-        +Rest: Rest
+        acciaccatura marker
+        grace notes
     }
     SpannedMusicElement *-- MusicElement
     MusicElement *-- Note
@@ -546,10 +577,64 @@ classDiagram
     MusicElement *-- VariantEnding
     MusicElement *-- Tuplet
     MusicElement *-- GraceGroup
+```
+
+Pitch, duration, and chord contents:
+
+```mermaid
+---
+config:
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+  flowchart:
+    rankSpacing: 0
+---
+classDiagram
+    direction LR
+    class Note {
+        pitch
+        written duration
+    }
+    class Rest {
+        visible rest or invisible spacer
+        written duration
+    }
+    class Chord {
+        notes and rests
+        written duration
+    }
+    class GraceGroup {
+        acciaccatura marker
+        grace notes
+    }
+    class Pitch {
+        letter name
+        octave displacement
+        optional accidental
+    }
+    class NoteLength {
+        numerator
+        denominator
+    }
+    class Accidental {
+        <<variant>>
+        natural
+        sharp amount
+        flat amount
+    }
+    class ChordMember {
+        <<variant>>
+        note
+        rest
+    }
     Note *-- Pitch
     Note *-- NoteLength
+    Rest *-- NoteLength
     Pitch *-- Accidental
     Chord *-- ChordMember
+    Chord *-- NoteLength
+    GraceGroup *-- Note : notes
 ```
 
 The principal [`MusicElement`] families are:
