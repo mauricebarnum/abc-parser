@@ -9,6 +9,14 @@
 - Follow the Rust API [guidelines](https://rust-lang.github.io/api-guidelines/) where practical, document deviations with motivation
 - Prefer to select [blessed](https://blessed.rs/crates) crates when choosing dependencies
 
+# Protected documentation
+
+- Do not modify, reformat, move, summarize, or delete the markers or any
+  content from `MAINTAINER-CONTEXT-BEGIN` through
+  `MAINTAINER-CONTEXT-END`.
+- This content is authored exclusively by the repository owner and must be
+  preserved byte-for-byte.
+
 # Coding Style
 
 - **Clippy**: Strict workspace Cargo.toml settings must be followed. Set
