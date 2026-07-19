@@ -249,8 +249,11 @@ The AST separates document organization, line syntax, structured field values,
 and music syntax. [`Spanned<T>`] is used at line and music-element boundaries;
 semantic children such as [`Pitch`] do not repeat their parent's span.
 
+Document organization:
+
 ```mermaid
 classDiagram
+    direction LR
     Document *-- SpannedDocumentItem : items
     SpannedDocumentItem *-- DocumentItem
     DocumentItem *-- Tune
@@ -260,12 +263,26 @@ classDiagram
     DocumentItem *-- SourceText : comment
     Document *-- SpannedLine : header
     Tune *-- SpannedLine : lines
+```
+
+Line syntax:
+
+```mermaid
+classDiagram
+    direction LR
     SpannedLine *-- Line
     Line *-- Directive
     Line *-- Field
     Line *-- TypesetText
     Line *-- SpannedMusicElement
     Line *-- SourceText : comment or directive text
+```
+
+Structured field values:
+
+```mermaid
+classDiagram
+    direction LR
     Field *-- FieldKind
     Field *-- FieldValue
     FieldValue *-- Fraction : unit length
@@ -274,6 +291,13 @@ classDiagram
     FieldValue *-- KeySignature
     FieldValue *-- VoiceDefinition
     FieldValue *-- SourceText
+```
+
+Music syntax:
+
+```mermaid
+classDiagram
+    direction LR
     SpannedMusicElement *-- MusicElement
     MusicElement *-- Note
     MusicElement *-- Rest
