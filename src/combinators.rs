@@ -1098,7 +1098,7 @@ where
         just(".-").to(MusicElement::Tie(Tie { dotted: true })),
         just('-').to(MusicElement::Tie(Tie { dotted: false })),
         broken_rhythm().map(MusicElement::BrokenRhythm),
-        just(char::from(96))
+        just('`')
             .repeated()
             .at_least(1)
             .count()
