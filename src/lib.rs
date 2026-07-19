@@ -1303,6 +1303,14 @@ fn error(kind: ErrorKind, message: &str, start: usize, end: usize) -> ParseError
 mod tests {
     use super::*;
 
+    fn parse_single_music_element(source: &str) -> MusicElement {
+        let report = parse_music_line(source);
+        assert!(report.is_valid(), "{source}: {:#?}", report.errors);
+        let mut elements = report.output.unwrap();
+        assert_eq!(elements.len(), 1, "{source}: {elements:#?}");
+        elements.remove(0).value
+    }
+
     #[test]
     fn parses_public_partial_entries() {
         assert_eq!(parse_field("K:G mixolydian").unwrap().key, 'K');
@@ -1359,6 +1367,140 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item.value, MusicElement::BrokenRhythm(_)))
         );
+    }
+
+    #[test]
+    fn marker_spellings_map_to_their_documented_semantics() {
+        let accidental_cases = [
+            ("=C", Accidental::Natural),
+            (
+                "^C",
+                Accidental::Sharp(Fraction {
+                    numerator: 1,
+                    denominator: 1,
+                }),
+            ),
+            (
+                "_C",
+                Accidental::Flat(Fraction {
+                    numerator: 1,
+                    denominator: 1,
+                }),
+            ),
+        ];
+        for (source, expected) in accidental_cases {
+            assert!(matches!(
+                parse_single_music_element(source),
+                MusicElement::Note(Note {
+                    pitch: Pitch {
+                        accidental: Some(actual),
+                        ..
+                    },
+                    ..
+                }) if actual == expected
+            ));
+        }
+
+        for (source, expected) in [("z", RestKind::Visible), ("x", RestKind::Invisible)] {
+            assert!(matches!(
+                parse_single_music_element(source),
+                MusicElement::Rest(Rest { kind, .. }) if kind == expected
+            ));
+        }
+        for (source, expected) in [("Z", false), ("X", true)] {
+            assert!(matches!(
+                parse_single_music_element(source),
+                MusicElement::MultiMeasureRest(MultiMeasureRest { invisible, .. })
+                    if invisible == expected
+            ));
+        }
+
+        for (source, expected) in [
+            ("\"text\"", AnnotationPlacement::ChordSymbol),
+            ("\"^text\"", AnnotationPlacement::Above),
+            ("\"_text\"", AnnotationPlacement::Below),
+            ("\"<text\"", AnnotationPlacement::Left),
+            ("\">text\"", AnnotationPlacement::Right),
+            ("\"@text\"", AnnotationPlacement::Free),
+        ] {
+            assert!(matches!(
+                parse_single_music_element(source),
+                MusicElement::Annotation(Annotation { placement, .. }) if placement == expected
+            ));
+        }
+
+        for (source, expected_name, expected_legacy) in
+            [("!turn!", "turn", false), ("+turn+", "turn", true)]
+        {
+            assert!(matches!(
+                parse_single_music_element(source),
+                MusicElement::Decoration(Decoration {
+                    name,
+                    legacy_delimiter,
+                }) if name == expected_name && legacy_delimiter == expected_legacy
+            ));
+        }
+
+        for (symbol, expected_name) in [
+            ('.', "staccato"),
+            ('~', "roll"),
+            ('H', "fermata"),
+            ('L', "accent"),
+            ('M', "lowermordent"),
+            ('O', "coda"),
+            ('P', "uppermordent"),
+            ('S', "segno"),
+            ('T', "trill"),
+            ('u', "upbow"),
+            ('v', "downbow"),
+        ] {
+            assert!(matches!(
+                parse_single_music_element(&symbol.to_string()),
+                MusicElement::Decoration(Decoration {
+                    name,
+                    legacy_delimiter: false,
+                }) if name == expected_name
+            ));
+        }
+    }
+
+    #[test]
+    fn pitch_letters_map_to_their_class_and_base_octave() {
+        for (letter, expected_class) in [
+            ('A', PitchClass::A),
+            ('B', PitchClass::B),
+            ('C', PitchClass::C),
+            ('D', PitchClass::D),
+            ('E', PitchClass::E),
+            ('F', PitchClass::F),
+            ('G', PitchClass::G),
+        ] {
+            for (spelling, expected_octave) in [(letter, 0), (letter.to_ascii_lowercase(), 1)] {
+                assert!(matches!(
+                    parse_single_music_element(&spelling.to_string()),
+                    MusicElement::Note(Note {
+                        pitch: Pitch { class, octave, .. },
+                        ..
+                    }) if class == expected_class && octave == expected_octave
+                ));
+            }
+        }
+
+        for (source, expected) in [
+            ("K:C#", KeyAccidental::Sharp),
+            ("K:Cb", KeyAccidental::Flat),
+        ] {
+            assert!(matches!(
+                parse_field(source).unwrap().value,
+                FieldValue::Key(KeySignature {
+                    tonic: Some(KeyTonic {
+                        accidental: Some(actual),
+                        ..
+                    }),
+                    ..
+                }) if actual == expected
+            ));
+        }
     }
 
     #[test]

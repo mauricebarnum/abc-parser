@@ -35,6 +35,7 @@ use chumsky::prelude::empty;
 use chumsky::prelude::end;
 use chumsky::prelude::just;
 use chumsky::prelude::one_of;
+use chumsky::prelude::select;
 use chumsky::recovery::via_parser;
 use chumsky::span::Span as ChumskySpan;
 
@@ -245,10 +246,10 @@ where
         .as_context()
 }
 
-/// Parses one sharp or flat spelling, including microtonal fractions.
-fn raised_accidental<'src, I>(
+/// Parses an accidental amount following one repeated marker.
+fn accidental_amount<'src, I>(
     marker: char,
-) -> impl Parser<'src, I, Accidental, Extra<'src, I>> + Clone
+) -> impl Parser<'src, I, Fraction, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
@@ -259,7 +260,7 @@ where
         .count()
         .then(unsigned().or_not())
         .then(just('/').ignore_then(unsigned().or_not()).or_not())
-        .try_map(move |((markers, numerator), denominator), span| {
+        .try_map(|((markers, numerator), denominator), span| {
             let denominator = denominator.flatten().unwrap_or(1);
             if denominator == 0 {
                 return Err(Rich::custom(
@@ -271,11 +272,7 @@ where
                 numerator: numerator.unwrap_or_else(|| u32::try_from(markers).unwrap_or(u32::MAX)),
                 denominator,
             };
-            Ok(if marker == '^' {
-                Accidental::Sharp(amount)
-            } else {
-                Accidental::Flat(amount)
-            })
+            Ok(amount)
         })
 }
 
@@ -287,8 +284,8 @@ where
 {
     choice((
         just('=').to(Accidental::Natural),
-        raised_accidental('^'),
-        raised_accidental('_'),
+        accidental_amount('^').map(Accidental::Sharp),
+        accidental_amount('_').map(Accidental::Flat),
     ))
     .labelled("accidental")
     .as_context()
@@ -299,22 +296,22 @@ fn pitch_letter<'src, I>() -> impl Parser<'src, I, ParsedPitchLetter, Extra<'src
 where
     I: ValueInput<'src, Token = char>,
 {
-    one_of("ABCDEFGabcdefg").map(|letter: char| {
-        let class = match letter {
-            'A' | 'a' => PitchClass::A,
-            'B' | 'b' => PitchClass::B,
-            'C' | 'c' => PitchClass::C,
-            'D' | 'd' => PitchClass::D,
-            'E' | 'e' => PitchClass::E,
-            'F' | 'f' => PitchClass::F,
-            'G' | 'g' => PitchClass::G,
-            _ => unreachable!("one_of restricts the pitch alphabet"),
-        };
-        ParsedPitchLetter {
-            class,
-            octave_offset: i8::from(letter.is_ascii_lowercase()),
-        }
-    })
+    select! {
+        'A' => ParsedPitchLetter { class: PitchClass::A, octave_offset: 0 },
+        'B' => ParsedPitchLetter { class: PitchClass::B, octave_offset: 0 },
+        'C' => ParsedPitchLetter { class: PitchClass::C, octave_offset: 0 },
+        'D' => ParsedPitchLetter { class: PitchClass::D, octave_offset: 0 },
+        'E' => ParsedPitchLetter { class: PitchClass::E, octave_offset: 0 },
+        'F' => ParsedPitchLetter { class: PitchClass::F, octave_offset: 0 },
+        'G' => ParsedPitchLetter { class: PitchClass::G, octave_offset: 0 },
+        'a' => ParsedPitchLetter { class: PitchClass::A, octave_offset: 1 },
+        'b' => ParsedPitchLetter { class: PitchClass::B, octave_offset: 1 },
+        'c' => ParsedPitchLetter { class: PitchClass::C, octave_offset: 1 },
+        'd' => ParsedPitchLetter { class: PitchClass::D, octave_offset: 1 },
+        'e' => ParsedPitchLetter { class: PitchClass::E, octave_offset: 1 },
+        'f' => ParsedPitchLetter { class: PitchClass::F, octave_offset: 1 },
+        'g' => ParsedPitchLetter { class: PitchClass::G, octave_offset: 1 },
+    }
 }
 
 /// Parses apostrophes as positive and commas as negative octave modifiers.
@@ -366,18 +363,14 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    one_of("zx")
-        .then(note_length())
-        .map(|(marker, length)| Rest {
-            kind: if marker == 'z' {
-                RestKind::Visible
-            } else {
-                RestKind::Invisible
-            },
-            length,
-        })
-        .labelled("rest")
-        .as_context()
+    choice((
+        just('z').to(RestKind::Visible),
+        just('x').to(RestKind::Invisible),
+    ))
+    .then(note_length())
+    .map(|(kind, length)| Rest { kind, length })
+    .labelled("rest")
+    .as_context()
 }
 
 /// Parses a multi-measure rest, defaulting its measure count to one.
@@ -386,10 +379,10 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    one_of("ZX")
+    choice((just('Z').to(false), just('X').to(true)))
         .then(unsigned().or_not())
-        .map(|(marker, measures)| MultiMeasureRest {
-            invisible: marker == 'X',
+        .map(|(invisible, measures)| MultiMeasureRest {
+            invisible,
             measures: measures.unwrap_or(1),
         })
         .labelled("multi-measure rest")
@@ -551,19 +544,14 @@ where
 {
     let tonic = pitch_letter()
         .map(|letter| letter.class)
-        .then(one_of("#b").or_not())
-        .map(|(class, accidental)| {
-            Some(KeyTonic {
-                class,
-                accidental: accidental.map(|marker| {
-                    if marker == '#' {
-                        KeyAccidental::Sharp
-                    } else {
-                        KeyAccidental::Flat
-                    }
-                }),
-            })
-        });
+        .then(
+            choice((
+                just('#').to(KeyAccidental::Sharp),
+                just('b').to(KeyAccidental::Flat),
+            ))
+            .or_not(),
+        )
+        .map(|(class, accidental)| Some(KeyTonic { class, accidental }));
     let no_tonic = choice((just("none"), just("perc"), just("HP"), just("Hp"))).to(None);
     choice((tonic, no_tonic))
         .then(
@@ -900,34 +888,37 @@ where
                     .map(SourceText::Span),
             )
             .then_ignore(just(delimiter))
-            .map(move |name| Decoration {
-                name,
-                legacy_delimiter: delimiter == '+',
-            })
     };
-    let shorthand = one_of(".~HLMOPSTuv").map(|symbol| Decoration {
-        name: SourceText::Synthesized(
-            match symbol {
-                '.' => "staccato",
-                '~' => "roll",
-                'H' => "fermata",
-                'L' => "accent",
-                'M' => "lowermordent",
-                'O' => "coda",
-                'P' => "uppermordent",
-                'S' => "segno",
-                'T' => "trill",
-                'u' => "upbow",
-                'v' => "downbow",
-                _ => unreachable!("one_of restricts shorthand decorations"),
-            }
-            .into(),
-        ),
+    let shorthand_name = select! {
+        '.' => "staccato",
+        '~' => "roll",
+        'H' => "fermata",
+        'L' => "accent",
+        'M' => "lowermordent",
+        'O' => "coda",
+        'P' => "uppermordent",
+        'S' => "segno",
+        'T' => "trill",
+        'u' => "upbow",
+        'v' => "downbow",
+    };
+    let shorthand = shorthand_name.map(|name| Decoration {
+        name: SourceText::Synthesized(name.into()),
         legacy_delimiter: false,
     });
-    choice((named('!'), named('+'), shorthand))
-        .labelled("decoration")
-        .as_context()
+    choice((
+        named('!').map(|name| Decoration {
+            name,
+            legacy_delimiter: false,
+        }),
+        named('+').map(|name| Decoration {
+            name,
+            legacy_delimiter: true,
+        }),
+        shorthand,
+    ))
+    .labelled("decoration")
+    .as_context()
 }
 
 /// Parses a quoted chord symbol or positioned annotation.
@@ -937,8 +928,16 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
+    let placement = choice((
+        just('^').to(AnnotationPlacement::Above),
+        just('_').to(AnnotationPlacement::Below),
+        just('<').to(AnnotationPlacement::Left),
+        just('>').to(AnnotationPlacement::Right),
+        just('@').to(AnnotationPlacement::Free),
+        empty().to(AnnotationPlacement::ChordSymbol),
+    ));
     just('"')
-        .ignore_then(one_of("^_<>@").or_not())
+        .ignore_then(placement)
         .then(
             any()
                 .filter(|character| !matches!(character, '"' | '\r' | '\n'))
@@ -947,17 +946,7 @@ where
                 .map(SourceText::Span),
         )
         .then_ignore(just('"'))
-        .map(|(marker, text)| Annotation {
-            placement: match marker {
-                Some('^') => AnnotationPlacement::Above,
-                Some('_') => AnnotationPlacement::Below,
-                Some('<') => AnnotationPlacement::Left,
-                Some('>') => AnnotationPlacement::Right,
-                Some('@') => AnnotationPlacement::Free,
-                _ => AnnotationPlacement::ChordSymbol,
-            },
-            text,
-        })
+        .map(|(placement, text)| Annotation { placement, text })
         .labelled("annotation")
         .as_context()
 }
