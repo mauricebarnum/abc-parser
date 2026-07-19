@@ -55,6 +55,7 @@ use super::DocumentItem;
 use super::EndingSelector;
 use super::ErrorKind;
 use super::Field;
+use super::FieldKind;
 use super::FieldParameter;
 use super::FieldValue;
 use super::Fraction;
@@ -148,6 +149,13 @@ struct ParsedTuneCandidate<S> {
 struct ParsedTypesetBodyLine<S> {
     text: Option<SourceText<S>>,
     span: S,
+}
+
+/// The source context of a structured information field.
+#[derive(Clone, Copy)]
+enum FieldContext {
+    Physical,
+    Inline,
 }
 
 /// A pitch letter and the octave offset implied by its case.
@@ -468,6 +476,22 @@ const fn field<T>(key: char, value: FieldValue<T>) -> Field<T> {
     }
 }
 
+/// Returns whether a field key has a dedicated structured value parser.
+const fn has_structured_field_parser(key: char) -> bool {
+    matches!(
+        field_kind(key),
+        FieldKind::UnitLength
+            | FieldKind::Meter
+            | FieldKind::Tempo
+            | FieldKind::Key
+            | FieldKind::Reference
+            | FieldKind::Voice
+            | FieldKind::Parts
+            | FieldKind::UserSymbol
+            | FieldKind::Macro
+    )
+}
+
 /// Parses the simple and additive forms of an M: meter value.
 fn meter<'src, I>() -> impl Parser<'src, I, Meter, Extra<'src, I>> + Clone
 where
@@ -624,6 +648,50 @@ where
     .map(|tokens| PartSequence { tokens })
 }
 
+/// Parses structured fields accepted both physically and inline.
+fn common_structured_field_parser<'src, I>(
+    context: FieldContext,
+) -> impl Parser<'src, I, Field<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let (unit_length_label, meter_label, key_label, reference_label) = match context {
+        FieldContext::Physical => (
+            "L: unit note length",
+            "M: meter (C, C|, none, or a fraction such as 6/8)",
+            "K: key signature",
+            "X: reference number",
+        ),
+        FieldContext::Inline => (
+            "inline L: unit note length",
+            "inline M: meter",
+            "inline K: key signature",
+            "inline X: reference number",
+        ),
+    };
+    choice((
+        just('L')
+            .then_ignore(just(':'))
+            .then(
+                horizontal_space().ignore_then(fraction().labelled(unit_length_label).as_context()),
+            )
+            .map(|(key, value)| field(key, FieldValue::UnitLength(value))),
+        just('M')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(meter().labelled(meter_label).as_context()))
+            .map(|(key, value)| field(key, FieldValue::Meter(value))),
+        just('K')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(key_signature().labelled(key_label).as_context()))
+            .map(|(key, value)| field(key, FieldValue::Key(value))),
+        just('X')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(unsigned().labelled(reference_label).as_context()))
+            .map(|(key, value)| field(key, FieldValue::Reference(value))),
+    ))
+}
+
 /// Builds strict structured and textual information-field alternatives.
 pub fn field_parser<'src, I>()
 -> impl Parser<'src, I, Field<SourceText<I::Span>>, Extra<'src, I>> + Clone
@@ -632,49 +700,38 @@ where
     I::Span: Clone,
 {
     let structured = choice((
-        just("L:")
-            .ignore_then(horizontal_space())
-            .ignore_then(fraction().labelled("L: unit note length").as_context())
-            .map(|value| field('L', FieldValue::UnitLength(value))),
-        just("M:")
-            .ignore_then(horizontal_space())
-            .ignore_then(
-                meter()
-                    .labelled("M: meter (C, C|, none, or a fraction such as 6/8)")
-                    .as_context(),
+        common_structured_field_parser(FieldContext::Physical),
+        just('Q')
+            .then_ignore(just(':'))
+            .then(
+                horizontal_space().ignore_then(
+                    tempo()
+                        .labelled("Q: tempo (for example 1/4=120)")
+                        .as_context(),
+                ),
             )
-            .map(|value| field('M', FieldValue::Meter(value))),
-        just("Q:")
-            .ignore_then(horizontal_space())
-            .ignore_then(
-                tempo()
-                    .labelled("Q: tempo (for example 1/4=120)")
-                    .as_context(),
+            .map(|(key, value)| field(key, FieldValue::Tempo(value))),
+        just('V')
+            .then_ignore(just(':'))
+            .then(
+                horizontal_space()
+                    .ignore_then(voice().labelled("V: voice definition").as_context()),
             )
-            .map(|value| field('Q', FieldValue::Tempo(value))),
-        just("K:")
-            .ignore_then(horizontal_space())
-            .ignore_then(key_signature().labelled("K: key signature").as_context())
-            .map(|value| field('K', FieldValue::Key(value))),
-        just("X:")
-            .ignore_then(horizontal_space())
-            .ignore_then(unsigned().labelled("X: reference number").as_context())
-            .map(|value| field('X', FieldValue::Reference(value))),
-        just("V:")
-            .ignore_then(horizontal_space())
-            .ignore_then(voice().labelled("V: voice definition").as_context())
-            .map(|value| field('V', FieldValue::Voice(value))),
-        just("P:")
-            .ignore_then(horizontal_space())
-            .ignore_then(parts().labelled("P: part sequence").as_context())
-            .map(|value| field('P', FieldValue::Parts(value))),
-        just("U:")
-            .ignore_then(horizontal_space())
-            .ignore_then(any().then_ignore(horizontal_space()).then_ignore(just('=')))
+            .map(|(key, value)| field(key, FieldValue::Voice(value))),
+        just('P')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(parts().labelled("P: part sequence").as_context()))
+            .map(|(key, value)| field(key, FieldValue::Parts(value))),
+        just('U')
+            .then_ignore(just(':'))
+            .then(
+                horizontal_space()
+                    .ignore_then(any().then_ignore(horizontal_space()).then_ignore(just('='))),
+            )
             .then(horizontal_space().ignore_then(remaining_text()))
-            .map(|(symbol, replacement)| {
+            .map(|((key, symbol), replacement)| {
                 field(
-                    'U',
+                    key,
                     FieldValue::UserSymbol(SymbolDefinition {
                         symbol,
                         replacement,
@@ -683,21 +740,23 @@ where
             })
             .labelled("U: user symbol definition (symbol=replacement)")
             .as_context(),
-        just("m:")
-            .ignore_then(horizontal_space())
-            .ignore_then(
-                any()
-                    .filter(|character| *character != '=')
-                    .repeated()
-                    .at_least(1)
-                    .to_span()
-                    .map(SourceText::Span),
+        just('m')
+            .then_ignore(just(':'))
+            .then(
+                horizontal_space().ignore_then(
+                    any()
+                        .filter(|character| *character != '=')
+                        .repeated()
+                        .at_least(1)
+                        .to_span()
+                        .map(SourceText::Span),
+                ),
             )
             .then_ignore(just('='))
             .then(horizontal_space().ignore_then(remaining_text()))
-            .map(|(pattern, replacement)| {
+            .map(|((key, pattern), replacement)| {
                 field(
-                    'm',
+                    key,
                     FieldValue::Macro(MacroDefinition {
                         pattern,
                         replacement,
@@ -708,10 +767,7 @@ where
             .as_context(),
     ));
     let textual = any()
-        .filter(|key: &char| {
-            key.is_ascii_alphabetic()
-                && !matches!(key, 'L' | 'M' | 'Q' | 'K' | 'X' | 'V' | 'P' | 'U' | 'm')
-        })
+        .filter(|key: &char| key.is_ascii_alphabetic() && !has_structured_field_parser(*key))
         .then_ignore(just(':'))
         .then(remaining_text())
         .map(|(key, value)| field(key, FieldValue::Text(value)));
@@ -833,36 +889,7 @@ where
     I::Span: Clone,
 {
     just('[')
-        .ignore_then(choice((
-            just("L:")
-                .ignore_then(horizontal_space())
-                .ignore_then(
-                    fraction()
-                        .labelled("inline L: unit note length")
-                        .as_context(),
-                )
-                .map(|value| field('L', FieldValue::UnitLength(value))),
-            just("M:")
-                .ignore_then(horizontal_space())
-                .ignore_then(meter().labelled("inline M: meter").as_context())
-                .map(|value| field('M', FieldValue::Meter(value))),
-            just("K:")
-                .ignore_then(horizontal_space())
-                .ignore_then(
-                    key_signature()
-                        .labelled("inline K: key signature")
-                        .as_context(),
-                )
-                .map(|value| field('K', FieldValue::Key(value))),
-            just("X:")
-                .ignore_then(horizontal_space())
-                .ignore_then(
-                    unsigned()
-                        .labelled("inline X: reference number")
-                        .as_context(),
-                )
-                .map(|value| field('X', FieldValue::Reference(value))),
-        )))
+        .ignore_then(common_structured_field_parser(FieldContext::Inline))
         .then_ignore(just(']'))
         .labelled("inline field")
         .as_context()
