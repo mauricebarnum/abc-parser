@@ -248,12 +248,57 @@ selects automatic, flat-oriented, or sharp-oriented enharmonic spelling.
 The AST separates document organization, line syntax, structured field values,
 and music syntax. [`Spanned<T>`] is used at line and music-element boundaries;
 semantic children such as [`Pitch`] do not repeat their parent's span.
+Each box lists the node's public fields. Boxes marked as enumerations list
+variants in `Variant: payload` form.
 
 Document organization:
 
 ```mermaid
 classDiagram
     direction LR
+    class Document {
+        +header: Vec~SpannedLine~
+        +items: Vec~SpannedDocumentItem~
+    }
+    class SpannedDocumentItem {
+        +value: DocumentItem
+        +span: S
+    }
+    class DocumentItem {
+        <<enumeration>>
+        +Tune: Tune
+        +FreeText: FreeText
+        +TypesetText: TypesetText
+        +Comment: T
+        +Directive: Directive
+    }
+    class Tune {
+        +lines: Vec~SpannedLine~
+    }
+    class FreeText {
+        +lines: Vec~T~
+    }
+    class TypesetText {
+        <<enumeration>>
+        +Text: T
+        +Centered: T
+        +Block: Vec~T~
+    }
+    class Directive {
+        +name: T
+        +arguments: T
+        +kind: DirectiveKind
+        +body: T
+    }
+    class SourceText {
+        <<enumeration>>
+        +Span: S
+        +Synthesized: String
+    }
+    class SpannedLine {
+        +value: Line
+        +span: S
+    }
     Document *-- SpannedDocumentItem : items
     SpannedDocumentItem *-- DocumentItem
     DocumentItem *-- Tune
@@ -270,6 +315,46 @@ Line syntax:
 ```mermaid
 classDiagram
     direction LR
+    class SpannedLine {
+        +value: Line
+        +span: S
+    }
+    class Line {
+        <<enumeration>>
+        +Blank
+        +Comment: T
+        +Directive: Directive
+        +Field: Field
+        +Music: Vec~SpannedMusicElement~
+        +TypesetText: TypesetText
+        +DirectiveText: T
+    }
+    class Directive {
+        +name: T
+        +arguments: T
+        +kind: DirectiveKind
+        +body: T
+    }
+    class Field {
+        +key: char
+        +kind: FieldKind
+        +value: FieldValue
+    }
+    class TypesetText {
+        <<enumeration>>
+        +Text: T
+        +Centered: T
+        +Block: Vec~T~
+    }
+    class SpannedMusicElement {
+        +value: MusicElement
+        +span: S
+    }
+    class SourceText {
+        <<enumeration>>
+        +Span: S
+        +Synthesized: String
+    }
     SpannedLine *-- Line
     Line *-- Directive
     Line *-- Field
@@ -283,6 +368,87 @@ Structured field values:
 ```mermaid
 classDiagram
     direction LR
+    class Field {
+        +key: char
+        +kind: FieldKind
+        +value: FieldValue
+    }
+    class FieldKind {
+        <<enumeration>>
+        +Area
+        +Book
+        +Composer
+        +Discography
+        +FileUrl
+        +Group
+        +History
+        +Instruction
+        +Key
+        +UnitLength
+        +Meter
+        +Notes
+        +Origin
+        +Parts
+        +Tempo
+        +Rhythm
+        +Source
+        +Title
+        +UserSymbol
+        +Voice
+        +Words
+        +Reference
+        +Transcription
+        +Macro
+        +Symbols
+        +Lyrics
+        +Extension: char
+    }
+    class FieldValue {
+        <<enumeration>>
+        +Text: T
+        +UnitLength: Fraction
+        +Meter: Meter
+        +Tempo: Tempo
+        +Key: KeySignature
+        +Reference: u32
+        +Voice: VoiceDefinition
+        +Parts: PartSequence
+        +UserSymbol: SymbolDefinition
+        +Macro: MacroDefinition
+        +Unparsed: T
+    }
+    class Fraction {
+        +numerator: u32
+        +denominator: u32
+    }
+    class Meter {
+        <<enumeration>>
+        +Common
+        +Cut
+        +None
+        +Simple: Fraction
+        +Compound: Vec~u32~ groups, u32 denominator
+    }
+    class Tempo {
+        +prelude: Option~T~
+        +beats: Vec~Fraction~
+        +bpm: u32
+        +postlude: Option~T~
+    }
+    class KeySignature {
+        +tonic: Option~KeyTonic~
+        +mode: T
+        +parameters: Vec~FieldParameter~
+    }
+    class VoiceDefinition {
+        +id: T
+        +properties: Vec~FieldParameter~
+    }
+    class SourceText {
+        <<enumeration>>
+        +Span: S
+        +Synthesized: String
+    }
     Field *-- FieldKind
     Field *-- FieldValue
     FieldValue *-- Fraction : unit length
@@ -298,6 +464,80 @@ Music syntax:
 ```mermaid
 classDiagram
     direction LR
+    class SpannedMusicElement {
+        +value: MusicElement
+        +span: S
+    }
+    class MusicElement {
+        <<enumeration>>
+        +Note: Note
+        +Rest: Rest
+        +MultiMeasureRest: MultiMeasureRest
+        +Chord: Chord
+        +Bar: BarLine
+        +Ending: VariantEnding
+        +InlineField: Field
+        +Grace: GraceGroup
+        +Decoration: Decoration
+        +Annotation: Annotation
+        +Tuplet: Tuplet
+        +Slur: Slur
+        +Tie: Tie
+        +BrokenRhythm: BrokenRhythm
+        +Overlay: Overlay
+        +BeamBreak: T
+        +BeamContinuation: usize
+        +LineBreak: LineBreak
+        +Extension: T
+    }
+    class Note {
+        +pitch: Pitch
+        +length: NoteLength
+    }
+    class Rest {
+        +kind: RestKind
+        +length: NoteLength
+    }
+    class Chord {
+        +members: Vec~ChordMember~
+        +length: NoteLength
+    }
+    class BarLine {
+        +kind: BarKind
+        +source: T
+    }
+    class VariantEnding {
+        +selectors: Vec~EndingSelector~
+    }
+    class Tuplet {
+        +actual: u8
+        +normal: Option~u8~
+        +affected: Option~u8~
+    }
+    class GraceGroup {
+        +acciaccatura: bool
+        +notes: Vec~Note~
+    }
+    class Pitch {
+        +class: PitchClass
+        +octave: i8
+        +accidental: Option~Accidental~
+    }
+    class NoteLength {
+        +numerator: u32
+        +denominator: u32
+    }
+    class Accidental {
+        <<enumeration>>
+        +Natural
+        +Sharp: Fraction
+        +Flat: Fraction
+    }
+    class ChordMember {
+        <<enumeration>>
+        +Note: Note
+        +Rest: Rest
+    }
     SpannedMusicElement *-- MusicElement
     MusicElement *-- Note
     MusicElement *-- Rest
