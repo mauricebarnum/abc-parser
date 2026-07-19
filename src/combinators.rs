@@ -1398,29 +1398,28 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    spanned_nonblank_line::<I, _>(
-        directive_parser()
-            .filter(|directive| {
-                matches!(directive.kind, DirectiveKind::Text | DirectiveKind::Center)
-            })
-            .map(Line::Directive),
-    )
-    .map(|line| {
-        let Line::Directive(directive) = line.value else {
-            unreachable!("inline typeset parser only accepts directives")
-        };
-        let value = if directive.kind == DirectiveKind::Text {
-            TypesetText::Text(directive.arguments)
-        } else {
-            TypesetText::Centered(directive.arguments)
-        };
-        Spanned {
-            value,
-            span: line.span,
-        }
-    })
-    // Keep the directive grammar from expanding every semantic text-item branch.
-    .boxed()
+    let inline = directive_parser()
+        .map(|directive| match directive.kind {
+            DirectiveKind::Text => Some(TypesetText::Text(directive.arguments)),
+            DirectiveKind::Center => Some(TypesetText::Centered(directive.arguments)),
+            _ => None,
+        })
+        .filter(Option::is_some)
+        .map(|value| {
+            Line::TypesetText(value.expect("inline typeset parser filters absent values"))
+        });
+    spanned_nonblank_line::<I, _>(inline)
+        .map(|line| {
+            let Line::TypesetText(value) = line.value else {
+                unreachable!("inline typeset parser only accepts directives")
+            };
+            Spanned {
+                value,
+                span: line.span,
+            }
+        })
+        // Keep the directive grammar from expanding every semantic text-item branch.
+        .boxed()
 }
 
 /// Parses one ordinary free-text line while reserving semantic line starts.
@@ -1629,24 +1628,10 @@ where
             }
             line
         });
-    let ordinary_unit = tune_line.map(|line| match line.value {
-        Line::Directive(directive)
-            if matches!(directive.kind, DirectiveKind::Text | DirectiveKind::Center) =>
-        {
-            let value = if directive.kind == DirectiveKind::Text {
-                TypesetText::Text(directive.arguments)
-            } else {
-                TypesetText::Centered(directive.arguments)
-            };
-            ParsedTuneUnit::Typeset(Spanned {
-                value,
-                span: line.span,
-            })
-        }
-        _ => ParsedTuneUnit::Line(line),
-    });
+    let ordinary_unit = tune_line.map(ParsedTuneUnit::Line);
     let unit = choice((
         typeset_block_parser::<I>().map(ParsedTuneUnit::Typeset),
+        inline_typeset_parser::<I>().map(ParsedTuneUnit::Typeset),
         ordinary_unit.clone(),
     ));
     let field_start = any()
