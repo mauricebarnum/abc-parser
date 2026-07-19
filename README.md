@@ -33,21 +33,21 @@ display them.
 
 The primary `parse` API accepts any Chumsky `ValueInput<Token = char>` and
 returns a `ParseReport` using default `ParserOptions`. Use
-`parse_with_options` to configure text retention. The optional source-backed AST
-and diagnostics retain the input's native span type, so the same API accepts
-strings, character slices, mapped inputs, and value streams without first
-converting them to `&str`.
+`parse_with_options` to configure text retention and strict tune validation.
+The optional source-backed AST and diagnostics retain the input's native span
+type, so the same API accepts strings, character slices, mapped inputs, and
+value streams without first converting them to `&str`.
 
 ```sh
 cargo run -p abc-parser --example kitchen_sink -- test_kitchen_sink.abc
 cargo run -p abc-parser --example transpose_kitchen_sink
 cargo run -p abc-parser --bin abc-transpose -- test_kitchen_sink.abc --semitones 1
-cargo test --workspace
+cargo nextest run --all-features
 ```
 
-The `abc-transpose` binary writes each transposed tune to standard output. It
-accepts a destination key, signed semitones, or signed whole-tone steps in exact
-increments of `0.5`:
+The `abc-transpose` binary writes the complete transposed document to standard
+output. It accepts a destination key, signed semitones, or signed whole-tone
+steps in exact increments of `0.5`:
 
 ```sh
 abc-transpose tunes.abc --key Dm > tunes-in-d-minor.abc

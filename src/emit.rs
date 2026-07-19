@@ -195,8 +195,9 @@ pub trait ToAbc {
 
     /// Writes this node through a configured emitter.
     ///
-    /// Implementations predating [`AbcEmitter`] may rely on this default,
-    /// which ignores preferences and delegates to [`Self::write_abc`].
+    /// Implementations that do not use configured emission may rely on this
+    /// default, which ignores preferences and delegates to
+    /// [`Self::write_abc`].
     ///
     /// # Errors
     ///

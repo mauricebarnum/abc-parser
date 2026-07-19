@@ -1,4 +1,3 @@
-
 # Parser architecture
 
 This section describes how character input reaches the public AST. Parser
@@ -10,12 +9,12 @@ input's native `Input::Span`: `&str` therefore reports UTF-8 byte offsets while
 ## Entry points
 
 [`parse`] is the default complete-document API. [`parse_with_options`] accepts
-an additional [`ParserOptions`] value for configurable text retention. Both
-return a [`ParseReport`] whose optional output is a source-backed
-[`ParsedDocument`]. Errors and warnings use the input's native span type.
-Recovery normally supplies output alongside diagnostics; an unrecoverable
-failure returns no output. Advisory [`ParseReport::warnings`] do not make the
-report invalid.
+an additional [`ParserOptions`] value for configurable text retention and
+strict tune validation. Both return a [`ParseReport`] whose optional output is
+a source-backed [`ParsedDocument`]. Errors and warnings use the input's native
+span type. Recovery normally supplies output alongside diagnostics; an
+unrecoverable failure returns no output. Advisory [`ParseReport::warnings`] do
+not make the report invalid.
 
 Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 [`music_element_parser`], [`field_parser`], [`directive_parser`], and
@@ -26,28 +25,24 @@ Generic partial-input constructors are [`line_parser`], [`music_line_parser`],
 ```mermaid
 flowchart TD
     source["ValueInput Token=char"] --> entry{Public entry point}
-    entry -->|document| recovering[parse / parse_with_options]
-    entry -->|physical line| line[line_parser]
+    entry -->|document| document[parse / parse_with_options]
+    entry -->|physical line| line[line_parser classification]
     entry -->|music fragment| music[music_line_parser]
     entry -->|field/directive/chord| partial[Partial parser combinators]
-    recovering --> split[Split at blank lines]
-    split --> classify[Classify from first non-comment line]
-    line --> classify
-    classify --> blank[Blank]
-    classify --> comment[Comment]
-    classify --> directive[Directive parser]
-    classify --> field[Field parser]
-    classify -->|field-led block| music
-    classify -->|raw block| free[Free text]
-    field --> field_value[Structured field-value parser]
-    music --> elements[Music element combinators]
-    elements --> ast[Spanned AST nodes]
-    field_value --> ast
-    directive --> ast
-    ast --> grouped[Group semantic text and tune units]
-    grouped --> ordered[Assemble header, tunes, free text, and typeset text]
-    ordered --> filter[Apply ParserOptions retention and strict validation]
-    filter --> parsed[ParsedDocument with SourceText spans]
+    document --> split[Split at blank lines]
+    split --> classify{First non-comment line}
+    classify -->|field-led| tune[Tune candidate]
+    classify -->|directive or raw text| text[Text block]
+    tune --> tune_lines[Parse fields, directives, typeset text, and music]
+    text --> text_items[Parse free text, typeset text, comments, and directives]
+    line --> partial_ast[Spanned partial AST]
+    music --> partial_ast
+    partial --> partial_ast
+    tune_lines --> tune_options[Resolve header ambiguity, validate, and retain tune text]
+    text_items --> text_options[Retain configured document text]
+    tune_options --> ordered[Assemble header and ordered document items]
+    text_options --> ordered
+    ordered --> parsed[ParsedDocument with SourceText spans]
     parsed -->|IntoOwnedAst + source| owned[OwnedDocument with strings]
     parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
 ```
@@ -76,8 +71,9 @@ granularity:
    diagnostics separately from Chumsky's `Rich` token-error channel.
 6. The initial metadata-only block is the file header. Subsequent field-led
    blocks are [`Tune`] values even when their first field is not `X:`.
-7. Typeset text and comments are assembled in source order before applying
-   [`ParserOptions`] retention and optional strict tune validation.
+7. Text-retention options are applied while semantic text items and tune lines
+   are built. Strict tune validation runs while each tune candidate is resolved.
+   The resulting header and document items are then assembled in source order.
 
 Physical lines are intentional recovery boundaries. ABC fields, directives,
 comments, and most music layout constructs cannot consume an arbitrary following
@@ -90,8 +86,9 @@ grace group, decoration, or annotation.
 file-level [`TypesetText`], comments, and stylesheet directives following the
 optional initial header. A tune ends at an empty line or EOF. This prevents
 letters in inter-tune prose from being interpreted as notes. A fieldless block
-is always free text; if its deciding line is valid music, [`parse`] reports
-an advisory warning.
+stays in text mode: ordinary lines become free text, while recognized comments,
+directives, and typeset constructs keep their semantic node types. If a raw
+deciding line is valid music, [`parse`] reports an advisory warning.
 
 `%%text` and `%%center` are typed text nodes. A `%%begintext` through
 `%%endtext` sequence is one block node; each standard body line must begin with
@@ -224,6 +221,28 @@ canonicalize optional spacing, quote choices, shorthand decorations, and
 similar presentation details. Text inserted programmatically into a quoted AST
 position must not contain an unescaped quote delimiter.
 
+## Transposition command flow
+
+The `abc-transpose` binary parses a complete document with [`parse`] and prints
+warnings before deciding whether to continue. Parser errors reject the input;
+the command does not transpose a recovered document that contains errors. A
+zero-semitone request with no octave displacement or emission override writes
+the original bytes, adding a final newline only when one is absent.
+
+All other requests convert the parsed tree to an [`OwnedDocument`] and traverse
+each tune independently. A tune requires a structured `K:` field with a pitched
+tonic. The command maintains source and destination key signatures plus
+per-measure accidental state while it transposes notes, chord members, grace
+notes, key changes, and inline key fields. Bar lines reset measure accidentals.
+A destination-key request derives a separate interval for each tune; a signed
+interval applies the same chromatic displacement to every tune. The independent
+octave option changes written pitches without changing key signatures.
+
+After transformation, [`ToAbc`] emits the complete document, including retained
+file-level text and directives. `--explicit-note-lengths` selects explicit
+power-of-two denominators; the default uses ABC shorthand. `--prefer-flats`
+selects automatic, flat-oriented, or sharp-oriented enharmonic spelling.
+
 ## AST overview
 
 The AST separates document organization, line syntax, structured field values,
@@ -232,37 +251,37 @@ semantic children such as [`Pitch`] do not repeat their parent's span.
 
 ```mermaid
 classDiagram
-    Document *-- DocumentItem
+    Document *-- SpannedDocumentItem : items
+    SpannedDocumentItem *-- DocumentItem
     DocumentItem *-- Tune
     DocumentItem *-- FreeText
     DocumentItem *-- TypesetText
+    DocumentItem *-- Directive
+    DocumentItem *-- SourceText : comment
     Document *-- SpannedLine : header
     Tune *-- SpannedLine : lines
     SpannedLine *-- Line
-    Line <|-- DirectiveLine
-    Line <|-- FieldLine
-    Line <|-- MusicLine
-    Line <|-- TypesetText
-    FieldLine *-- Field
+    Line *-- Directive
+    Line *-- Field
+    Line *-- TypesetText
+    Line *-- SpannedMusicElement
+    Line *-- SourceText : comment or directive text
     Field *-- FieldKind
     Field *-- FieldValue
-    FieldValue <|-- UnitLength
-    FieldValue <|-- Meter
-    FieldValue <|-- Tempo
-    FieldValue <|-- KeySignature
-    FieldValue <|-- VoiceDefinition
-    SourceText <|-- SourceSpan
-    SourceText <|-- SynthesizedString
+    FieldValue *-- Fraction : unit length
+    FieldValue *-- Meter
+    FieldValue *-- Tempo
+    FieldValue *-- KeySignature
+    FieldValue *-- VoiceDefinition
     FieldValue *-- SourceText
-    MusicLine *-- SpannedMusicElement
     SpannedMusicElement *-- MusicElement
-    MusicElement <|-- Note
-    MusicElement <|-- Rest
-    MusicElement <|-- Chord
-    MusicElement <|-- BarLine
-    MusicElement <|-- VariantEnding
-    MusicElement <|-- Tuplet
-    MusicElement <|-- GraceGroup
+    MusicElement *-- Note
+    MusicElement *-- Rest
+    MusicElement *-- Chord
+    MusicElement *-- BarLine
+    MusicElement *-- VariantEnding
+    MusicElement *-- Tuplet
+    MusicElement *-- GraceGroup
     Note *-- Pitch
     Note *-- NoteLength
     Pitch *-- Accidental
