@@ -358,7 +358,7 @@ fn run(arguments: &Arguments) -> Result<(), String> {
         && arguments.spelling == SpellingPreference::Auto
         && !arguments.explicit_note_lengths
     {
-        return write_output(&source, arguments.out.as_ref());
+        return write_output(source, arguments.out.as_ref());
     }
 
     let parsed_document = parsed
@@ -377,7 +377,7 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     };
     let options = EmitOptions::new().with_note_length_style(note_length_style);
     write_output(
-        &document.to_abc_with_options(options),
+        document.to_abc_with_options(options),
         arguments.out.as_ref(),
     )
 }
@@ -448,18 +448,12 @@ fn read_source(path: &PathBuf) -> Result<String, String> {
 }
 
 /// Writes all output bytes to the selected file or standard output.
-fn write_output(source: &str, path: Option<&PathBuf>) -> Result<(), String> {
-    let mut terminated;
-    let source = if source.ends_with('\n') {
-        source
-    } else {
-        terminated = String::with_capacity(source.len() + 1);
-        terminated.push_str(source);
-        terminated.push('\n');
-        &terminated
-    };
+fn write_output(mut source: String, path: Option<&PathBuf>) -> Result<(), String> {
+    if !source.ends_with('\n') {
+        source.push('\n');
+    }
     if let Some(path) = path {
-        fs::write(path, source)
+        fs::write(path, &source)
             .map_err(|error| format!("could not write {}: {error}", path.display()))
     } else {
         io::stdout()
