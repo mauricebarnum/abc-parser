@@ -1,5 +1,23 @@
-[package]
+[workspace]
+members = ["abc-language-server"]
 resolver = "3"
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+clone_on_ref_ptr = "deny"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+option_if_let_else = "allow"
+
+[package]
 name = "abc-parser"
 version = "0.1.0"
 publish = false
@@ -18,17 +36,5 @@ name = "abc-transpose"
 path = "src/bin/abc-transpose.rs"
 doc = true
 
-[lints.rust]
-missing_docs = "deny"
-unsafe_code = "deny"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
-nursery = { level = "deny", priority = -1 }
-cast_possible_truncation = "allow"
-cast_precision_loss = "allow"
-clone_on_ref_ptr = "deny"
-missing_errors_doc = "allow"
-must_use_candidate = "allow"
-option_if_let_else = "allow"
+[lints]
+workspace = true

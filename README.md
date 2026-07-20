@@ -39,6 +39,21 @@ Run the complete test suite with:
 cargo nextest run --all-features
 ```
 
+## Language-server support
+
+The `abc-language-server` workspace package provides diagnostics, completion,
+hover, tune and voice symbols, folding and selection ranges, semantic tokens,
+conservative formatting, and equivalent note-length code actions for `*.abc`
+files. Build it with:
+
+```sh
+cargo build --release -p abc-language-server
+```
+
+Configure an LSP 3.18 client to launch `abc-language-server` over standard
+input and output. See [the language-server guide](abc-language-server/README.md)
+for capabilities and settings.
+
 ## Library API
 
 The primary `parse` API accepts any Chumsky `ValueInput<Token = char>` and
