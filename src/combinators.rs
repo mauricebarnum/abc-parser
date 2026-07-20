@@ -1068,17 +1068,19 @@ where
             dotted: false,
         }));
     choice((
+        note().map(MusicElement::Note),
+        beam_break,
+        multi_measure_rest().map(MusicElement::MultiMeasureRest),
+        rest().map(MusicElement::Rest),
+        line_break,
         inline_field().map(MusicElement::InlineField),
         chord_parser().map(MusicElement::Chord),
         variant_ending().map(MusicElement::Ending),
+        bar().map(MusicElement::Bar),
         grace().map(MusicElement::Grace),
         annotation().map(MusicElement::Annotation),
         decoration().map(MusicElement::Decoration),
-        multi_measure_rest().map(MusicElement::MultiMeasureRest),
-        rest().map(MusicElement::Rest),
-        note().map(MusicElement::Note),
         tuplet().map(MusicElement::Tuplet),
-        bar().map(MusicElement::Bar),
         just("(&").to(MusicElement::Overlay(Overlay::Start)),
         just("&)").to(MusicElement::Overlay(Overlay::End)),
         just('&').to(MusicElement::Overlay(Overlay::NextVoice)),
@@ -1103,8 +1105,6 @@ where
             .at_least(1)
             .count()
             .map(MusicElement::BeamContinuation),
-        line_break,
-        beam_break,
     ))
     .labelled("music element")
     .as_context()

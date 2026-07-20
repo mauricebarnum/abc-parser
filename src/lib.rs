@@ -1370,6 +1370,34 @@ mod tests {
     }
 
     #[test]
+    fn common_music_tokens_preserve_prioritized_choice_semantics() {
+        assert!(matches!(
+            parse_single_music_element("C"),
+            MusicElement::Note(_)
+        ));
+        assert!(matches!(
+            parse_single_music_element(" "),
+            MusicElement::BeamBreak(_)
+        ));
+        assert!(matches!(
+            parse_single_music_element("z"),
+            MusicElement::Rest(_)
+        ));
+        assert!(matches!(
+            parse_single_music_element("Z"),
+            MusicElement::MultiMeasureRest(_)
+        ));
+        assert!(matches!(
+            parse_single_music_element("$"),
+            MusicElement::LineBreak(_)
+        ));
+        assert!(matches!(
+            parse_single_music_element("|"),
+            MusicElement::Bar(_)
+        ));
+    }
+
+    #[test]
     fn marker_spellings_map_to_their_documented_semantics() {
         let accidental_cases = [
             ("=C", Accidental::Natural),
