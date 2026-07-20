@@ -1179,36 +1179,25 @@ where
         .at_least(1)
         .to_span()
         .map(|span| (SourceText::Span(span), DirectiveKind::Other));
-    let semantic = just("%%")
-        .ignore_then(
-            choice((known_name, other_name))
-                .labelled("stylesheet directive name")
-                .as_context(),
-        )
+    let semantic = choice((known_name, other_name))
+        .labelled("stylesheet directive name")
+        .as_context()
         .then(
             one_of(" \t")
                 .repeated()
                 .ignore_then(remaining_text())
                 .or_not(),
         )
-        .map(|((name, kind), arguments)| {
-            (
-                name,
-                arguments.unwrap_or_else(|| SourceText::Synthesized(String::new())),
-                kind,
-            )
-        })
-        .labelled("stylesheet directive")
-        .as_context();
-    semantic
-        .rewind()
-        .then(just("%%").ignore_then(remaining_text()))
-        .map(|((name, arguments, kind), body)| Directive {
+        .map_with(|((name, kind), arguments), extra| Directive {
             name,
-            arguments,
+            arguments: arguments.unwrap_or_else(|| SourceText::Synthesized(String::new())),
             kind,
-            body,
-        })
+            body: SourceText::Span(extra.span()),
+        });
+    just("%%")
+        .ignore_then(semantic)
+        .labelled("stylesheet directive")
+        .as_context()
 }
 
 /// Classifies a non-blank tune line while preserving music parser failures.

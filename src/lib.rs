@@ -1325,6 +1325,30 @@ mod tests {
     }
 
     #[test]
+    fn directive_parser_retains_body_while_scanning_once() {
+        let directive = parse_directive("%%staves   (1 2)").unwrap();
+        assert_eq!(directive.name, "staves");
+        assert_eq!(directive.arguments, "(1 2)");
+        assert_eq!(directive.body, "staves   (1 2)");
+        assert_eq!(directive.kind, DirectiveKind::Other);
+
+        let directive = parse_directive("%%text").unwrap();
+        assert_eq!(directive.arguments, "");
+        assert_eq!(directive.body, "text");
+        assert_eq!(directive.kind, DirectiveKind::Text);
+
+        let characters = "%%text  é".chars().collect::<Vec<_>>();
+        let directive = directive_parser()
+            .parse(characters.as_slice())
+            .into_result()
+            .unwrap();
+        let SourceText::Span(body) = directive.body else {
+            panic!("parsed directive bodies retain their source span");
+        };
+        assert_eq!(body.start..body.end, 2..characters.len());
+    }
+
+    #[test]
     fn music_elements_have_semantic_structure() {
         let report =
             parse_music_line("^/2c'3/2 z/ X4 |: [1,3-5 (3:2:3 !trill! \"^text\" C>>D.-D &");
