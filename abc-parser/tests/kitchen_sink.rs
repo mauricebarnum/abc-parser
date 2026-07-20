@@ -25,7 +25,7 @@ use abc_parser::is_source_reference_placeholder;
 use abc_parser::parse;
 use chumsky::span::SimpleSpan;
 
-const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
+const KITCHEN_SINK: &str = include_str!("../../test_kitchen_sink.abc");
 
 type OwnedLine = Spanned<Line<SimpleSpan<usize>, String>, SimpleSpan<usize>>;
 

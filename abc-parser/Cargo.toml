@@ -1,0 +1,26 @@
+[package]
+name = "abc-parser"
+version = "0.1.0"
+publish = false
+description = "A recovering, source-spanned parser for ABC music notation 2.1"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+
+[dependencies]
+chumsky = "0.13.0"
+clap = { version = "4.5.54", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+merman-rustdoc = "0.7.0"
+
+[[bin]]
+name = "abc-transpose"
+path = "src/bin/abc-transpose.rs"
+doc = true
+
+[[bin]]
+name = "abc-lint"
+path = "src/bin/abc-lint.rs"
+doc = true
+
+[lints]
+workspace = true
