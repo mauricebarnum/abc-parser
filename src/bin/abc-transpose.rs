@@ -29,6 +29,7 @@ use std::process::ExitCode;
 use abc_parser::Accidental;
 use abc_parser::BarLine;
 use abc_parser::ChordMember;
+use abc_parser::DiagnosticRenderer;
 use abc_parser::EmitOptions;
 use abc_parser::Field;
 use abc_parser::FieldValue;
@@ -337,17 +338,18 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     } else {
         arguments.input.display().to_string()
     };
+    let mut diagnostic_renderer = DiagnosticRenderer::new(source.as_str());
     for warning in &parsed.warnings {
         eprintln!(
             "abc-transpose: warning: {input_name}:{}",
-            warning.diagnostic(source.as_str())
+            diagnostic_renderer.render_warning(warning)
         );
     }
     if !parsed.is_valid() {
         let diagnostics = parsed
             .errors
             .iter()
-            .map(|error| format!("{input_name}:{}", error.diagnostic(source.as_str())))
+            .map(|error| format!("{input_name}:{}", diagnostic_renderer.render_error(error)))
             .collect::<Vec<_>>()
             .join("\n");
         return Err(format!("input is not valid ABC:\n{diagnostics}"));

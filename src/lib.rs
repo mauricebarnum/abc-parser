@@ -873,6 +873,120 @@ pub struct ParseError<S = Span> {
     pub span: S,
 }
 
+/// Reuses resolved source text and a progressive line index across diagnostics.
+///
+/// Constructing a renderer does not resolve its source or allocate an index.
+/// Rendering the first diagnostic caches the complete source, when available,
+/// and indexes only as far as that diagnostic requires. Later diagnostics at
+/// greater offsets extend the index, while diagnostics at earlier offsets use
+/// the line starts already discovered.
+///
+/// # Examples
+///
+/// ```
+/// use abc_parser::DiagnosticRenderer;
+/// use abc_parser::ErrorKind;
+/// use abc_parser::ParseError;
+///
+/// let source = "X:1\nM:nope\nK:C\n";
+/// let errors = [
+///     ParseError {
+///         kind: ErrorKind::InvalidField,
+///         message: "invalid M: field value".to_owned(),
+///         span: 4..10,
+///     },
+///     ParseError {
+///         kind: ErrorKind::InvalidField,
+///         message: "invalid K: field value".to_owned(),
+///         span: 11..14,
+///     },
+/// ];
+/// let mut renderer = DiagnosticRenderer::new(source);
+/// let diagnostics = errors
+///     .iter()
+///     .map(|error| renderer.render_error(error))
+///     .collect::<Vec<_>>();
+/// assert!(diagnostics[0].starts_with("2:1:"));
+/// assert!(diagnostics[1].starts_with("3:1:"));
+/// ```
+#[derive(Debug)]
+pub struct DiagnosticRenderer<'source, R: ?Sized, S = Span> {
+    resolver: &'source R,
+    source: DiagnosticSource<'source>,
+    line_starts: Vec<usize>,
+    indexed_to: usize,
+    span: std::marker::PhantomData<fn(&S)>,
+}
+
+/// Lazily resolved complete source retained by a diagnostic renderer.
+#[derive(Debug)]
+enum DiagnosticSource<'source> {
+    Unresolved,
+    Unavailable,
+    Resolved(std::borrow::Cow<'source, str>),
+}
+
+impl<'source, R, S> DiagnosticRenderer<'source, R, S>
+where
+    R: ?Sized,
+{
+    /// Creates an allocation-free renderer for `resolver`.
+    pub const fn new(resolver: &'source R) -> Self {
+        Self {
+            resolver,
+            source: DiagnosticSource::Unresolved,
+            line_starts: Vec::new(),
+            indexed_to: 0,
+            span: std::marker::PhantomData,
+        }
+    }
+
+    /// Renders one error, reusing source and line information from prior calls.
+    pub fn render_error(&mut self, error: &ParseError<S>) -> String
+    where
+        R: SourceResolver<S>,
+        S: ChumskySpan,
+        S::Offset: fmt::Display,
+    {
+        self.render(&error.message, &error.span)
+            .unwrap_or_else(|| error.to_string())
+    }
+
+    /// Renders one warning, reusing source and line information from prior calls.
+    pub fn render_warning(&mut self, warning: &ParseWarning<S>) -> String
+    where
+        R: SourceResolver<S>,
+        S: ChumskySpan,
+        S::Offset: fmt::Display,
+    {
+        self.render(&warning.message, &warning.span)
+            .unwrap_or_else(|| warning.to_string())
+    }
+
+    /// Resolves and renders one native source span.
+    fn render(&mut self, message: &str, span: &S) -> Option<String>
+    where
+        R: SourceResolver<S>,
+    {
+        let range = self.resolver.diagnostic_range(span)?;
+        if matches!(self.source, DiagnosticSource::Unresolved) {
+            let resolver: &'source R = self.resolver;
+            self.source = <R as SourceResolver<S>>::full_source(resolver)
+                .map_or(DiagnosticSource::Unavailable, DiagnosticSource::Resolved);
+        }
+        let DiagnosticSource::Resolved(source) = &self.source else {
+            return None;
+        };
+        render_diagnostic(
+            message,
+            &range,
+            source,
+            &mut self.line_starts,
+            &mut self.indexed_to,
+        )
+    }
+}
+
 impl<S> fmt::Display for ParseError<S>
 where
     S: ChumskySpan,
@@ -919,20 +1033,13 @@ where
     ///
     /// Falls back to [`Display`](fmt::Display) when `resolver` no longer has the
     /// complete source or the stored native span is invalid for that source.
+    /// Use [`DiagnosticRenderer`] to reuse source and line information when
+    /// rendering more than one diagnostic.
     pub fn diagnostic<R>(&self, resolver: &R) -> String
     where
         R: SourceResolver<S> + ?Sized,
     {
-        resolver
-            .full_source()
-            .zip(resolver.diagnostic_range(&self.span))
-            .map_or_else(
-                || self.to_string(),
-                |(source, range)| {
-                    render_diagnostic(&self.message, &range, &source)
-                        .unwrap_or_else(|| self.to_string())
-                },
-            )
+        DiagnosticRenderer::new(resolver).render_error(self)
     }
 }
 
@@ -969,25 +1076,25 @@ where
     S::Offset: fmt::Display,
 {
     /// Renders this warning with line, column, and source context when available.
+    ///
+    /// Use [`DiagnosticRenderer`] to reuse source and line information when
+    /// rendering more than one diagnostic.
     pub fn diagnostic<R>(&self, resolver: &R) -> String
     where
         R: SourceResolver<S> + ?Sized,
     {
-        resolver
-            .full_source()
-            .zip(resolver.diagnostic_range(&self.span))
-            .map_or_else(
-                || self.to_string(),
-                |(source, range)| {
-                    render_diagnostic(&self.message, &range, &source)
-                        .unwrap_or_else(|| self.to_string())
-                },
-            )
+        DiagnosticRenderer::new(resolver).render_warning(self)
     }
 }
 
 /// Renders one byte-spanned diagnostic against its complete source.
-fn render_diagnostic(message: &str, span: &Span, source: &str) -> Option<String> {
+fn render_diagnostic(
+    message: &str,
+    span: &Span,
+    source: &str,
+    line_starts: &mut Vec<usize>,
+    indexed_to: &mut usize,
+) -> Option<String> {
     let start = span.start;
     let end = span.end;
     if start > end
@@ -998,15 +1105,24 @@ fn render_diagnostic(message: &str, span: &Span, source: &str) -> Option<String>
         return None;
     }
 
-    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    if line_starts.is_empty() {
+        line_starts.push(0);
+    }
+    if start > *indexed_to {
+        line_starts.extend(
+            source[*indexed_to..start]
+                .bytes()
+                .enumerate()
+                .filter_map(|(offset, byte)| (byte == b'\n').then_some(*indexed_to + offset + 1)),
+        );
+        *indexed_to = start;
+    }
+    let line_index = line_starts.partition_point(|line_start| *line_start <= start) - 1;
+    let line_start = line_starts[line_index];
     let line_end = source[start..]
         .find(['\r', '\n'])
         .map_or(source.len(), |offset| start + offset);
-    let line_number = source[..line_start]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1;
+    let line_number = line_index + 1;
     let column = source[line_start..start].chars().count() + 1;
     let prefix = source[line_start..start]
         .chars()
@@ -1302,6 +1418,35 @@ fn error(kind: ErrorKind, message: &str, start: usize, end: usize) -> ParseError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_renderer_preserves_unicode_tabs_and_line_endings() {
+        let source = "α\tb\r\nnext\n";
+        let mut renderer = DiagnosticRenderer::new(source);
+
+        let tabbed = error(ErrorKind::InvalidMusic, "tabbed", 3, 4);
+        let diagnostic = renderer.render_error(&tabbed);
+        assert!(diagnostic.starts_with("1:3: tabbed"), "{diagnostic}");
+        assert!(diagnostic.contains("1 | α\tb"), "{diagnostic}");
+        assert!(diagnostic.contains("|  \t^"), "{diagnostic}");
+
+        let multiline = error(ErrorKind::InvalidMusic, "multiline", 0, 8);
+        let diagnostic = renderer.render_error(&multiline);
+        assert!(diagnostic.starts_with("1:1: multiline"), "{diagnostic}");
+        assert!(diagnostic.ends_with("| ^^^"), "{diagnostic}");
+
+        let end = error(ErrorKind::InvalidMusic, "end", source.len(), source.len());
+        let diagnostic = renderer.render_error(&end);
+        assert!(diagnostic.starts_with("3:1: end"), "{diagnostic}");
+        assert!(diagnostic.contains("3 | \n"), "{diagnostic}");
+        assert!(diagnostic.ends_with("| ^"), "{diagnostic}");
+
+        let invalid_boundary = error(ErrorKind::InvalidMusic, "invalid", 1, 2);
+        assert_eq!(
+            renderer.render_error(&invalid_boundary),
+            invalid_boundary.to_string()
+        );
+    }
 
     fn parse_single_music_element(source: &str) -> MusicElement {
         let report = parse_music_line(source);

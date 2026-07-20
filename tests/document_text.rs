@@ -14,6 +14,7 @@
 
 //! ABC 2.1 free-text and typeset-text document structure tests.
 
+use abc_parser::DiagnosticRenderer;
 use abc_parser::DocumentItem;
 use abc_parser::ErrorKind;
 use abc_parser::IntoOwnedAst;
@@ -313,12 +314,16 @@ fn character_input_diagnostics_use_native_spans_and_render_unicode() {
             .iter()
             .all(|error| error.span.end <= characters.len())
     );
-    let error = report
+    let mut renderer = DiagnosticRenderer::new(characters.as_slice());
+    let diagnostics = report
         .errors
         .iter()
-        .find(|error| error.message.contains("M: meter"))
+        .map(|error| (error, renderer.render_error(error)))
+        .collect::<Vec<_>>();
+    let (_, diagnostic) = diagnostics
+        .iter()
+        .find(|(error, _)| error.message.contains("M: meter"))
         .unwrap();
-    let diagnostic = error.diagnostic(characters.as_slice());
     assert!(diagnostic.starts_with("2:5:"), "{diagnostic}");
     assert!(diagnostic.contains("2 | M:6/x"), "{diagnostic}");
 }
