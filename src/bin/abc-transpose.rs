@@ -190,7 +190,25 @@ impl Offset {
 }
 
 /// Accidental state for each written pitch class within the current bar.
-type MeasureAccidentals = Vec<(PitchClass, Offset)>;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MeasureAccidentals([Option<Offset>; 7]);
+
+impl MeasureAccidentals {
+    /// Returns the active accidental for one written pitch class.
+    const fn get(self, class: PitchClass) -> Option<Offset> {
+        self.0[class_index(class)]
+    }
+
+    /// Records an accidental for one written pitch class.
+    const fn set(&mut self, class: PitchClass, offset: Offset) {
+        self.0[class_index(class)] = Some(offset);
+    }
+
+    /// Clears accidental propagation at a measure boundary.
+    fn clear(&mut self) {
+        self.0.fill(None);
+    }
+}
 
 /// Mutable musical state while one tune is traversed in source order.
 struct TranspositionState {
@@ -219,14 +237,15 @@ impl TranspositionState {
             .checked_mul(12)
             .and_then(|octave_interval| interval.checked_add(octave_interval))
             .ok_or_else(|| "combined transposition interval is out of range".to_owned())?;
+        let source_signature = signature_offsets(source_key)?;
         Ok(Self {
             interval,
             pitch_interval,
             spelling,
-            source_signature: signature_offsets(source_key)?,
-            source_measure_accidentals: Vec::new(),
-            destination_signature: signature_offsets(source_key)?,
-            destination_measure_accidentals: Vec::new(),
+            source_signature,
+            source_measure_accidentals: MeasureAccidentals::default(),
+            destination_signature: source_signature,
+            destination_measure_accidentals: MeasureAccidentals::default(),
             prefer_flats: spelling.forced_flats().unwrap_or_else(|| {
                 destination
                     .as_ref()
@@ -243,10 +262,12 @@ impl TranspositionState {
         let offset = match source.accidental {
             Some(accidental) => {
                 let offset = accidental_offset(accidental);
-                set_measure_accidental(&mut self.source_measure_accidentals, source.class, offset);
+                self.source_measure_accidentals.set(source.class, offset);
                 offset
             }
-            None => find_measure_accidental(&self.source_measure_accidentals, source.class)
+            None => self
+                .source_measure_accidentals
+                .get(source.class)
                 .unwrap_or_else(|| self.source_signature[class_index(source.class)]),
         };
         let mut destination =
@@ -255,17 +276,15 @@ impl TranspositionState {
             .accidental
             .map(accidental_offset)
             .expect("spell_absolute_pitch always emits an accidental");
-        let active_offset =
-            find_measure_accidental(&self.destination_measure_accidentals, destination.class)
-                .unwrap_or_else(|| self.destination_signature[class_index(destination.class)]);
+        let active_offset = self
+            .destination_measure_accidentals
+            .get(destination.class)
+            .unwrap_or_else(|| self.destination_signature[class_index(destination.class)]);
         if destination_offset == active_offset {
             destination.accidental = None;
         } else {
-            set_measure_accidental(
-                &mut self.destination_measure_accidentals,
-                destination.class,
-                destination_offset,
-            );
+            self.destination_measure_accidentals
+                .set(destination.class, destination_offset);
         }
         *pitch = destination;
         Ok(())
@@ -1004,26 +1023,6 @@ const fn natural_semitone(class: PitchClass) -> i16 {
     }
 }
 
-/// Records an explicitly written source accidental for subsequent notes.
-fn set_measure_accidental(accidentals: &mut MeasureAccidentals, class: PitchClass, offset: Offset) {
-    if let Some((_, stored)) = accidentals
-        .iter_mut()
-        .find(|(stored_class, _)| *stored_class == class)
-    {
-        *stored = offset;
-    } else {
-        accidentals.push((class, offset));
-    }
-}
-
-/// Finds a source accidental carried earlier in the current measure.
-fn find_measure_accidental(accidentals: &MeasureAccidentals, class: PitchClass) -> Option<Offset> {
-    accidentals
-        .iter()
-        .find(|(stored_class, _)| *stored_class == class)
-        .map(|(_, offset)| *offset)
-}
-
 #[cfg(test)]
 mod tests {
     use abc_parser::IntoOwnedAst;
@@ -1032,11 +1031,39 @@ mod tests {
     use clap::Parser;
 
     use super::Arguments;
+    use super::MeasureAccidentals;
+    use super::Offset;
     use super::Request;
     use super::SpellingPreference;
     use super::parse_key;
     use super::parse_steps;
     use super::transpose_tune;
+
+    #[test]
+    fn measure_accidental_slots_cover_every_pitch_class() {
+        let classes = [
+            abc_parser::PitchClass::C,
+            abc_parser::PitchClass::D,
+            abc_parser::PitchClass::E,
+            abc_parser::PitchClass::F,
+            abc_parser::PitchClass::G,
+            abc_parser::PitchClass::A,
+            abc_parser::PitchClass::B,
+        ];
+        let mut accidentals = MeasureAccidentals::default();
+        for (index, class) in classes.into_iter().enumerate() {
+            let offset = Offset::integer(i16::try_from(index).unwrap());
+            accidentals.set(class, offset);
+            assert_eq!(accidentals.get(class), Some(offset));
+        }
+
+        accidentals.clear();
+        assert!(
+            classes
+                .into_iter()
+                .all(|class| accidentals.get(class).is_none())
+        );
+    }
 
     /// Parses and transposes the only tune in a compact fixture.
     fn transpose(source: &str, request: &Request) -> String {
