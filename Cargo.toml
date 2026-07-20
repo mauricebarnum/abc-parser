@@ -1,33 +1,12 @@
-[package]
+[workspace]
+members = ["abc-language-server", "abc-parser"]
 resolver = "3"
-name = "abc-parser"
-version = "0.1.0"
-publish = false
-description = "A recovering, source-spanned parser for ABC music notation 2.1"
-edition = "2024"
-license = "Apache-2.0"
-rust-version = "1.95"
 
-[dependencies]
-chumsky = "0.13.0"
-clap = { version = "4.5.54", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
-merman-rustdoc = "0.7.0"
-
-[[bin]]
-name = "abc-transpose"
-path = "src/bin/abc-transpose.rs"
-doc = true
-
-[[bin]]
-name = "abc-lint"
-path = "src/bin/abc-lint.rs"
-doc = true
-
-[lints.rust]
+[workspace.lints.rust]
 missing_docs = "deny"
 unsafe_code = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }

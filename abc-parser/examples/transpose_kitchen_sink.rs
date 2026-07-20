@@ -34,7 +34,7 @@ use abc_parser::ToAbc;
 use abc_parser::Tune;
 use abc_parser::parse;
 
-const KITCHEN_SINK: &str = include_str!("../test_kitchen_sink.abc");
+const KITCHEN_SINK: &str = include_str!("../../test_kitchen_sink.abc");
 
 /// Parses, prints, transposes, and reprints the bundled ABC fixture.
 fn main() -> ExitCode {
