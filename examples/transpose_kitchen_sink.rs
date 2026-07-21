@@ -116,8 +116,10 @@ fn transpose_music_element(element: &mut MusicElement<String>) {
             }
         }
         MusicElement::Grace(group) => {
-            for note in &mut group.notes {
-                transpose_note(note);
+            for element in &mut group.elements {
+                if let abc_parser::GraceElement::Note(note) = element {
+                    transpose_note(note);
+                }
             }
         }
         MusicElement::InlineField(field) => transpose_field(field),

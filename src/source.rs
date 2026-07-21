@@ -48,7 +48,7 @@ use super::VoiceDefinition;
 pub enum SourceText<S> {
     /// A reference to text in the parser input.
     Span(S),
-    /// Text normalized or synthesized by the parser.
+    /// Text retained, normalized, or synthesized directly by the parser.
     Synthesized(String),
 }
 
@@ -318,17 +318,20 @@ impl<S> IntoOwnedAst<S> for Tempo<SourceText<S>> {
     where
         R: SourceResolver<S> + ?Sized,
     {
-        Ok(Tempo {
-            prelude: self
-                .prelude
-                .map(|text| text.into_owned(resolver))
-                .transpose()?,
-            beats: self.beats,
-            bpm: self.bpm,
-            postlude: self
-                .postlude
-                .map(|text| text.into_owned(resolver))
-                .transpose()?,
+        Ok(match self {
+            Self::MetronomeMark {
+                prelude,
+                beats,
+                bpm,
+                postlude,
+            } => Tempo::MetronomeMark {
+                prelude: prelude.map(|text| text.into_owned(resolver)).transpose()?,
+                beats,
+                bpm,
+                postlude: postlude.map(|text| text.into_owned(resolver)).transpose()?,
+            },
+            Self::TextOnly(text) => Tempo::TextOnly(text.into_owned(resolver)?),
+            Self::Deprecated(text) => Tempo::Deprecated(text.into_owned(resolver)?),
         })
     }
 }
@@ -440,6 +443,7 @@ impl<S> IntoOwnedAst<S> for FieldValue<SourceText<S>> {
         R: SourceResolver<S> + ?Sized,
     {
         Ok(match self {
+            Self::Empty => FieldValue::Empty,
             Self::Text(text) => FieldValue::Text(text.into_owned(resolver)?),
             Self::UnitLength(value) => FieldValue::UnitLength(value),
             Self::Meter(value) => FieldValue::Meter(value),
@@ -558,6 +562,10 @@ impl<S> IntoOwnedAst<S> for Line<S, SourceText<S>> {
             Self::Comment(value) => Line::Comment(value.into_owned(resolver)?),
             Self::Directive(value) => Line::Directive(value.into_owned(resolver)?),
             Self::Field(value) => Line::Field(value.into_owned(resolver)?),
+            Self::FieldContinuation(value) => Line::FieldContinuation(value.into_owned(resolver)?),
+            Self::DeprecatedHistoryContinuation(value) => {
+                Line::DeprecatedHistoryContinuation(value.into_owned(resolver)?)
+            }
             Self::Music(values) => Line::Music(
                 values
                     .into_iter()

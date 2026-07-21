@@ -158,6 +158,10 @@ pub enum Line<S = Span, T = SourceText<S>> {
     Directive(Directive<T>),
     /// An information field such as `T:Title`.
     Field(Field<T>),
+    /// Text continuing the preceding information field via `+:`.
+    FieldContinuation(T),
+    /// Raw text continuing an `H:` field using deprecated implicit syntax.
+    DeprecatedHistoryContinuation(T),
     /// Music code represented as parsed elements.
     Music(Vec<Spanned<MusicElement<T>, S>>),
     /// Tune-local typeset text.
@@ -181,6 +185,8 @@ pub struct Field<T = String> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FieldValue<T = String> {
+    /// A standard field whose value is explicitly empty.
+    Empty,
     /// An inherently textual metadata value.
     Text(T),
     /// An `L:` unit note length.
@@ -226,16 +232,42 @@ pub enum Meter {
 }
 
 /// A tempo from a `Q:` field.
+///
+/// Parsed quoted descriptions are owned directly by the source-backed AST,
+/// while deprecated syntax remains raw until source resolution.
+///
+/// ```
+/// use abc_parser::FieldValue;
+/// use abc_parser::Tempo;
+/// use abc_parser::parse_field;
+///
+/// let field = parse_field("Q:\"Allegro\" 1/4=120").unwrap();
+/// assert!(matches!(
+///     field.value,
+///     FieldValue::Tempo(Tempo::MetronomeMark {
+///         prelude: Some(ref text),
+///         bpm: 120,
+///         ..
+///     }) if text == "Allegro"
+/// ));
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Tempo<T = String> {
-    /// Optional text before the metronome mark.
-    pub prelude: Option<T>,
-    /// Beat lengths on the left of `=`.
-    pub beats: Vec<Fraction>,
-    /// Beats per minute.
-    pub bpm: u32,
-    /// Optional text after the metronome mark.
-    pub postlude: Option<T>,
+pub enum Tempo<T = String> {
+    /// A current metronome mark with optional surrounding descriptions.
+    MetronomeMark {
+        /// Optional owned text before the metronome mark.
+        prelude: Option<T>,
+        /// Beat lengths on the left of `=`.
+        beats: Vec<Fraction>,
+        /// Beats per minute.
+        bpm: u32,
+        /// Optional owned text after the metronome mark.
+        postlude: Option<T>,
+    },
+    /// An owned quoted tempo indication without a metronome mark.
+    TextOnly(T),
+    /// A recognized deprecated tempo payload retained without interpretation.
+    Deprecated(T),
 }
 
 /// A key signature from a `K:` field.
@@ -337,6 +369,8 @@ pub enum FieldKind {
     Composer,
     /// `D:` discography.
     Discography,
+    /// Deprecated `E:` explicit element spacing.
+    ElementSpacing,
     /// `F:` source file URL.
     FileUrl,
     /// `G:` group.
@@ -447,8 +481,9 @@ impl ParserOptions {
 
     /// Selects strict validation for complete ABC documents.
     ///
-    /// Strict validation requires every tune to contain an `X:` reference
-    /// field. It also warns when `X:` is not the first information field or a
+    /// Strict validation requires every tune to contain exactly one `X:`
+    /// reference field and at least one `T:` title and `K:` key field. It
+    /// also warns when `X:` is not the first information field or a
     /// header-level `K:` is not the last. Parsing remains recovering when
     /// these requirements are not met.
     #[must_use]
@@ -678,8 +713,17 @@ pub enum EndingSelector {
 pub struct GraceGroup {
     /// Whether `/` requests acciaccatura rendering.
     pub acciaccatura: bool,
-    /// Notes inside the braces.
-    pub notes: Vec<Note>,
+    /// Notes and broken-rhythm operators inside the braces.
+    pub elements: Vec<GraceElement>,
+}
+
+/// One construct permitted inside a grace-note group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GraceElement {
+    /// A grace note.
+    Note(Note),
+    /// A broken-rhythm operator between grace notes.
+    BrokenRhythm(BrokenRhythm),
 }
 
 /// A named or shorthand decoration.
@@ -860,6 +904,8 @@ pub enum ErrorKind {
     MissingReference,
     /// A tune-header field does not appear in its recommended position.
     InvalidFieldOrder,
+    /// Recognized syntax is accepted for compatibility but is deprecated.
+    DeprecatedSyntax,
 }
 
 /// A recoverable syntax error with an exact source location.
@@ -1242,6 +1288,7 @@ pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> 
 pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
     let source = source.trim_end_matches(['\r', '\n']);
     directive_parser()
+        .then_ignore(combinators::trailing_comment())
         .parse(source)
         .into_result()
         .map_err(|errors| {
@@ -1275,6 +1322,7 @@ pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
 pub fn parse_field(source: &str) -> Result<Field, ParseError> {
     let source = source.trim_end_matches(['\r', '\n']);
     field_parser()
+        .then_ignore(combinators::trailing_comment())
         .parse(source)
         .into_result()
         .map_err(|errors| {
@@ -1315,7 +1363,10 @@ pub fn parse_music_line(
     source: &str,
 ) -> ParseReport<Vec<Spanned<MusicElement<String>, SimpleSpan<usize>>>> {
     let source = source.trim_end_matches(['\r', '\n']);
-    let (output, faults) = music_line_parser().parse(source).into_output_errors();
+    let (output, faults) = music_line_parser()
+        .then_ignore(combinators::trailing_comment())
+        .parse(source)
+        .into_output_errors();
     let output = output.map(|items| {
         items
             .into_iter()
@@ -1382,6 +1433,7 @@ const fn field_kind(key: char) -> FieldKind {
         'B' => FieldKind::Book,
         'C' => FieldKind::Composer,
         'D' => FieldKind::Discography,
+        'E' => FieldKind::ElementSpacing,
         'F' => FieldKind::FileUrl,
         'G' => FieldKind::Group,
         'H' => FieldKind::History,
@@ -1774,12 +1826,6 @@ mod tests {
             }))
         );
         assert!(matches!(
-            parse_field("Q:\"Allegro\" 1/4=120 \"brightly\"")
-                .unwrap()
-                .value,
-            FieldValue::Tempo(Tempo { bpm: 120, .. })
-        ));
-        assert!(matches!(
             parse_field("K:G mixolydian clef=bass").unwrap().value,
             FieldValue::Key(KeySignature {
                 tonic: Some(KeyTonic {
@@ -1824,13 +1870,17 @@ mod tests {
                 "{source}: {:#?}",
                 report.errors
             );
-            assert!(matches!(
-                report.output,
-                Some(Line::Field(Field {
-                    value: FieldValue::Unparsed(_),
-                    ..
-                }))
-            ));
+            assert!(
+                matches!(
+                    report.output,
+                    Some(Line::Field(Field {
+                        value: FieldValue::Unparsed(_),
+                        ..
+                    }))
+                ),
+                "{source}: {:#?}",
+                report.output
+            );
         }
     }
 
@@ -1843,7 +1893,7 @@ mod tests {
             ("!trill", "decoration"),
             ("(999", "tuplet"),
             ("[M:6/x]", "inline M: meter"),
-            ("?", "music element"),
+            ("}", "music element"),
         ] {
             let report = parse_music_line(source);
             assert!(!report.is_valid(), "{source}");
