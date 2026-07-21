@@ -78,6 +78,35 @@ Pass `-` as the input path to read ABC from standard input. A zero semitone or
 step interval is a byte-preserving no-op unless an emission preference such as
 `--explicit-note-lengths` requests canonical re-emission.
 
+## Command-line linting
+
+The `abc-lint` binary validates an ABC document and reports source-spanned
+diagnostics, including departures from the recommended tune-header field
+order, on standard error. Every deterministic change available through
+`--fix` has a corresponding default diagnostic. The command produces no
+output after a successful check:
+
+```sh
+abc-lint tunes.abc
+abc-lint - < tunes.abc
+```
+
+Pass `--fix` to emit canonical ABC with deterministic repairs. The fixer
+removes `E:` spacing and `H:` history fields, renames deprecated `A:` area
+fields to `O:`, resolves deprecated `Q:` forms using the active unit note
+length, and replaces deprecated `+name+` decorations with `!name!`. It also
+applies the recommended stable header order (`X:` first, `M:` before `L:`,
+and `K:` last), supplying missing or empty `X:` values from an increasing
+unique sequence. Earlier header instructions made ineffective by later
+definitions are removed, while repeated additive metadata such as titles and
+composers is retained. Use `--out` with `--fix` to write the result directly
+to a file:
+
+```sh
+abc-lint tunes.abc --fix > tunes-fixed.abc
+abc-lint tunes.abc --fix --out tunes-fixed.abc
+```
+
 ## Data model and recovery
 
 Music code is represented semantically: pitches, fractional accidentals and
