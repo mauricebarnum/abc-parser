@@ -688,6 +688,9 @@ pub struct BarLine<T = String> {
 }
 
 /// A variant-ending selector such as `[1,3,5-7`.
+///
+/// First and second endings may omit `[` when adjacent to a bar line, as in
+/// `|1` or `:|2`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariantEnding {
     /// Whether the selector was introduced by an explicit `[` marker.
@@ -1604,6 +1607,90 @@ mod tests {
             output
                 .iter()
                 .any(|item| matches!(item.value, MusicElement::BrokenRhythm(_)))
+        );
+    }
+
+    #[test]
+    fn adjacent_bars_abbreviate_first_and_second_endings() {
+        let source = "|: a |[1 b :|2 c";
+        let report = parse_music_line(source);
+        assert!(report.is_valid(), "{:#?}", report.errors);
+        let output = report.output.as_ref().unwrap();
+        let endings = output
+            .iter()
+            .filter(|element| matches!(element.value, MusicElement::Ending(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(endings.len(), 2);
+        assert_eq!(endings[0].span, SimpleSpan::from(6..8));
+        assert!(matches!(
+            endings[0].value,
+            MusicElement::Ending(VariantEnding { ref selectors, .. })
+                if selectors == &[EndingSelector::Number(1)]
+        ));
+        assert_eq!(endings[1].span, SimpleSpan::from(13..14));
+        assert!(matches!(
+            endings[1].value,
+            MusicElement::Ending(VariantEnding { ref selectors, .. })
+                if selectors == &[EndingSelector::Number(2)]
+        ));
+
+        let document = parse("X:1\n|: a |1 b :|2 c\n");
+        assert!(document.is_valid(), "{:#?}", document.errors);
+    }
+
+    #[test]
+    fn malformed_abbreviated_endings_report_targeted_diagnostics() {
+        let separated = parse_music_line("|: a |[1 b :| 2 c");
+        assert_eq!(separated.errors.len(), 1, "{:#?}", separated.errors);
+        assert_eq!(separated.errors[0].span, 14..15);
+        assert_eq!(
+            separated.errors[0].message,
+            "variant ending 2 must be adjacent to the bar line or begin with '['"
+        );
+        let output = separated.output.as_ref().unwrap();
+        assert!(output.iter().any(|element| {
+            matches!(&element.value, MusicElement::Extension(value) if value == "2")
+        }));
+        assert!(matches!(
+            output.last().map(|element| &element.value),
+            Some(MusicElement::Note(Note {
+                pitch: Pitch {
+                    class: PitchClass::C,
+                    ..
+                },
+                ..
+            }))
+        ));
+
+        for source in ["|3", "|12"] {
+            let report = parse_music_line(source);
+            assert_eq!(report.errors.len(), 1, "{source}: {:#?}", report.errors);
+            assert!(
+                report.errors[0]
+                    .message
+                    .contains("only endings 1 and 2 may use the abbreviated form"),
+                "{source}: {:#?}",
+                report.errors
+            );
+        }
+    }
+
+    #[test]
+    fn variant_ending_recovery_does_not_change_other_number_syntax() {
+        for source in ["C2", "(2cd", ":|[2 c", ":| [2 c", "[1,3-5 c"] {
+            let report = parse_music_line(source);
+            assert!(report.is_valid(), "{source}: {:#?}", report.errors);
+        }
+
+        let standalone = parse_music_line("2 c");
+        assert!(!standalone.is_valid());
+        assert!(
+            standalone
+                .errors
+                .iter()
+                .all(|error| !error.message.contains("variant ending")),
+            "{:#?}",
+            standalone.errors
         );
     }
 

@@ -1049,15 +1049,14 @@ where
             })
         });
     just('[')
-        .or_not()
-        .then(
+        .ignore_then(
             selector
                 .separated_by(just(','))
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
-        .map(|(bracket, selectors)| VariantEnding {
-            explicit_bracket: bracket.is_some(),
+        .map(|selectors| VariantEnding {
+            explicit_bracket: true,
             selectors,
         })
         .labelled("variant ending")
@@ -1093,6 +1092,77 @@ where
         source: SourceText::Span(extra.span()),
     })
     .labelled("bar line")
+}
+
+/// Parses an abbreviated variant ending together with its preceding bar line.
+fn bar_variant_ending<'src, I>()
+-> impl Parser<'src, I, ParsedMusic<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let bar = bar().map_with(|value, extra| Spanned {
+        value: MusicElement::Bar(value),
+        span: extra.span(),
+    });
+    let digits = any()
+        .filter(char::is_ascii_digit)
+        .repeated()
+        .at_least(1)
+        .collect::<String>()
+        .map_with(|digits, extra| (digits, extra.span()));
+    let adjacent = bar
+        .clone()
+        .then(digits)
+        .validate(|(bar, (digits, span)): (_, (String, I::Span)), _, emitter| {
+            let value = match digits.as_str() {
+                "1" => MusicElement::Ending(VariantEnding {
+                    explicit_bracket: false,
+                    selectors: vec![EndingSelector::Number(1)],
+                }),
+                "2" => MusicElement::Ending(VariantEnding {
+                    explicit_bracket: false,
+                    selectors: vec![EndingSelector::Number(2)],
+                }),
+                _ => {
+                    emitter.emit(Rich::custom(
+                        span.clone(),
+                        format!(
+                            "variant ending {digits} must begin with '['; only endings 1 and 2 may use the abbreviated form"
+                        ),
+                    ));
+                    MusicElement::Extension(SourceText::Span(span.clone()))
+                }
+            };
+            vec![bar, Spanned { value, span }]
+        });
+    let beam_break = one_of(" \t")
+        .repeated()
+        .at_least(1)
+        .to_span()
+        .map(|span: I::Span| Spanned {
+            value: MusicElement::BeamBreak(SourceText::Span(span.clone())),
+            span,
+        });
+    let separated = bar.then(beam_break).then(digits).validate(
+        move |((bar, beam_break), (digits, span)): ((_, _), (String, I::Span)), _, emitter| {
+            emitter.emit(Rich::custom(
+                span.clone(),
+                format!(
+                    "variant ending {digits} must be adjacent to the bar line or begin with '['"
+                ),
+            ));
+            vec![
+                bar,
+                beam_break,
+                Spanned {
+                    value: MusicElement::Extension(SourceText::Span(span.clone())),
+                    span,
+                },
+            ]
+        },
+    );
+    choice((adjacent, separated))
 }
 
 /// Parses a grace group, including the optional acciaccatura slash.
@@ -1410,6 +1480,41 @@ where
         })
 }
 
+/// Parses a complete semantic music sequence, including abbreviated endings.
+fn semantic_music_sequence_parser<'src, I>()
+-> impl Parser<'src, I, ParsedMusic<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let element = semantic_music_element_parser()
+        .map_with(|value, extra| Spanned {
+            value,
+            span: extra.span(),
+        })
+        .map(|element| vec![element]);
+    choice((bar_variant_ending(), element))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(|chunks| chunks.into_iter().flatten().collect())
+}
+
+/// Parses a recovering music sequence, including abbreviated endings.
+fn diagnostic_music_sequence_parser<'src, I>()
+-> impl Parser<'src, I, ParsedMusic<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let element = diagnostic_music_element_parser().map(|element| vec![element]);
+    choice((bar_variant_ending(), element))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(|chunks| chunks.into_iter().flatten().collect())
+}
+
 /// Builds a validating parser for one semantic music-code element.
 pub fn music_element_parser<'src, I>()
 -> impl Parser<'src, I, Spanned<MusicElement<SourceText<I::Span>>, I::Span>, Extra<'src, I>> + Clone
@@ -1427,65 +1532,59 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    diagnostic_music_element_parser::<I>()
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .validate(|elements, _, emitter| {
-            for (index, element) in elements.iter().enumerate() {
-                match element.value {
-                    MusicElement::Tie(_) => {
-                        let attached = index.checked_sub(1).is_some_and(|previous| {
-                            matches!(
-                                elements[previous].value,
-                                MusicElement::Note(_) | MusicElement::Chord(_)
-                            )
-                        });
-                        if !attached {
-                            emitter.emit(Rich::custom(
-                                element.span.clone(),
-                                "tie must be adjacent to the preceding note or chord",
-                            ));
-                        }
+    diagnostic_music_sequence_parser::<I>().validate(|elements, _, emitter| {
+        for (index, element) in elements.iter().enumerate() {
+            match element.value {
+                MusicElement::Tie(_) => {
+                    let attached = index.checked_sub(1).is_some_and(|previous| {
+                        matches!(
+                            elements[previous].value,
+                            MusicElement::Note(_) | MusicElement::Chord(_)
+                        )
+                    });
+                    if !attached {
+                        emitter.emit(Rich::custom(
+                            element.span.clone(),
+                            "tie must be adjacent to the preceding note or chord",
+                        ));
                     }
-                    MusicElement::BrokenRhythm(_) => {
-                        let is_timed_group = |candidate: &Spanned<_, _>| {
-                            matches!(
-                                candidate.value,
-                                MusicElement::Note(_)
-                                    | MusicElement::Chord(_)
-                                    | MusicElement::Rest(_)
-                            )
-                        };
-                        let is_transparent = |candidate: &Spanned<_, _>| {
-                            matches!(
-                                candidate.value,
-                                MusicElement::Grace(_)
-                                    | MusicElement::BeamBreak(_)
-                                    | MusicElement::BeamContinuation(_)
-                            )
-                        };
-                        let previous = elements[..index]
-                            .iter()
-                            .rev()
-                            .find(|candidate| !is_transparent(candidate))
-                            .is_some_and(is_timed_group);
-                        let next = elements[index + 1..]
-                            .iter()
-                            .find(|candidate| !is_transparent(candidate))
-                            .is_some_and(is_timed_group);
-                        if !previous || !next {
-                            emitter.emit(Rich::custom(
-                                element.span.clone(),
-                                "broken-rhythm marker must occur between timed note groups",
-                            ));
-                        }
-                    }
-                    _ => {}
                 }
+                MusicElement::BrokenRhythm(_) => {
+                    let is_timed_group = |candidate: &Spanned<_, _>| {
+                        matches!(
+                            candidate.value,
+                            MusicElement::Note(_) | MusicElement::Chord(_) | MusicElement::Rest(_)
+                        )
+                    };
+                    let is_transparent = |candidate: &Spanned<_, _>| {
+                        matches!(
+                            candidate.value,
+                            MusicElement::Grace(_)
+                                | MusicElement::BeamBreak(_)
+                                | MusicElement::BeamContinuation(_)
+                        )
+                    };
+                    let previous = elements[..index]
+                        .iter()
+                        .rev()
+                        .find(|candidate| !is_transparent(candidate))
+                        .is_some_and(is_timed_group);
+                    let next = elements[index + 1..]
+                        .iter()
+                        .find(|candidate| !is_transparent(candidate))
+                        .is_some_and(is_timed_group);
+                    if !previous || !next {
+                        emitter.emit(Rich::custom(
+                            element.span.clone(),
+                            "broken-rhythm marker must occur between timed note groups",
+                        ));
+                    }
+                }
+                _ => {}
             }
-            elements
-        })
+        }
+        elements
+    })
 }
 
 /// Builds a parser for a complete physical music-code line.
@@ -1640,15 +1739,7 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    semantic_music_element_parser()
-        .map_with(|value, extra| Spanned {
-            value,
-            span: extra.span(),
-        })
-        .repeated()
-        .at_least(1)
-        .collect()
-        .map(Line::Music)
+    semantic_music_sequence_parser().map(Line::Music)
 }
 
 /// Requires a physical line to contain a non-whitespace character.

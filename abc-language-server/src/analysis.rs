@@ -716,6 +716,26 @@ mod tests {
     }
 
     #[test]
+    fn analysis_preserves_variant_ending_parser_diagnostics() {
+        let index = LineIndex::new("X:1\nK:C\n:| 2 c\n".to_owned());
+        let analysis = Analysis::new(&index, &PositionEncodingKind::UTF16, Config::default());
+        assert_eq!(analysis.diagnostics.len(), 1);
+        let diagnostic = &analysis.diagnostics[0];
+        assert_eq!(diagnostic.range.start.line, 2);
+        assert_eq!(diagnostic.range.start.character, 3);
+        assert_eq!(diagnostic.range.end.line, 2);
+        assert_eq!(diagnostic.range.end.character, 4);
+        assert_eq!(
+            diagnostic.message,
+            "variant ending 2 must be adjacent to the bar line or begin with '['"
+        );
+        assert_eq!(
+            diagnostic.code,
+            Some(NumberOrString::String("invalid-music".to_owned()))
+        );
+    }
+
+    #[test]
     fn symbols_and_folds_describe_tunes_voices_and_text_blocks() {
         let index = LineIndex::new(
             "%%begintext\nnotes\n%%endtext\nX:7\nT:Example\nV:top\nK:C\nC\n".to_owned(),
