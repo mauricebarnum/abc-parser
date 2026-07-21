@@ -908,6 +908,8 @@ pub enum ErrorKind {
     InvalidFieldOrder,
     /// Recognized syntax is accepted for compatibility but is deprecated.
     DeprecatedSyntax,
+    /// Valid input has a deterministic repair available from a consumer.
+    FixableSyntax,
 }
 
 /// A recoverable syntax error with an exact source location.
