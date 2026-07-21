@@ -34,6 +34,7 @@ use super::FieldParameter;
 use super::FieldValue;
 use super::Fraction;
 use super::FreeText;
+use super::GraceElement;
 use super::GraceGroup;
 use super::KeyAccidental;
 use super::KeySignature;
@@ -397,6 +398,8 @@ where
             Self::Comment(text) => write!(output, "%{}", text.as_ref()),
             Self::Directive(directive) => directive.write_abc(output),
             Self::Field(field) => field.write_abc(output),
+            Self::FieldContinuation(text) => write!(output, "+:{}", text.as_ref()),
+            Self::DeprecatedHistoryContinuation(text) => output.write_str(text.as_ref()),
             Self::Music(elements) => {
                 for element in elements {
                     element.value.write_abc(output)?;
@@ -414,6 +417,8 @@ where
             Self::Comment(text) => write!(emitter, "%{}", text.as_ref()),
             Self::Directive(directive) => emitter.emit(directive),
             Self::Field(field) => emitter.emit(field),
+            Self::FieldContinuation(text) => write!(emitter, "+:{}", text.as_ref()),
+            Self::DeprecatedHistoryContinuation(text) => emitter.write_str(text.as_ref()),
             Self::Music(elements) => {
                 for element in elements {
                     emitter.emit(&element.value)?;
@@ -460,6 +465,7 @@ where
 {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
         match self {
+            Self::Empty => Ok(()),
             Self::Text(text) | Self::Unparsed(text) => output.write_str(text.as_ref()),
             Self::UnitLength(value) => value.write_abc(output),
             Self::Meter(value) => value.write_abc(output),
@@ -475,6 +481,7 @@ where
 
     fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
         match self {
+            Self::Empty => Ok(()),
             Self::Text(text) | Self::Unparsed(text) => emitter.write_str(text.as_ref()),
             Self::UnitLength(value) => emitter.emit(value),
             Self::Meter(value) => emitter.emit(value),
@@ -544,41 +551,63 @@ where
     T: AsRef<str>,
 {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
-        if let Some(prelude) = &self.prelude {
-            write_quoted(prelude.as_ref(), output)?;
-            output.write_char(' ')?;
-        }
-        for (index, beat) in self.beats.iter().enumerate() {
-            if index > 0 {
-                output.write_char(' ')?;
+        match self {
+            Self::MetronomeMark {
+                prelude,
+                beats,
+                bpm,
+                postlude,
+            } => {
+                if let Some(prelude) = prelude {
+                    write_quoted(prelude.as_ref(), output)?;
+                    output.write_char(' ')?;
+                }
+                for (index, beat) in beats.iter().enumerate() {
+                    if index > 0 {
+                        output.write_char(' ')?;
+                    }
+                    beat.write_abc(output)?;
+                }
+                write!(output, "={bpm}")?;
+                if let Some(postlude) = postlude {
+                    output.write_char(' ')?;
+                    write_quoted(postlude.as_ref(), output)?;
+                }
+                Ok(())
             }
-            beat.write_abc(output)?;
+            Self::TextOnly(text) => write_quoted(text.as_ref(), output),
+            Self::Deprecated(text) => output.write_str(text.as_ref()),
         }
-        write!(output, "={}", self.bpm)?;
-        if let Some(postlude) = &self.postlude {
-            output.write_char(' ')?;
-            write_quoted(postlude.as_ref(), output)?;
-        }
-        Ok(())
     }
 
     fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
-        if let Some(prelude) = &self.prelude {
-            write_quoted(prelude.as_ref(), emitter)?;
-            emitter.write_char(' ')?;
-        }
-        for (index, beat) in self.beats.iter().enumerate() {
-            if index > 0 {
-                emitter.write_char(' ')?;
+        match self {
+            Self::MetronomeMark {
+                prelude,
+                beats,
+                bpm,
+                postlude,
+            } => {
+                if let Some(prelude) = prelude {
+                    write_quoted(prelude.as_ref(), emitter)?;
+                    emitter.write_char(' ')?;
+                }
+                for (index, beat) in beats.iter().enumerate() {
+                    if index > 0 {
+                        emitter.write_char(' ')?;
+                    }
+                    emitter.emit(beat)?;
+                }
+                write!(emitter, "={bpm}")?;
+                if let Some(postlude) = postlude {
+                    emitter.write_char(' ')?;
+                    write_quoted(postlude.as_ref(), emitter)?;
+                }
+                Ok(())
             }
-            emitter.emit(beat)?;
+            Self::TextOnly(text) => write_quoted(text.as_ref(), emitter),
+            Self::Deprecated(text) => emitter.write_str(text.as_ref()),
         }
-        write!(emitter, "={}", self.bpm)?;
-        if let Some(postlude) = &self.postlude {
-            emitter.write_char(' ')?;
-            write_quoted(postlude.as_ref(), emitter)?;
-        }
-        Ok(())
     }
 }
 
@@ -1034,8 +1063,8 @@ impl ToAbc for GraceGroup {
         if self.acciaccatura {
             output.write_char('/')?;
         }
-        for note in &self.notes {
-            note.write_abc(output)?;
+        for element in &self.elements {
+            element.write_abc(output)?;
         }
         output.write_char('}')
     }
@@ -1045,10 +1074,26 @@ impl ToAbc for GraceGroup {
         if self.acciaccatura {
             emitter.write_char('/')?;
         }
-        for note in &self.notes {
-            emitter.emit(note)?;
+        for element in &self.elements {
+            emitter.emit(element)?;
         }
         emitter.write_char('}')
+    }
+}
+
+impl ToAbc for GraceElement {
+    fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
+        match self {
+            Self::Note(note) => note.write_abc(output),
+            Self::BrokenRhythm(rhythm) => rhythm.write_abc(output),
+        }
+    }
+
+    fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
+        match self {
+            Self::Note(note) => emitter.emit(note),
+            Self::BrokenRhythm(rhythm) => emitter.emit(rhythm),
+        }
     }
 }
 

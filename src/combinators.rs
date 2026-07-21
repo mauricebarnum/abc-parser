@@ -60,6 +60,7 @@ use super::FieldParameter;
 use super::FieldValue;
 use super::Fraction;
 use super::FreeText;
+use super::GraceElement;
 use super::GraceGroup;
 use super::KeyAccidental;
 use super::KeySignature;
@@ -97,7 +98,15 @@ use super::VoiceDefinition;
 use super::field_kind;
 
 type ParserDiagnostics<S> = (Vec<ParseError<S>>, Vec<ParseWarning<S>>);
-type ParserState<S> = extra::SimpleState<ParserDiagnostics<S>>;
+
+/// Mutable diagnostics and file-wide interpretation selected while parsing.
+#[derive(Default)]
+pub struct ParserStateValue<S> {
+    errors: Vec<ParseError<S>>,
+    warnings: Vec<ParseWarning<S>>,
+}
+
+type ParserState<S> = extra::SimpleState<ParserStateValue<S>>;
 
 type Extra<'src, I> = extra::Full<
     Rich<'src, char, <I as Input<'src>>::Span>,
@@ -225,6 +234,28 @@ where
         .as_context()
 }
 
+/// Parses an L: unit length, whose whole-note form may omit `/1`.
+fn unit_length<'src, I>() -> impl Parser<'src, I, Fraction, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    unsigned()
+        .then(just('/').ignore_then(unsigned()).or_not())
+        .try_map(|(numerator, denominator), span| {
+            let denominator = denominator.unwrap_or(1);
+            (denominator != 0)
+                .then_some(Fraction {
+                    numerator,
+                    denominator,
+                })
+                .ok_or_else(|| Rich::custom(span, "fraction denominator must not be zero"))
+        })
+        .then_ignore(one_of(" \t%]\r\n").rewind().ignored().or(end()))
+        .labelled("unit note length such as 1/8 or 1")
+        .as_context()
+}
+
 /// Parses an optional ABC note-length suffix and computes its rational value.
 fn note_length<'src, I>() -> impl Parser<'src, I, NoteLength, Extra<'src, I>> + Clone
 where
@@ -327,19 +358,15 @@ fn octave_modifier<'src, I>() -> impl Parser<'src, I, i8, Extra<'src, I>> + Clon
 where
     I: ValueInput<'src, Token = char>,
 {
-    choice((
-        just('\'')
-            .repeated()
-            .at_least(1)
-            .count()
-            .map(|count| i8::try_from(count).unwrap_or(i8::MAX)),
-        just(',')
-            .repeated()
-            .at_least(1)
-            .count()
-            .map(|count| -i8::try_from(count).unwrap_or(i8::MAX)),
-        empty().to(0),
-    ))
+    empty()
+        .to(0_i8)
+        .foldl(one_of("',").repeated(), |octave, marker| {
+            if marker == '\'' {
+                octave.saturating_add(1)
+            } else {
+                octave.saturating_sub(1)
+            }
+        })
 }
 
 /// Parses a pitched note directly into semantic pitch and duration values.
@@ -416,6 +443,23 @@ where
         .as_context()
 }
 
+/// Parses a quoted text body into text owned directly by the AST.
+fn quoted_owned_text<'src, I>() -> impl Parser<'src, I, String, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+{
+    just('"')
+        .ignore_then(
+            any()
+                .filter(|character| !matches!(character, '"' | '\r' | '\n'))
+                .repeated()
+                .collect::<String>(),
+        )
+        .then_ignore(just('"'))
+        .labelled("quoted text")
+        .as_context()
+}
+
 /// Parses a non-whitespace token as a source span.
 fn token_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
 where
@@ -436,7 +480,53 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
+    choice((
+        just('\\').then(line_character()).ignored(),
+        any()
+            .filter(|character| !matches!(character, '%' | '\r' | '\n'))
+            .ignored(),
+    ))
+    .repeated()
+    .to_span()
+    .map(SourceText::Span)
+}
+
+/// Parses the uninterpreted remainder of a comment line.
+fn comment_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
     line_character().repeated().to_span().map(SourceText::Span)
+}
+
+/// Parses a comment line, including the permitted leading horizontal space.
+fn comment_line<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    horizontal_space()
+        .ignore_then(just('%').then_ignore(just('%').not()))
+        .ignore_then(comment_text())
+        .map(Line::Comment)
+}
+
+/// Consumes optional trailing whitespace and an end-of-line comment.
+pub fn trailing_comment<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    horizontal_space()
+        .then(
+            just('%')
+                .then_ignore(just('%').not())
+                .ignore_then(comment_text())
+                .or_not(),
+        )
+        .ignored()
 }
 
 /// Parses a named or positional key/voice parameter without copying its text.
@@ -533,30 +623,57 @@ where
     ))
 }
 
-/// Parses a Q: metronome mark while retaining quoted descriptions as spans.
+/// Parses current and deprecated Q: tempo forms.
 fn tempo<'src, I>() -> impl Parser<'src, I, Tempo<SourceText<I::Span>>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    quoted_text()
+    let owned_text = quoted_owned_text().map(SourceText::Synthesized);
+    let mark = fraction()
+        .separated_by(one_of(" \t").repeated().at_least(1))
+        .at_least(1)
+        .at_most(4)
+        .collect::<Vec<_>>()
+        .then_ignore(just('='))
+        .then(unsigned());
+    let described_mark = owned_text
+        .clone()
         .then_ignore(horizontal_space())
         .or_not()
-        .then(
-            fraction()
-                .separated_by(one_of(" \t").repeated().at_least(1))
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(just('='))
-        .then(unsigned())
-        .then(horizontal_space().ignore_then(quoted_text()).or_not())
-        .map(|(((prelude, beats), bpm), postlude)| Tempo {
+        .then(mark)
+        .then(horizontal_space().ignore_then(owned_text.clone()).or_not())
+        .map(|((prelude, (beats, bpm)), postlude)| Tempo::MetronomeMark {
             prelude,
             beats,
             bpm,
             postlude,
-        })
+        });
+    let text_only = owned_text.map(Tempo::TextOnly);
+    let digits = any()
+        .filter(char::is_ascii_digit)
+        .repeated()
+        .at_least(1)
+        .ignored();
+    let deprecated = choice((
+        just('C')
+            .then_ignore(horizontal_space())
+            .then_ignore(just('='))
+            .then_ignore(horizontal_space())
+            .ignore_then(digits),
+        digits,
+    ))
+    .to_span()
+    .then_ignore(one_of(" \t%]\r\n").rewind().ignored().or(end()))
+    .map_with(|span: I::Span, extra| {
+        extra.state().0.warnings.push(ParseWarning {
+            kind: ErrorKind::DeprecatedSyntax,
+            message: "deprecated Q: tempo syntax is retained without interpretation".to_owned(),
+            span: span.clone(),
+        });
+        Tempo::Deprecated(SourceText::Span(span))
+    });
+    choice((described_mark, text_only, deprecated))
 }
 
 /// Parses a K: tonic, optional mode, and key parameters.
@@ -566,6 +683,48 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
+    let parameter_tail = one_of(" \t")
+        .repeated()
+        .at_least(1)
+        .ignore_then(field_parameter())
+        .repeated()
+        .collect::<Vec<_>>();
+    let boundary = one_of(" \t]").rewind().ignored().or(end());
+    let clef_parameter = choice((
+        just("treble"),
+        just("bass"),
+        just("baritone"),
+        just("tenor"),
+        just("alto"),
+        just("mezzosoprano"),
+        just("soprano"),
+        just("perc"),
+    ))
+    .then(
+        any()
+            .filter(|character: &char| character.is_ascii_digit() || matches!(character, '+' | '-'))
+            .repeated(),
+    )
+    .then_ignore(boundary)
+    .to_span()
+    .map(SourceText::Span)
+    .map(|value| FieldParameter { name: None, value });
+    let named_parameter = any()
+        .filter(|character: &char| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+        })
+        .repeated()
+        .at_least(1)
+        .then_ignore(just('='))
+        .rewind()
+        .ignore_then(field_parameter());
+    let keyless = choice((named_parameter, clef_parameter))
+        .then(parameter_tail.clone())
+        .map(|(first, rest)| KeySignature {
+            tonic: None,
+            mode: SourceText::Synthesized(String::new()),
+            parameters: std::iter::once(first).chain(rest).collect(),
+        });
     let tonic = pitch_letter()
         .map(|letter| letter.class)
         .then(
@@ -577,7 +736,7 @@ where
         )
         .map(|(class, accidental)| Some(KeyTonic { class, accidental }));
     let no_tonic = choice((just("none"), just("perc"), just("HP"), just("Hp"))).to(None);
-    choice((tonic, no_tonic))
+    let pitched_or_special = choice((tonic, no_tonic))
         .then(
             any()
                 .filter(char::is_ascii_alphabetic)
@@ -587,19 +746,13 @@ where
                 .map(SourceText::Span)
                 .or_not(),
         )
-        .then(
-            one_of(" \t")
-                .repeated()
-                .at_least(1)
-                .ignore_then(field_parameter())
-                .repeated()
-                .collect::<Vec<_>>(),
-        )
+        .then(parameter_tail)
         .map(|((tonic, mode), parameters)| KeySignature {
             tonic,
             mode: mode.unwrap_or_else(|| SourceText::Synthesized(String::new())),
             parameters,
-        })
+        });
+    choice((keyless, pitched_or_special))
 }
 
 /// Parses a V: identifier and its optional properties.
@@ -645,7 +798,22 @@ where
     .repeated()
     .at_least(1)
     .collect::<Vec<_>>()
-    .map(|tokens| PartSequence { tokens })
+    .try_map(|tokens, span| {
+        let mut depth = 0_u32;
+        for token in &tokens {
+            match token {
+                PartToken::Open => depth = depth.saturating_add(1),
+                PartToken::Close if depth == 0 => {
+                    return Err(Rich::custom(span, "part sequence has an unmatched ')'"));
+                }
+                PartToken::Close => depth -= 1,
+                _ => {}
+            }
+        }
+        (depth == 0)
+            .then_some(PartSequence { tokens })
+            .ok_or_else(|| Rich::custom(span, "part sequence has an unclosed '('"))
+    })
 }
 
 /// Parses structured fields accepted both physically and inline.
@@ -670,11 +838,18 @@ where
             "inline X: reference number",
         ),
     };
+    let empty_value = choice((just('K'), just('X')))
+        .then_ignore(just(':'))
+        .then_ignore(horizontal_space())
+        .then_ignore(one_of("%]\r\n").rewind().ignored().or(end()))
+        .map(|key| field(key, FieldValue::Empty));
     choice((
+        empty_value,
         just('L')
             .then_ignore(just(':'))
             .then(
-                horizontal_space().ignore_then(fraction().labelled(unit_length_label).as_context()),
+                horizontal_space()
+                    .ignore_then(unit_length().labelled(unit_length_label).as_context()),
             )
             .map(|(key, value)| field(key, FieldValue::UnitLength(value))),
         just('M')
@@ -687,9 +862,33 @@ where
             .map(|(key, value)| field(key, FieldValue::Key(value))),
         just('X')
             .then_ignore(just(':'))
-            .then(horizontal_space().ignore_then(unsigned().labelled(reference_label).as_context()))
+            .then(
+                horizontal_space().ignore_then(
+                    unsigned()
+                        .try_map(|value, span| {
+                            (value > 0).then_some(value).ok_or_else(|| {
+                                Rich::custom(span, "reference number must be positive")
+                            })
+                        })
+                        .labelled(reference_label)
+                        .as_context(),
+                ),
+            )
             .map(|(key, value)| field(key, FieldValue::Reference(value))),
     ))
+}
+
+/// Parses a `+:` continuation of the preceding information field.
+fn field_continuation<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just("+:")
+        .ignore_then(remaining_text())
+        .then_ignore(trailing_comment())
+        .map(Line::FieldContinuation)
 }
 
 /// Builds strict structured and textual information-field alternatives.
@@ -725,8 +924,11 @@ where
         just('U')
             .then_ignore(just(':'))
             .then(
-                horizontal_space()
-                    .ignore_then(any().then_ignore(horizontal_space()).then_ignore(just('='))),
+                horizontal_space().ignore_then(
+                    one_of("HIJKLMNOPQRSTUVWhijklmnopqrstuvw~")
+                        .then_ignore(horizontal_space())
+                        .then_ignore(just('=')),
+                ),
             )
             .then(horizontal_space().ignore_then(remaining_text()))
             .map(|((key, symbol), replacement)| {
@@ -770,7 +972,22 @@ where
         .filter(|key: &char| key.is_ascii_alphabetic() && !has_structured_field_parser(*key))
         .then_ignore(just(':'))
         .then(remaining_text())
-        .map(|(key, value)| field(key, FieldValue::Text(value)));
+        .map_with(|(key, value), extra| {
+            let message = match key {
+                'A' => Some("deprecated A: area field; use O: origin instead"),
+                'E' => Some("deprecated E: element-spacing field is retained as text"),
+                _ => None,
+            };
+            if let Some(message) = message {
+                let span = extra.span();
+                extra.state().0.warnings.push(ParseWarning {
+                    kind: ErrorKind::DeprecatedSyntax,
+                    message: message.to_owned(),
+                    span,
+                });
+            }
+            field(key, FieldValue::Text(value))
+        });
     choice((structured, textual))
 }
 
@@ -821,6 +1038,7 @@ where
             })
         });
     just('[')
+        .or_not()
         .ignore_then(
             selector
                 .separated_by(just(','))
@@ -869,13 +1087,28 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
+    let item = choice((
+        note().map(GraceElement::Note),
+        broken_rhythm().map(GraceElement::BrokenRhythm),
+    ));
     just('/')
         .or_not()
-        .then(note().repeated().at_least(1).collect::<Vec<_>>())
+        .then(item.repeated().at_least(1).collect::<Vec<_>>())
         .delimited_by(just('{'), just('}'))
-        .map(|(slash, notes)| GraceGroup {
-            acciaccatura: slash.is_some(),
-            notes,
+        .validate(|(slash, elements), extra, emitter| {
+            if !elements
+                .iter()
+                .any(|element| matches!(element, GraceElement::Note(_)))
+            {
+                emitter.emit(Rich::custom(
+                    extra.span(),
+                    "grace group must contain a note",
+                ));
+            }
+            GraceGroup {
+                acciaccatura: slash.is_some(),
+                elements,
+            }
         })
         .labelled("grace group")
         .as_context()
@@ -888,8 +1121,39 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
+    let additional_structured = choice((
+        just('Q')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(tempo().labelled("inline Q: tempo").as_context()))
+            .map(|(key, value)| field(key, FieldValue::Tempo(value))),
+        just('V')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(voice().labelled("inline V: voice").as_context()))
+            .map(|(key, value)| field(key, FieldValue::Voice(value))),
+        just('P')
+            .then_ignore(just(':'))
+            .then(horizontal_space().ignore_then(parts().labelled("inline P: part").as_context()))
+            .map(|(key, value)| field(key, FieldValue::Parts(value))),
+    ));
+    let textual = any()
+        .filter(|key: &char| {
+            key.is_ascii_alphabetic() && !matches!(*key, 'L' | 'M' | 'K' | 'X' | 'Q' | 'V' | 'P')
+        })
+        .then_ignore(just(':'))
+        .then(
+            any()
+                .filter(|character| !matches!(character, ']' | '\r' | '\n'))
+                .repeated()
+                .to_span()
+                .map(SourceText::Span),
+        )
+        .map(|(key, value)| field(key, FieldValue::Text(value)));
     just('[')
-        .ignore_then(common_structured_field_parser(FieldContext::Inline))
+        .ignore_then(choice((
+            common_structured_field_parser(FieldContext::Inline),
+            additional_structured,
+            textual,
+        )))
         .then_ignore(just(']'))
         .labelled("inline field")
         .as_context()
@@ -906,8 +1170,10 @@ where
         just(delimiter)
             .ignore_then(
                 any()
-                    .filter(move |character| {
-                        *character != delimiter && !matches!(character, '\r' | '\n')
+                    .filter(move |character: &char| {
+                        *character != delimiter
+                            && !character.is_whitespace()
+                            && !matches!(character, '[' | ']' | '|' | ':' | '\r' | '\n')
                     })
                     .repeated()
                     .at_least(1)
@@ -1079,6 +1345,7 @@ where
         bar().map(MusicElement::Bar),
         grace().map(MusicElement::Grace),
         annotation().map(MusicElement::Annotation),
+        just(".-").to(MusicElement::Tie(Tie { dotted: true })),
         decoration().map(MusicElement::Decoration),
         tuplet().map(MusicElement::Tuplet),
         just("(&").to(MusicElement::Overlay(Overlay::Start)),
@@ -1097,7 +1364,6 @@ where
             opening: false,
             dotted: false,
         })),
-        just(".-").to(MusicElement::Tie(Tie { dotted: true })),
         just('-').to(MusicElement::Tie(Tie { dotted: false })),
         broken_rhythm().map(MusicElement::BrokenRhythm),
         just('`')
@@ -1105,6 +1371,8 @@ where
             .at_least(1)
             .count()
             .map(MusicElement::BeamContinuation),
+        one_of("#*;?@")
+            .map_with(|_, extra| MusicElement::Extension(SourceText::Span(extra.span()))),
     ))
     .labelled("music element")
     .as_context()
@@ -1118,6 +1386,7 @@ where
     I::Span: Clone,
 {
     let fallback = line_character()
+        .filter(|character| *character != '%')
         .map_with(|_, extra| MusicElement::Extension(SourceText::Span(extra.span())));
     semantic_music_element_parser()
         .recover_with(via_parser(fallback))
@@ -1137,8 +1406,8 @@ where
     diagnostic_music_element_parser::<I>()
 }
 
-/// Builds a parser for a complete physical music-code line.
-pub fn music_line_parser<'src, I>()
+/// Builds a recovering music-line parser with sequence-level validation.
+fn recovering_music_line_parser<'src, I>()
 -> impl Parser<'src, I, ParsedMusic<I::Span>, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
@@ -1147,7 +1416,72 @@ where
     diagnostic_music_element_parser::<I>()
         .repeated()
         .at_least(1)
-        .collect()
+        .collect::<Vec<_>>()
+        .validate(|elements, _, emitter| {
+            for (index, element) in elements.iter().enumerate() {
+                match element.value {
+                    MusicElement::Tie(_) => {
+                        let attached = index.checked_sub(1).is_some_and(|previous| {
+                            matches!(
+                                elements[previous].value,
+                                MusicElement::Note(_) | MusicElement::Chord(_)
+                            )
+                        });
+                        if !attached {
+                            emitter.emit(Rich::custom(
+                                element.span.clone(),
+                                "tie must be adjacent to the preceding note or chord",
+                            ));
+                        }
+                    }
+                    MusicElement::BrokenRhythm(_) => {
+                        let is_timed_group = |candidate: &Spanned<_, _>| {
+                            matches!(
+                                candidate.value,
+                                MusicElement::Note(_)
+                                    | MusicElement::Chord(_)
+                                    | MusicElement::Rest(_)
+                            )
+                        };
+                        let is_transparent = |candidate: &Spanned<_, _>| {
+                            matches!(
+                                candidate.value,
+                                MusicElement::Grace(_)
+                                    | MusicElement::BeamBreak(_)
+                                    | MusicElement::BeamContinuation(_)
+                            )
+                        };
+                        let previous = elements[..index]
+                            .iter()
+                            .rev()
+                            .find(|candidate| !is_transparent(candidate))
+                            .is_some_and(is_timed_group);
+                        let next = elements[index + 1..]
+                            .iter()
+                            .find(|candidate| !is_transparent(candidate))
+                            .is_some_and(is_timed_group);
+                        if !previous || !next {
+                            emitter.emit(Rich::custom(
+                                element.span.clone(),
+                                "broken-rhythm marker must occur between timed note groups",
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            elements
+        })
+}
+
+/// Builds a parser for a complete physical music-code line.
+pub fn music_line_parser<'src, I>()
+-> impl Parser<'src, I, ParsedMusic<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    recovering_music_line_parser()
 }
 
 /// Builds a strict parser for one %% directive using span-backed text.
@@ -1209,16 +1543,20 @@ where
 {
     let directive_fallback = just("%%")
         .ignore_then(remaining_text())
+        .then_ignore(trailing_comment())
         .map(Line::DirectiveText);
     choice((
-        directive_parser().map(Line::Directive),
+        directive_parser()
+            .then_ignore(trailing_comment())
+            .map(Line::Directive),
         directive_fallback,
-        just('%').ignore_then(remaining_text()).map(Line::Comment),
-        recovering_field_parser().map(Line::Field),
-        diagnostic_music_element_parser::<I>()
-            .repeated()
-            .at_least(1)
-            .collect()
+        comment_line(),
+        field_continuation(),
+        recovering_field_parser()
+            .then_ignore(trailing_comment())
+            .map(Line::Field),
+        recovering_music_line_parser()
+            .then_ignore(trailing_comment())
             .map(Line::Music),
     ))
 }
@@ -1232,18 +1570,21 @@ where
 {
     let directive_fallback = just("%%")
         .ignore_then(remaining_text())
+        .then_ignore(trailing_comment())
         .map(Line::DirectiveText);
     let directive = directive_parser()
+        .then_ignore(trailing_comment())
         .map(Line::Directive)
         .recover_with(via_parser(directive_fallback));
     choice((
         directive,
-        just('%').ignore_then(remaining_text()).map(Line::Comment),
-        recovering_field_parser().map(Line::Field),
-        diagnostic_music_element_parser::<I>()
-            .repeated()
-            .at_least(1)
-            .collect()
+        comment_line(),
+        field_continuation(),
+        recovering_field_parser()
+            .then_ignore(trailing_comment())
+            .map(Line::Field),
+        recovering_music_line_parser()
+            .then_ignore(trailing_comment())
             .map(Line::Music),
     ))
 }
@@ -1257,12 +1598,18 @@ where
 {
     let directive_fallback = just("%%")
         .ignore_then(remaining_text())
+        .then_ignore(trailing_comment())
         .map(Line::DirectiveText);
     choice((
-        directive_parser().map(Line::Directive),
+        directive_parser()
+            .then_ignore(trailing_comment())
+            .map(Line::Directive),
         directive_fallback,
-        just('%').ignore_then(remaining_text()).map(Line::Comment),
-        recovering_field_parser().map(Line::Field),
+        comment_line(),
+        field_continuation(),
+        recovering_field_parser()
+            .then_ignore(trailing_comment())
+            .map(Line::Field),
         line_character()
             .repeated()
             .at_least(1)
@@ -1535,13 +1882,7 @@ where
             span: text.span,
         })
     });
-    let comment = spanned_nonblank_line::<I, _>(
-        just('%')
-            .then_ignore(just('%').not())
-            .ignore_then(remaining_text())
-            .map(Line::Comment),
-    )
-    .map(|line| {
+    let comment = spanned_nonblank_line::<I, _>(comment_line()).map(|line| {
         let Line::Comment(text) = line.value else {
             unreachable!("comment parser only accepts comments")
         };
@@ -1587,12 +1928,7 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
-    let comment = spanned_nonblank_line::<I, _>(
-        just('%')
-            .then_ignore(just('%').not())
-            .ignore_then(remaining_text())
-            .map(Line::Comment),
-    );
+    let comment = spanned_nonblank_line::<I, _>(comment_line());
     let possible_music = comment
         .then_ignore(newline())
         .repeated()
@@ -1615,7 +1951,7 @@ where
         )
         .map_with(|(possible_music, (first, rest)), extra| {
             if let Some(span) = possible_music {
-                extra.state().0.1.push(ParseWarning {
+                extra.state().0.warnings.push(ParseWarning {
                     kind: ErrorKind::MissingReference,
                     message: "block parses as music but has no leading information field; treating it as free text"
                         .to_owned(),
@@ -1630,6 +1966,59 @@ where
         .boxed()
 }
 
+/// Parses an `H:` field and its deprecated implicit continuation lines.
+fn deprecated_history_group_parser<'src, I>()
+-> impl Parser<'src, I, Vec<ParsedTuneUnit<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    let field_start = any()
+        .filter(char::is_ascii_alphabetic)
+        .then_ignore(just(':'))
+        .rewind();
+    let history = spanned_nonblank_line::<I, _>(
+        just("H:")
+            .rewind()
+            .ignore_then(field_parser())
+            .then_ignore(trailing_comment())
+            .map(Line::Field),
+    );
+    let continuation = spanned_nonblank_line::<I, _>(
+        field_start
+            .not()
+            .ignore_then(
+                line_character()
+                    .repeated()
+                    .at_least(1)
+                    .to_span()
+                    .map(SourceText::Span),
+            )
+            .map(Line::DeprecatedHistoryContinuation),
+    );
+
+    history
+        .then(
+            newline()
+                .ignore_then(continuation)
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .map_with(|(history, continuations), extra| {
+            let span = extra.span();
+            extra.state().0.warnings.push(ParseWarning {
+                kind: ErrorKind::DeprecatedSyntax,
+                message: "deprecated implicit multiline H: history syntax is retained as raw text"
+                    .to_owned(),
+                span,
+            });
+            std::iter::once(ParsedTuneUnit::Line(history))
+                .chain(continuations.into_iter().map(ParsedTuneUnit::Line))
+                .collect()
+        })
+}
+
 /// Parses a field-led block into semantic tune units before header resolution.
 fn tune_candidate_parser<'src, I>()
 -> impl Parser<'src, I, ParsedTuneCandidate<I::Span>, Extra<'src, I>> + Clone
@@ -1639,12 +2028,7 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
-    let comment = spanned_nonblank_line::<I, _>(
-        just('%')
-            .then_ignore(just('%').not())
-            .ignore_then(remaining_text())
-            .map(Line::Comment),
-    );
+    let comment = spanned_nonblank_line::<I, _>(comment_line());
     let tune_line =
         spanned_nonblank_line::<I, _>(tune_line_parser()).validate(|line, _, emitter| {
             if matches!(line.value, Line::DirectiveText(_)) {
@@ -1655,12 +2039,14 @@ where
             }
             line
         });
-    let ordinary_unit = tune_line.map(ParsedTuneUnit::Line);
+    let ordinary_unit = tune_line.map(|line| vec![ParsedTuneUnit::Line(line)]);
     let unit = choice((
-        typeset_block_parser::<I>().map(ParsedTuneUnit::Typeset),
-        inline_typeset_parser::<I>().map(ParsedTuneUnit::Typeset),
-        ordinary_unit.clone(),
-    ));
+        deprecated_history_group_parser::<I>(),
+        typeset_block_parser::<I>().map(|text| vec![ParsedTuneUnit::Typeset(text)]),
+        inline_typeset_parser::<I>().map(|text| vec![ParsedTuneUnit::Typeset(text)]),
+        ordinary_unit,
+    ))
+    .boxed();
     let field_start = any()
         .filter(char::is_ascii_alphabetic)
         .then_ignore(just(':'))
@@ -1672,12 +2058,15 @@ where
         .collect::<Vec<_>>()
         .then(
             field_start
-                .ignore_then(ordinary_unit)
+                .ignore_then(unit.clone())
                 .then(newline().ignore_then(unit).repeated().collect::<Vec<_>>()),
         )
         .map(|(leading_comments, (first, rest))| ParsedTuneCandidate {
             leading_comments,
-            units: std::iter::once(first).chain(rest).collect(),
+            units: first
+                .into_iter()
+                .chain(rest.into_iter().flatten())
+                .collect(),
         })
         // Tune candidates combine the largest line grammars; cap their type here.
         .boxed()
@@ -1687,7 +2076,9 @@ where
 fn is_header_candidate<S>(candidate: &ParsedTuneCandidate<S>) -> bool {
     candidate.units.iter().all(|unit| match unit {
         ParsedTuneUnit::Line(line) => match &line.value {
-            Line::Comment(_) => true,
+            Line::Comment(_)
+            | Line::FieldContinuation(_)
+            | Line::DeprecatedHistoryContinuation(_) => true,
             Line::Directive(directive) => directive.kind == DirectiveKind::Other,
             Line::Field(field) => !is_tune_only_header_field(field.kind),
             _ => false,
@@ -1715,7 +2106,7 @@ where
     if let (Some((first_kind, _)), Some((_, span))) = (first_field, reference)
         && first_kind != FieldKind::Reference
     {
-        state.0.1.push(ParseWarning {
+        state.0.warnings.push(ParseWarning {
             kind: ErrorKind::InvalidFieldOrder,
             message: "X: reference field should be the first information field in a tune"
                 .to_owned(),
@@ -1750,7 +2141,7 @@ where
             .find(|(kind, _)| *kind == FieldKind::Key),
     ) && *last_kind != FieldKind::Key
     {
-        state.0.1.push(ParseWarning {
+        state.0.warnings.push(ParseWarning {
             kind: ErrorKind::InvalidFieldOrder,
             message: "K: key field should be the last information field in a tune header"
                 .to_owned(),
@@ -1778,23 +2169,40 @@ where
         ParsedTuneUnit::Line(line) => line.span.clone(),
         ParsedTuneUnit::Typeset(text) => text.span.clone(),
     };
-    let has_reference = candidate.units.iter().any(|unit| {
-        matches!(
-            unit,
-            ParsedTuneUnit::Line(Spanned {
-                value: Line::Field(Field { key: 'X', .. }),
-                ..
-            })
-        )
-    });
-    if options.is_strict() && !has_reference {
-        state.0.0.push(ParseError {
-            kind: ErrorKind::MissingReference,
-            message: "tune is missing required X: reference field".to_owned(),
-            span: first_span.clone(),
-        });
-    }
     if options.is_strict() {
+        let fields = candidate.units.iter().filter_map(|unit| match unit {
+            ParsedTuneUnit::Line(Spanned {
+                value: Line::Field(field),
+                span,
+            }) => Some((field.kind, span)),
+            _ => None,
+        });
+        let references = fields
+            .clone()
+            .filter(|(kind, _)| *kind == FieldKind::Reference)
+            .collect::<Vec<_>>();
+        if references.is_empty() {
+            state.0.errors.push(ParseError {
+                kind: ErrorKind::MissingReference,
+                message: "tune is missing required X: reference field".to_owned(),
+                span: first_span.clone(),
+            });
+        } else if references.len() > 1 {
+            state.0.errors.push(ParseError {
+                kind: ErrorKind::InvalidField,
+                message: "tune contains more than one X: reference field".to_owned(),
+                span: references[1].1.clone(),
+            });
+        }
+        for (kind, name) in [(FieldKind::Title, "T: title"), (FieldKind::Key, "K: key")] {
+            if !fields.clone().any(|(field_kind, _)| field_kind == kind) {
+                state.0.errors.push(ParseError {
+                    kind: ErrorKind::InvalidField,
+                    message: format!("tune is missing required {name} field"),
+                    span: first_span.clone(),
+                });
+            }
+        }
         validate_tune_header_order(&candidate.units, state);
     }
     let lines = candidate
@@ -1885,9 +2293,9 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let comment_value = just('%')
-        .then_ignore(just('%').not())
-        .ignore_then(remaining_text());
+    let comment_value = horizontal_space()
+        .ignore_then(just('%').then_ignore(just('%').not()))
+        .ignore_then(comment_text());
     let directive_value =
         directive_parser().filter(|directive| directive.kind == DirectiveKind::Other);
     let field_start = any()
@@ -1958,7 +2366,11 @@ fn newline<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
 {
-    just('\r').or_not().then_ignore(just('\n')).ignored()
+    choice((
+        just("\r\n").ignored(),
+        just('\n').ignored(),
+        just('\r').ignored(),
+    ))
 }
 
 /// Converts tune-leading comments into file-level comment items.
@@ -2022,8 +2434,23 @@ fn assemble_document<S>(
     }
 }
 
-/// Builds a complete-document parser with explicit text-retention behavior.
-fn document_parser<'src, I>(
+/// Selects strict interpretation when the first line declares ABC 2.1 or newer.
+fn strict_version_marker<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just("%abc-")
+        .ignore_then(unsigned().then(just('.').ignore_then(unsigned()).or_not()))
+        .filter(|(major, minor)| *major > 2 || (*major == 2 && minor.unwrap_or(0) >= 1))
+        .then_ignore(line_character().repeated())
+        .then_ignore(newline().rewind().or(end()))
+        .rewind()
+        .ignored()
+}
+
+/// Builds the document body after BOM and version interpretation.
+fn document_body_parser<'src, I>(
     options: ParserOptions,
 ) -> impl Parser<'src, I, ParsedDocument<I::Span>, Extra<'src, I>> + Clone
 where
@@ -2058,6 +2485,26 @@ where
         .then_ignore(horizontal_space())
         .then_ignore(end())
         .map(|(first, rest)| assemble_document(first, rest))
+        .boxed()
+}
+
+/// Builds a complete-document parser with version-selected strictness.
+fn document_parser<'src, I>(
+    options: ParserOptions,
+) -> impl Parser<'src, I, ParsedDocument<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
+    just('\u{feff}')
+        .or_not()
+        .ignored()
+        .ignore_then(choice((
+            strict_version_marker().ignore_then(document_body_parser(options.strict(true))),
+            document_body_parser(options),
+        )))
         // Cap the public parse entry point's monomorphized type and codegen cost.
         .boxed()
 }
@@ -2073,7 +2520,10 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
-    let mut state = extra::SimpleState((Vec::new(), Vec::new()));
+    let mut state = extra::SimpleState(ParserStateValue {
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    });
     let result = document_parser(options).parse_with_state(input, &mut state);
-    (result, state.0)
+    (result, (state.0.errors, state.0.warnings))
 }

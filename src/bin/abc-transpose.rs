@@ -548,8 +548,10 @@ fn transpose_music_element(
             Ok(())
         }
         MusicElement::Grace(group) => {
-            for note in &mut group.notes {
-                state.transpose_pitch(&mut note.pitch)?;
+            for element in &mut group.elements {
+                if let abc_parser::GraceElement::Note(note) = element {
+                    state.transpose_pitch(&mut note.pitch)?;
+                }
             }
             Ok(())
         }

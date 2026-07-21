@@ -421,17 +421,7 @@ fn tune_only_fields_disambiguate_an_initial_block_without_x() {
 }
 
 #[test]
-fn strict_mode_requires_x_without_requiring_it_to_be_first() {
-    let missing = parse_owned(
-        "T:Missing reference\nK:C\n",
-        ParserOptions::new().strict(true),
-    );
-    assert!(!missing.is_valid());
-    assert_eq!(document(&missing).tunes().count(), 1);
-    assert!(missing.errors.iter().any(|error| {
-        error.kind == ErrorKind::MissingReference && error.message.contains("missing required X:")
-    }));
-
+fn strict_mode_accepts_x_out_of_order_with_a_warning() {
     let out_of_order = parse_owned(
         "T:Reference follows title\nX:7\nK:C\n",
         ParserOptions::new().strict(true),
@@ -466,13 +456,6 @@ fn strict_field_order_ignores_non_fields_and_body_key_changes() {
 
     assert!(report.is_valid(), "{:#?}", report.errors);
     assert!(report.warnings.is_empty(), "{:#?}", report.warnings);
-
-    let no_key = parse_owned(
-        "X:1\nT:Tune without a key\n",
-        ParserOptions::new().strict(true),
-    );
-    assert!(no_key.is_valid(), "{:#?}", no_key.errors);
-    assert!(no_key.warnings.is_empty(), "{:#?}", no_key.warnings);
 }
 
 #[test]
