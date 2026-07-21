@@ -18,6 +18,11 @@ name = "abc-transpose"
 path = "src/bin/abc-transpose.rs"
 doc = true
 
+[[bin]]
+name = "abc-lint"
+path = "src/bin/abc-lint.rs"
+doc = true
+
 [lints.rust]
 missing_docs = "deny"
 unsafe_code = "deny"
