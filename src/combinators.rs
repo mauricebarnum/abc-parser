@@ -582,6 +582,24 @@ const fn has_structured_field_parser(key: char) -> bool {
     )
 }
 
+/// Parses one fixed-key field using its dedicated value grammar.
+fn structured_field_parser<'src, I, O, P, F>(
+    key: char,
+    value: P,
+    into_value: F,
+) -> impl Parser<'src, I, Field<SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    P: Parser<'src, I, O, Extra<'src, I>> + Clone,
+    F: Fn(O) -> FieldValue<SourceText<I::Span>> + Clone,
+{
+    just(key)
+        .then_ignore(just(':'))
+        .ignore_then(horizontal_space().ignore_then(value))
+        .map(move |value| field(key, into_value(value)))
+}
+
 /// Parses the simple and additive forms of an M: meter value.
 fn meter<'src, I>() -> impl Parser<'src, I, Meter, Extra<'src, I>> + Clone
 where
@@ -845,36 +863,33 @@ where
         .map(|key| field(key, FieldValue::Empty));
     choice((
         empty_value,
-        just('L')
-            .then_ignore(just(':'))
-            .then(
-                horizontal_space()
-                    .ignore_then(unit_length().labelled(unit_length_label).as_context()),
-            )
-            .map(|(key, value)| field(key, FieldValue::UnitLength(value))),
-        just('M')
-            .then_ignore(just(':'))
-            .then(horizontal_space().ignore_then(meter().labelled(meter_label).as_context()))
-            .map(|(key, value)| field(key, FieldValue::Meter(value))),
-        just('K')
-            .then_ignore(just(':'))
-            .then(horizontal_space().ignore_then(key_signature().labelled(key_label).as_context()))
-            .map(|(key, value)| field(key, FieldValue::Key(value))),
-        just('X')
-            .then_ignore(just(':'))
-            .then(
-                horizontal_space().ignore_then(
-                    unsigned()
-                        .try_map(|value, span| {
-                            (value > 0).then_some(value).ok_or_else(|| {
-                                Rich::custom(span, "reference number must be positive")
-                            })
-                        })
-                        .labelled(reference_label)
-                        .as_context(),
-                ),
-            )
-            .map(|(key, value)| field(key, FieldValue::Reference(value))),
+        structured_field_parser(
+            'L',
+            unit_length().labelled(unit_length_label).as_context(),
+            FieldValue::UnitLength,
+        ),
+        structured_field_parser(
+            'M',
+            meter().labelled(meter_label).as_context(),
+            FieldValue::Meter,
+        ),
+        structured_field_parser(
+            'K',
+            key_signature().labelled(key_label).as_context(),
+            FieldValue::Key,
+        ),
+        structured_field_parser(
+            'X',
+            unsigned()
+                .try_map(|value, span| {
+                    (value > 0)
+                        .then_some(value)
+                        .ok_or_else(|| Rich::custom(span, "reference number must be positive"))
+                })
+                .labelled(reference_label)
+                .as_context(),
+            FieldValue::Reference,
+        ),
     ))
 }
 
@@ -900,27 +915,23 @@ where
 {
     let structured = choice((
         common_structured_field_parser(FieldContext::Physical),
-        just('Q')
-            .then_ignore(just(':'))
-            .then(
-                horizontal_space().ignore_then(
-                    tempo()
-                        .labelled("Q: tempo (for example 1/4=120)")
-                        .as_context(),
-                ),
-            )
-            .map(|(key, value)| field(key, FieldValue::Tempo(value))),
-        just('V')
-            .then_ignore(just(':'))
-            .then(
-                horizontal_space()
-                    .ignore_then(voice().labelled("V: voice definition").as_context()),
-            )
-            .map(|(key, value)| field(key, FieldValue::Voice(value))),
-        just('P')
-            .then_ignore(just(':'))
-            .then(horizontal_space().ignore_then(parts().labelled("P: part sequence").as_context()))
-            .map(|(key, value)| field(key, FieldValue::Parts(value))),
+        structured_field_parser(
+            'Q',
+            tempo()
+                .labelled("Q: tempo (for example 1/4=120)")
+                .as_context(),
+            FieldValue::Tempo,
+        ),
+        structured_field_parser(
+            'V',
+            voice().labelled("V: voice definition").as_context(),
+            FieldValue::Voice,
+        ),
+        structured_field_parser(
+            'P',
+            parts().labelled("P: part sequence").as_context(),
+            FieldValue::Parts,
+        ),
         just('U')
             .then_ignore(just(':'))
             .then(
