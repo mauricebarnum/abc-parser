@@ -1272,7 +1272,7 @@ pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> 
     let output = output.and_then(|line| line.value.into_owned(source).ok());
     let errors = faults
         .iter()
-        .map(|error| chumsky_error_with_offset(error, 0))
+        .map(|error| chumsky_error_with_kind_and_offset(error, ErrorKind::InvalidMusic, 0))
         .collect();
     ParseReport {
         output,
@@ -1292,16 +1292,11 @@ pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
         .parse(source)
         .into_result()
         .map_err(|errors| {
-            errors.into_iter().next().map_or_else(
-                || {
-                    error(
-                        ErrorKind::InvalidDirective,
-                        "invalid directive",
-                        0,
-                        source.len(),
-                    )
-                },
-                |error| chumsky_error_with_offset(&error, 0),
+            first_parser_error(
+                &errors,
+                ErrorKind::InvalidDirective,
+                "invalid directive",
+                source.len(),
             )
         })?
         .into_owned(source)
@@ -1326,9 +1321,11 @@ pub fn parse_field(source: &str) -> Result<Field, ParseError> {
         .parse(source)
         .into_result()
         .map_err(|errors| {
-            errors.into_iter().next().map_or_else(
-                || error(ErrorKind::InvalidField, "invalid field", 0, source.len()),
-                |error| chumsky_error_with_offset(&error, 0),
+            first_parser_error(
+                &errors,
+                ErrorKind::InvalidField,
+                "invalid field",
+                source.len(),
             )
         })?
         .into_owned(source)
@@ -1351,9 +1348,11 @@ pub fn parse_chord(source: &str) -> Result<Chord, ParseError> {
         .parse(source)
         .into_result()
         .map_err(|errors| {
-            errors.into_iter().next().map_or_else(
-                || error(ErrorKind::InvalidMusic, "invalid chord", 0, source.len()),
-                |error| chumsky_error_with_offset(&error, 0),
+            first_parser_error(
+                &errors,
+                ErrorKind::InvalidMusic,
+                "invalid chord",
+                source.len(),
             )
         })
 }
@@ -1375,7 +1374,7 @@ pub fn parse_music_line(
     });
     let errors = faults
         .iter()
-        .map(|error| chumsky_error_with_offset(error, 0))
+        .map(|error| chumsky_error_with_kind_and_offset(error, ErrorKind::InvalidMusic, 0))
         .collect();
     ParseReport {
         output,
@@ -1395,17 +1394,31 @@ where
     }
 }
 
-/// Converts a line-local Chumsky error to a document-relative parse error.
-fn chumsky_error_with_offset(
+/// Converts a line-local Chumsky error to a classified parse error.
+fn chumsky_error_with_kind_and_offset(
     error: &Rich<'_, char, SimpleSpan<usize>>,
+    kind: ErrorKind,
     offset: usize,
 ) -> ParseError {
     let span = error.span();
     ParseError {
-        kind: ErrorKind::InvalidMusic,
+        kind,
         message: rich_error_message(error),
         span: span.start.saturating_add(offset)..span.end.saturating_add(offset),
     }
+}
+
+/// Selects the first classified parser error or synthesizes a fallback.
+fn first_parser_error(
+    errors: &[Rich<'_, char, SimpleSpan<usize>>],
+    kind: ErrorKind,
+    fallback_message: &str,
+    source_len: usize,
+) -> ParseError {
+    errors.first().map_or_else(
+        || error(kind, fallback_message, 0, source_len),
+        |error| chumsky_error_with_kind_and_offset(error, kind, 0),
+    )
 }
 
 /// Formats Chumsky's reason and production contexts without internal spans.
@@ -1922,6 +1935,7 @@ mod tests {
     #[test]
     fn malformed_directives_report_expected_syntax() {
         let error = parse_directive("%%").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidDirective);
         assert!(
             error.message.contains("stylesheet directive name"),
             "{error}"
@@ -1936,6 +1950,18 @@ mod tests {
                 .any(|error| error.message.contains("stylesheet directive name")),
             "{:#?}",
             report.errors
+        );
+    }
+
+    #[test]
+    fn partial_parser_errors_use_construct_specific_kinds() {
+        assert_eq!(
+            parse_field("L:not-a-length").unwrap_err().kind,
+            ErrorKind::InvalidField
+        );
+        assert_eq!(
+            parse_chord("[CEG").unwrap_err().kind,
+            ErrorKind::InvalidMusic
         );
     }
 
