@@ -1534,6 +1534,19 @@ where
         .as_context()
 }
 
+/// Preserves malformed stylesheet directive text as a semantic line.
+fn directive_text_line_parser<'src, I>()
+-> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    just("%%")
+        .ignore_then(remaining_text())
+        .then_ignore(trailing_comment())
+        .map(Line::DirectiveText)
+}
+
 /// Classifies a non-blank tune line while preserving music parser failures.
 fn tune_line_parser<'src, I>()
 -> impl Parser<'src, I, Line<I::Span, SourceText<I::Span>>, Extra<'src, I>> + Clone
@@ -1541,15 +1554,11 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let directive_fallback = just("%%")
-        .ignore_then(remaining_text())
-        .then_ignore(trailing_comment())
-        .map(Line::DirectiveText);
     choice((
         directive_parser()
             .then_ignore(trailing_comment())
             .map(Line::Directive),
-        directive_fallback,
+        directive_text_line_parser(),
         comment_line(),
         field_continuation(),
         recovering_field_parser()
@@ -1568,14 +1577,10 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let directive_fallback = just("%%")
-        .ignore_then(remaining_text())
-        .then_ignore(trailing_comment())
-        .map(Line::DirectiveText);
     let directive = directive_parser()
         .then_ignore(trailing_comment())
         .map(Line::Directive)
-        .recover_with(via_parser(directive_fallback));
+        .recover_with(via_parser(directive_text_line_parser()));
     choice((
         directive,
         comment_line(),
@@ -1596,15 +1601,11 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let directive_fallback = just("%%")
-        .ignore_then(remaining_text())
-        .then_ignore(trailing_comment())
-        .map(Line::DirectiveText);
     choice((
         directive_parser()
             .then_ignore(trailing_comment())
             .map(Line::Directive),
-        directive_fallback,
+        directive_text_line_parser(),
         comment_line(),
         field_continuation(),
         recovering_field_parser()
@@ -2293,9 +2294,7 @@ where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
 {
-    let comment_value = horizontal_space()
-        .ignore_then(just('%').then_ignore(just('%').not()))
-        .ignore_then(comment_text());
+    let comment_line = comment_line::<I>();
     let directive_value =
         directive_parser().filter(|directive| directive.kind == DirectiveKind::Other);
     let field_start = any()
@@ -2305,7 +2304,7 @@ where
         .then_ignore(just(':'))
         .rewind();
     let shape_line = choice((
-        comment_value.clone().ignored(),
+        comment_line.clone().ignored(),
         directive_value.clone().ignored(),
         field_start.ignore_then(line_character().repeated().ignored()),
     ));
@@ -2315,7 +2314,7 @@ where
         .then_ignore(block_end::<I>())
         .rewind();
     let line = spanned_nonblank_line::<I, _>(choice((
-        comment_value.map(Line::Comment),
+        comment_line,
         directive_value.map(Line::Directive),
         field_start.ignore_then(tune_line_parser()),
     )));
