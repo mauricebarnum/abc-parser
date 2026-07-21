@@ -2,21 +2,8 @@
 
 - Target Rust edition 2024
 - Use [chumksy](https://docs.rs/chumsky/latest/chumsky/) to implement the core parser
-- Treat the checked-in `abc_standard_v2.1.txt` as the canonical text of the
-  ABC 2.1 specification for grammar, validation, and syntax diagnostics. The
-  checked-in `abc_standard_v2.1.pdf` may include referenced assets that are not
-  present in the canonical text export.
-- The canonical text was retrieved as `abc-standard-v2.1.txt` with:
-
-  ```sh
-  curl -L -X POST \
-    -H 'User-Agent: Mozilla/5.0' \
-    -d 'do=export_raw' \
-    -o abc-standard-v2.1.txt \
-    'https://abcnotation.com/wiki/abc:standard:v2.1'
-  ```
-
-  The checked-in `abc_standard_v2.1.txt` is byte-identical to that export.
+- Treat the checked-in `abc_standard_v2.1.pdf` as the normative source for
+  ABC grammar, validation, and syntax diagnostics
 - Do not create any `unsafe` public APIs
 - Use doc comments (`///`) for public API documentation
 - Document the purpose of public structs and key methods
