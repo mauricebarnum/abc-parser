@@ -1555,7 +1555,7 @@ where
         recovering_field_parser()
             .then_ignore(trailing_comment())
             .map(Line::Field),
-        recovering_music_line_parser()
+        music_line_parser::<I>()
             .then_ignore(trailing_comment())
             .map(Line::Music),
     ))
@@ -1583,7 +1583,7 @@ where
         recovering_field_parser()
             .then_ignore(trailing_comment())
             .map(Line::Field),
-        recovering_music_line_parser()
+        music_line_parser::<I>()
             .then_ignore(trailing_comment())
             .map(Line::Music),
     ))
