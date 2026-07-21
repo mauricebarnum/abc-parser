@@ -690,6 +690,8 @@ pub struct BarLine<T = String> {
 /// A variant-ending selector such as `[1,3,5-7`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariantEnding {
+    /// Whether the selector was introduced by an explicit `[` marker.
+    pub explicit_bracket: bool,
     /// Individual numbers and inclusive ranges.
     pub selectors: Vec<EndingSelector>,
 }

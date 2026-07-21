@@ -1026,7 +1026,9 @@ where
 
 impl ToAbc for VariantEnding {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
-        output.write_char('[')?;
+        if self.explicit_bracket {
+            output.write_char('[')?;
+        }
         for (index, selector) in self.selectors.iter().enumerate() {
             if index > 0 {
                 output.write_char(',')?;
@@ -1037,7 +1039,9 @@ impl ToAbc for VariantEnding {
     }
 
     fn write_abc_with(&self, emitter: &mut AbcEmitter<'_>) -> fmt::Result {
-        emitter.write_char('[')?;
+        if self.explicit_bracket {
+            emitter.write_char('[')?;
+        }
         for (index, selector) in self.selectors.iter().enumerate() {
             if index > 0 {
                 emitter.write_char(',')?;
@@ -1355,6 +1359,19 @@ mod tests {
             document.to_abc_with_options(explicit),
             "X:1\nK:C\nA/2 z/4 [B/2z/4]/8 {c/2}"
         );
+    }
+
+    #[test]
+    fn variant_endings_preserve_explicit_and_shorthand_markers() {
+        for music in ["C |[1 D :|[2 E |]", "C |1 D :|2 E |]"] {
+            let source = format!("X:1\nK:C\n{music}");
+            let document = parse(source.as_str())
+                .output
+                .unwrap()
+                .into_owned(source.as_str())
+                .unwrap();
+            assert_eq!(document.to_abc(), source);
+        }
     }
 
     #[test]
