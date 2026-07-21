@@ -1050,13 +1050,16 @@ where
         });
     just('[')
         .or_not()
-        .ignore_then(
+        .then(
             selector
                 .separated_by(just(','))
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
-        .map(|selectors| VariantEnding { selectors })
+        .map(|(bracket, selectors)| VariantEnding {
+            explicit_bracket: bracket.is_some(),
+            selectors,
+        })
         .labelled("variant ending")
         .as_context()
 }
