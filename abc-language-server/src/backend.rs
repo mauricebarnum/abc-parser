@@ -786,7 +786,7 @@ fn whitespace_edits(
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
+    use futures_util::StreamExt;
     use serde_json::json;
     use tower::Service;
     use tower::ServiceExt;
