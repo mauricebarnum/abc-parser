@@ -2,6 +2,20 @@
 members = ["abc-language-server", "abc-parser"]
 resolver = "3"
 
+[profile.dev]
+debug = "full"
+
+[profile.test]
+debug = "line-tables-only"
+incremental = true
+opt-level = 0
+
+# Use `cargo nextest run --cargo-profile test-debug` when tests need complete
+# debugger information, including local variables.
+[profile.test-debug]
+inherits = "test"
+debug = "full"
+
 [workspace.lints.rust]
 missing_docs = "deny"
 unsafe_code = "deny"
