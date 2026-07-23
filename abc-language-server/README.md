@@ -40,6 +40,7 @@ client without configuration support:
     "validation": {
       "strict": false,
       "ambiguousMusic": "warning",
+      "barDuration": "warning",
       "legacyDecoration": "warning"
     },
     "format": {
@@ -49,10 +50,14 @@ client without configuration support:
 }
 ```
 
-`ambiguousMusic` and `legacyDecoration` accept `off`, `hint`, `information`,
-`warning`, or `error`. Strict validation requires tune structure such as an
-`X:` reference field; it is off by default so incomplete files remain useful
-while editing.
+`ambiguousMusic`, `barDuration`, and `legacyDecoration` accept `off`, `hint`,
+`information`, `warning`, or `error`. Strict validation requires tune structure
+such as an `X:` reference field; it is off by default so incomplete files
+remain useful while editing.
+
+`barDuration` checks closed, non-empty bars against their effective meter. It
+allows an underfull opening bar in each voice and metered section as a possible
+pickup, and does not diagnose the trailing open bar while it is being edited.
 
 `format.noteLength` accepts:
 

@@ -36,12 +36,9 @@ fn run_stdin(source: &str, arguments: &[&str]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(source.as_bytes())
-        .unwrap();
+    if let Err(error) = child.stdin.take().unwrap().write_all(source.as_bytes()) {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -111,6 +108,170 @@ fn valid_input_succeeds_without_emitting_a_document() {
     assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn bars_are_checked_against_the_effective_meter() {
+    let source = concat!(
+        "X:1\n",
+        "T:Metered bars\n",
+        "M:2/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "CDEF | [M:3/4] CDEF | CDEFGA |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(warnings.matches("bar duration is").count(), 1, "{warnings}");
+    assert!(
+        warnings.contains("bar duration is 2 beats, expected 3 beats under the effective meter"),
+        "{warnings}"
+    );
+}
+
+#[test]
+fn free_meter_sections_are_not_checked() {
+    let source = concat!(
+        "X:1\n",
+        "T:Free meter\n",
+        "M:2/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "CDEF | [M:none] C | CDE | [M:3/4] CDEFGA |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
+
+    let no_meter = run_stdin("X:1\nT:No meter\nK:C\nC | CDE |\n", &[]);
+    assert!(no_meter.status.success(), "{no_meter:?}");
+    let warnings = String::from_utf8(no_meter.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
+}
+
+#[test]
+fn complementary_first_and_last_pickup_bars_are_accepted() {
+    let source = concat!(
+        "X:1\n",
+        "T:Pickup\n",
+        "M:4/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "C2 | C8 | C6 |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
+
+    let noncomplementary = source.replace("C6 |", "C4 |");
+    let output = run_stdin(&noncomplementary, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(warnings.matches("bar duration is").count(), 2, "{warnings}");
+
+    let wrong_middle = source.replace("C8 |", "C4 | C8 |");
+    let output = run_stdin(&wrong_middle, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(warnings.matches("bar duration is").count(), 1, "{warnings}");
+    assert!(warnings.contains("bar duration is 2 beats"), "{warnings}");
+}
+
+#[test]
+fn internal_pickup_pairs_are_reported() {
+    let source = concat!(
+        "X:1\n",
+        "T:Multiple pickups\n",
+        "M:4/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "C2 | C8 | C8 | C6 | C4 | C8 | C4 |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(warnings.matches("bar duration is").count(), 4, "{warnings}");
+    assert!(!warnings.contains("ambiguous pickup"), "{warnings}");
+}
+
+#[test]
+fn incomplete_internal_bars_are_reported_without_pickup_ambiguity() {
+    let source = concat!(
+        "X:1\n",
+        "T:Ambiguous pickups\n",
+        "M:4/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "C2 | C4 | C6 | C4 |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("ambiguous pickup"), "{warnings}");
+    assert_eq!(warnings.matches("bar duration is").count(), 4, "{warnings}");
+}
+
+#[test]
+fn pickup_pairing_obeys_meter_boundaries_but_not_part_or_repeat_markers() {
+    let paired_across_markers = concat!(
+        "X:1\n",
+        "T:Structural markers\n",
+        "M:4/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "C2 :|\n",
+        "P:A\n",
+        "[M:C] C6 |\n",
+    );
+    let output = run_stdin(paired_across_markers, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
+
+    let split_by_free_meter = paired_across_markers.replace("P:A\n[M:C]", "M:none\nC |\nM:4/4\n");
+    let output = run_stdin(&split_by_free_meter, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(warnings.matches("bar duration is").count(), 2, "{warnings}");
+}
+
+#[test]
+fn pickup_sections_are_independent_for_each_voice() {
+    let source = concat!(
+        "X:1\n",
+        "T:Voice pickups\n",
+        "M:4/4\n",
+        "L:1/8\n",
+        "V:one\n",
+        "V:two\n",
+        "K:C\n",
+        "[V:one] C2 | [V:two] C4 |\n",
+        "[V:one] C6 | [V:two] C4 |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
+    assert!(!warnings.contains("ambiguous pickup"), "{warnings}");
+}
+
+#[test]
+fn compound_timing_constructs_contribute_their_semantic_duration() {
+    let source = concat!(
+        "X:1\n",
+        "T:Durations\n",
+        "M:4/4\n",
+        "L:1/8\n",
+        "K:C\n",
+        "(3CDE [CEG]2 z2 C2 | C>D C<D C4 | C2 Z4 |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
 }
 
 #[test]
@@ -379,7 +540,7 @@ fn fix_removes_only_superseded_header_instructions() {
         "Q:1/4=120\n",
         "K:G\n",
         "K:C\n",
-        "CDEF |\n",
+        "C8 |\n",
     );
     let fixed = fix(source);
 

@@ -32,12 +32,16 @@ use chumsky::input::ValueInput;
 use chumsky::span::SimpleSpan;
 use chumsky::span::Span as ChumskySpan;
 
+mod bar_duration;
 mod combinators;
 mod emit;
 mod source;
 
 include!(concat!(env!("OUT_DIR"), "/architecture.rs"));
 
+pub use bar_duration::BarDurationOptions;
+pub use bar_duration::BarDurationPickupPolicy;
+pub use bar_duration::bar_duration_warnings;
 pub use combinators::chord_parser;
 pub use combinators::directive_parser;
 pub use combinators::field_parser;
