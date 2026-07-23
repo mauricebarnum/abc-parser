@@ -4,5 +4,14 @@
     "config:recommended",
     "helpers:pinGitHubActionDigests",
     ":maintainLockFilesWeekly"
+  ],
+  "packageRules": [
+    {
+      "groupName": "minor and patch updates",
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ]
+    }
   ]
 }
