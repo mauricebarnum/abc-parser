@@ -20,6 +20,8 @@ pub struct ValidationConfig {
     pub(super) strict: bool,
     #[serde(rename = "ambiguousMusic")]
     pub(super) ambiguous_music: DiagnosticLevel,
+    #[serde(rename = "barDuration")]
+    pub(super) bar_duration: DiagnosticLevel,
     #[serde(rename = "legacyDecoration")]
     pub(super) legacy_decoration: DiagnosticLevel,
 }
@@ -29,6 +31,7 @@ impl Default for ValidationConfig {
         Self {
             strict: false,
             ambiguous_music: DiagnosticLevel::Warning,
+            bar_duration: DiagnosticLevel::Warning,
             legacy_decoration: DiagnosticLevel::Warning,
         }
     }
@@ -73,6 +76,7 @@ mod tests {
         assert_eq!(config.format.note_length, NoteLengthStyle::Preserve);
         assert!(!config.validation.strict);
         assert_eq!(config.validation.ambiguous_music, DiagnosticLevel::Warning);
+        assert_eq!(config.validation.bar_duration, DiagnosticLevel::Warning);
     }
 
     #[test]
@@ -81,6 +85,7 @@ mod tests {
             "validation": {
                 "strict": true,
                 "ambiguousMusic": "information",
+                "barDuration": "error",
                 "legacyDecoration": "off"
             },
             "format": { "noteLength": "explicit" }
@@ -91,6 +96,7 @@ mod tests {
             config.validation.ambiguous_music,
             DiagnosticLevel::Information
         );
+        assert_eq!(config.validation.bar_duration, DiagnosticLevel::Error);
         assert_eq!(config.validation.legacy_decoration, DiagnosticLevel::Off);
         assert_eq!(config.format.note_length, NoteLengthStyle::Explicit);
     }

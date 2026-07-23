@@ -5,8 +5,12 @@
 
 use std::ops::Range;
 
+use abc_parser::BarDurationOptions;
+use abc_parser::BarDurationPickupPolicy;
 use abc_parser::ErrorKind;
+use abc_parser::IntoOwnedAst;
 use abc_parser::ParserOptions;
+use abc_parser::bar_duration_warnings;
 use abc_parser::parse_with_options;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
@@ -60,8 +64,27 @@ impl Analysis {
             ParserOptions::new().strict(config.validation.strict),
         );
         let has_errors = !report.errors.is_empty();
-        let mut diagnostics = report
-            .errors
+        let abc_parser::ParseReport {
+            output,
+            errors,
+            warnings,
+        } = report;
+        let bar_duration_warnings = severity(config.validation.bar_duration).and_then(|level| {
+            output
+                .and_then(|document| document.into_owned(index.source()).ok())
+                .map(|document| {
+                    (
+                        level,
+                        bar_duration_warnings(
+                            &document,
+                            BarDurationOptions::new()
+                                .pickup_policy(BarDurationPickupPolicy::OpeningBar)
+                                .check_trailing_bar(false),
+                        ),
+                    )
+                })
+        });
+        let mut diagnostics = errors
             .into_iter()
             .filter_map(|error| {
                 diagnostic(
@@ -75,7 +98,7 @@ impl Analysis {
                 )
             })
             .collect::<Vec<_>>();
-        diagnostics.extend(report.warnings.into_iter().filter_map(|warning| {
+        diagnostics.extend(warnings.into_iter().filter_map(|warning| {
             let level = if warning.kind == ErrorKind::MissingReference {
                 config.validation.ambiguous_music
             } else {
@@ -91,6 +114,19 @@ impl Analysis {
                 None,
             )
         }));
+        if let Some((level, warnings)) = bar_duration_warnings {
+            diagnostics.extend(warnings.into_iter().filter_map(|warning| {
+                diagnostic(
+                    index,
+                    encoding,
+                    warning.span.start..warning.span.end,
+                    level,
+                    "bar-duration",
+                    lsp_bar_duration_message(warning.message),
+                    None,
+                )
+            }));
+        }
         if let Some(level) = severity(config.validation.legacy_decoration) {
             diagnostics.extend(legacy_decorations(index.source()).filter_map(|range| {
                 diagnostic(
@@ -109,6 +145,16 @@ impl Analysis {
             has_errors,
         }
     }
+}
+
+fn lsp_bar_duration_message(message: String) -> String {
+    if let Some(prefix) = message.strip_suffix(" beats under the effective meter") {
+        return prefix.to_owned();
+    }
+    if let Some(prefix) = message.strip_suffix(" beat under the effective meter") {
+        return prefix.to_owned();
+    }
+    message
 }
 
 fn diagnostic(
@@ -713,6 +759,85 @@ mod tests {
             diagnostic.code == Some(NumberOrString::String("legacy-decoration".to_owned()))
                 && diagnostic.severity == Some(DiagnosticSeverity::HINT)
         }));
+    }
+
+    #[test]
+    fn bar_duration_diagnostics_skip_only_the_trailing_open_bar() {
+        let source = "X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C | CDEFG | CCCCC\n";
+        let index = LineIndex::new(source.to_owned());
+        let analysis = Analysis::new(&index, &PositionEncodingKind::UTF16, Config::default());
+        let diagnostics = analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == Some(NumberOrString::String("bar-duration".to_owned()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].range.start.line, 4);
+        assert_eq!(diagnostics[0].range.start.character, 9);
+        assert_eq!(diagnostics[0].message, "bar duration is 1 beat, expected 4");
+        assert_eq!(diagnostics[1].range.start.character, 17);
+        assert_eq!(
+            diagnostics[1].message,
+            "bar duration is 5 beats, expected 4"
+        );
+    }
+
+    #[test]
+    fn closing_the_trailing_bar_activates_its_diagnostic() {
+        let open = LineIndex::new("X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C\n".to_owned());
+        let closed = LineIndex::new("X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C |\n".to_owned());
+        let encoding = PositionEncodingKind::UTF16;
+        let code = Some(NumberOrString::String("bar-duration".to_owned()));
+        assert!(
+            Analysis::new(&open, &encoding, Config::default())
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != code)
+        );
+        assert!(
+            Analysis::new(&closed, &encoding, Config::default())
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == code)
+        );
+    }
+
+    #[test]
+    fn bar_duration_level_and_opening_pickup_are_editor_specific() {
+        let index =
+            LineIndex::new("X:1\nT:Cairo Waltz\nM:4/4\nL:1/8\nK:D\nabcd | a2b2c2d|\n".to_owned());
+        let encoding = PositionEncodingKind::UTF16;
+        let mut config = Config::default();
+        config.validation.bar_duration = DiagnosticLevel::Information;
+        let analysis = Analysis::new(&index, &encoding, config);
+        let diagnostics = analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == Some(NumberOrString::String("bar-duration".to_owned()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].severity,
+            Some(DiagnosticSeverity::INFORMATION)
+        );
+        assert_eq!(diagnostics[0].range.start.character, 14);
+        assert_eq!(
+            diagnostics[0].message,
+            "bar duration is 3 1/2 beats, expected 4"
+        );
+
+        config.validation.bar_duration = DiagnosticLevel::Off;
+        assert!(
+            Analysis::new(&index, &encoding, config)
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    != Some(NumberOrString::String("bar-duration".to_owned())))
+        );
     }
 
     #[test]

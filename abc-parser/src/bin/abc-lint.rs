@@ -23,6 +23,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use abc_parser::BarDurationOptions;
+use abc_parser::BarDurationPickupPolicy;
 use abc_parser::Decoration;
 use abc_parser::DiagnosticRenderer;
 use abc_parser::Document;
@@ -40,6 +42,7 @@ use abc_parser::ParserOptions;
 use abc_parser::Tempo;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
+use abc_parser::bar_duration_warnings;
 use abc_parser::parse_with_options;
 use chumsky::span::SimpleSpan;
 use clap::Parser;
@@ -132,11 +135,21 @@ fn run(arguments: &Arguments) -> Result<(), String> {
         .as_ref()
         .map(|document| fixable_syntax_warnings(document, source.as_str()))
         .unwrap_or_default();
+    let bar_duration_warnings = owned_document
+        .as_ref()
+        .map(|document| {
+            bar_duration_warnings(
+                document,
+                BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::FirstAndLast),
+            )
+        })
+        .unwrap_or_default();
     for warning in parsed
         .warnings
         .iter()
         .chain(&order_warnings)
         .chain(&fixable_warnings)
+        .chain(&bar_duration_warnings)
     {
         eprintln!(
             "abc-lint: warning: {input_name}:{}",
@@ -890,15 +903,20 @@ fn deprecated_tempo_bpm(raw: &str) -> Result<u32, String> {
 }
 
 /// Computes the default unit note length selected by a meter.
+///
+/// ABC 2.1 §3.1.7 requires `L:1/16` when the effective meter is below 3/4 and
+/// `L:1/8` otherwise, including `M:C`, `M:C|`, and `M:none`.
 fn default_unit_length(meter: &Meter) -> Fraction {
     let below_three_quarters = match meter {
-        Meter::Simple(fraction) => fraction_is_below_three_quarters(*fraction),
+        Meter::Simple(fraction) => {
+            u128::from(fraction.numerator) * 4 < u128::from(fraction.denominator) * 3
+        }
         Meter::Compound {
             groups,
             denominator,
         } => {
-            let numerator = groups.iter().map(|value| u64::from(*value)).sum::<u64>();
-            numerator * 4 < u64::from(*denominator) * 3
+            let numerator = groups.iter().map(|group| u128::from(*group)).sum::<u128>();
+            numerator * 4 < u128::from(*denominator) * 3
         }
         Meter::Common | Meter::Cut | Meter::None => false,
     };
@@ -907,11 +925,6 @@ fn default_unit_length(meter: &Meter) -> Fraction {
     } else {
         EIGHTH_NOTE
     }
-}
-
-/// Returns whether a rational meter is less than three quarters.
-const fn fraction_is_below_three_quarters(fraction: Fraction) -> bool {
-    (fraction.numerator as u64) * 4 < (fraction.denominator as u64) * 3
 }
 
 /// Ensures the fixed document remains valid ABC 2.1.
