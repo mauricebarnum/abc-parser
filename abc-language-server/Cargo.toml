@@ -9,15 +9,15 @@ rust-version = "1.95"
 
 [dependencies]
 abc-parser = { path = "../abc-parser" }
-clap = { version = "4.5.54", default-features = false, features = ["derive", "help", "std", "usage"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
-tower-lsp-server = "0.23"
+clap = { version = "4.6.4", default-features = false, features = ["derive", "help", "std", "usage"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+tower-lsp-server = { version = "0.23", default-features = false, features = ["runtime-tokio"] }
 
 [dev-dependencies]
-futures = "0.3"
-tower = { version = "0.5", features = ["util"] }
+futures-util = { version = "0.3", default-features = false }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 
 [lints]
 workspace = true
