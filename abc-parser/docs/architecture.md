@@ -297,7 +297,7 @@ classDiagram
         source span
     }
     class DocumentItem {
-        <<variant>>
+        «variant»
         tune
         free-text block
         typeset text
@@ -311,7 +311,7 @@ classDiagram
         text lines
     }
     class TypesetText {
-        <<variant>>
+        «variant»
         text line
         centered text
         text block
@@ -323,7 +323,7 @@ classDiagram
         original body
     }
     class SourceText {
-        <<variant>>
+        «variant»
         source span
         synthesized text
     }
@@ -358,7 +358,7 @@ classDiagram
         source span
     }
     class Line {
-        <<variant>>
+        «variant»
         blank line
         comment text
         stylesheet directive
@@ -379,7 +379,7 @@ classDiagram
         parsed payload
     }
     class TypesetText {
-        <<variant>>
+        «variant»
         text line
         centered text
         text block
@@ -389,7 +389,7 @@ classDiagram
         source span
     }
     class SourceText {
-        <<variant>>
+        «variant»
         source span
         synthesized text
     }
@@ -418,7 +418,7 @@ classDiagram
         parsed payload
     }
     class FieldKind {
-        <<variant>>
+        «variant»
         area
         book
         composer
@@ -448,7 +448,7 @@ classDiagram
         extension field letter
     }
     class FieldValue {
-        <<variant>>
+        «variant»
         text
         unit note length
         meter
@@ -466,7 +466,7 @@ classDiagram
         denominator
     }
     class Meter {
-        <<variant>>
+        «variant»
         common time
         cut time
         no meter
@@ -489,7 +489,7 @@ classDiagram
         voice properties
     }
     class SourceText {
-        <<variant>>
+        «variant»
         source span
         synthesized text
     }
@@ -521,7 +521,7 @@ classDiagram
         source span
     }
     class MusicElement {
-        <<variant>>
+        «variant»
         note
         rest or spacer
         multi-measure rest
@@ -619,13 +619,13 @@ classDiagram
         denominator
     }
     class Accidental {
-        <<variant>>
+        «variant»
         natural
         sharp amount
         flat amount
     }
     class ChordMember {
-        <<variant>>
+        «variant»
         note
         rest
     }
