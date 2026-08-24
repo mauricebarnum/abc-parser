@@ -56,9 +56,10 @@ flowchart TD
     parsed -->|PlaceholderResolver| detached[OwnedDocument with reference placeholders]
 ```
 
-The diagrams are stored as Mermaid source in this file and rendered as inline
-SVG in the generated documentation. The surrounding text contains the same
-information in documentation formats that do not display SVG.
+The diagrams are stored as Mermaid source in this file and rendered as
+inline diagrams via mermaid.js in the generated documentation. The
+surrounding text contains the same information for readers that do not
+render Mermaid.
 
 ## Complete-document flow
 
