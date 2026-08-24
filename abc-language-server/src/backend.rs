@@ -4,6 +4,7 @@
 //! LSP lifecycle, synchronized documents, and request dispatch.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -413,8 +414,8 @@ impl LanguageServer for Backend {
         self.refresh_configuration().await;
     }
 
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
+    fn shutdown(&self) -> impl Future<Output = Result<()>> {
+        std::future::ready(Ok(()))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
