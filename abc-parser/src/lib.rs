@@ -922,6 +922,8 @@ pub enum ErrorKind {
     DeprecatedSyntax,
     /// Valid input has a deterministic repair available from a consumer.
     FixableSyntax,
+    /// A free text block appears outside any tune.
+    FreeTextOutsideTune,
 }
 
 /// A recoverable syntax error with an exact source location.
