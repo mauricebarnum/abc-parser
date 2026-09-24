@@ -28,6 +28,7 @@ use abc_parser::BarDurationPickupPolicy;
 use abc_parser::Decoration;
 use abc_parser::DiagnosticRenderer;
 use abc_parser::Document;
+use abc_parser::DocumentItem;
 use abc_parser::ErrorKind;
 use abc_parser::Field;
 use abc_parser::FieldKind;
@@ -56,6 +57,15 @@ const SIXTEENTH_NOTE: Fraction = Fraction {
     denominator: 16,
 };
 
+/// How free text blocks outside any tune are handled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum FreeTextMode {
+    /// Accept free text blocks silently (default).
+    Accept,
+    /// Emit a warning for each free text block and exit non-zero if any are present.
+    Warn,
+}
+
 /// Command-line arguments for validating and fixing an ABC document.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 #[command(
@@ -72,6 +82,11 @@ struct Arguments {
     /// Write fixed output to this file instead of standard output.
     #[arg(long, value_name = "FILE", requires = "fix")]
     out: Option<PathBuf>,
+    /// How to handle free text blocks outside any tune. `accept` (default)
+    /// is silent. `warn` emits a warning for each block and exits non-zero
+    /// if any are present. Free text is allowed by ABC 2.1 §2.2.3.
+    #[arg(long, value_enum, default_value_t = FreeTextMode::Accept)]
+    free_text: FreeTextMode,
 }
 
 /// Active unit-note-length state while traversing one tune.
@@ -144,12 +159,21 @@ fn run(arguments: &Arguments) -> Result<(), String> {
             )
         })
         .unwrap_or_default();
+    let free_text_warnings = if matches!(arguments.free_text, FreeTextMode::Warn) {
+        owned_document
+            .as_ref()
+            .map(free_text_warnings)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     for warning in parsed
         .warnings
         .iter()
         .chain(&order_warnings)
         .chain(&fixable_warnings)
         .chain(&bar_duration_warnings)
+        .chain(&free_text_warnings)
     {
         eprintln!(
             "abc-lint: warning: {input_name}:{}",
@@ -169,6 +193,17 @@ fn run(arguments: &Arguments) -> Result<(), String> {
             .join("\n");
         return Err(format!("input is not valid ABC 2.1:\n{diagnostics}"));
     }
+    if matches!(arguments.free_text, FreeTextMode::Warn) && !free_text_warnings.is_empty() {
+        return Err(format!(
+            "input contains {} free text block{}; --free-text warn forbids them",
+            free_text_warnings.len(),
+            if free_text_warnings.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
     if !arguments.fix {
         return Ok(());
     }
@@ -180,6 +215,26 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     let fixed = document.to_abc();
     validate_fixed_output(&fixed)?;
     write_output(fixed, arguments.out.as_deref())
+}
+
+/// Emits one warning per free text block in the document.
+fn free_text_warnings<S, T>(document: &Document<S, T>) -> Vec<ParseWarning<S>>
+where
+    S: Clone,
+{
+    document
+        .items
+        .iter()
+        .filter_map(|item| match &item.value {
+            DocumentItem::FreeText(_) => Some(ParseWarning {
+                kind: ErrorKind::FreeTextOutsideTune,
+                message: "free text block is not part of any tune".to_owned(),
+                span: item.span.clone(),
+                related: Vec::new(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Reports every deterministic source change performed by the fixer.
