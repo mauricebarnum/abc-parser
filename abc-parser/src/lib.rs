@@ -26,6 +26,11 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::ops::Range;
 
+// Referenced only by the `#[cfg_attr(doc, aquamarine::aquamarine)]` attribute
+// on the build.rs-generated `architecture` module. This no-op import
+// satisfies Cargo's `unused_dependencies` lint; it has minimal compile-time
+// impact and no runtime impact.
+use aquamarine as _;
 use chumsky::Parser;
 use chumsky::error::Rich;
 use chumsky::input::ValueInput;
