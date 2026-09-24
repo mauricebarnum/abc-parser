@@ -659,6 +659,7 @@ fn bar_duration_warning(bar: &BarDuration) -> ParseWarning<SimpleSpan<usize>> {
             beat_unit(expected),
         ),
         span: bar.span,
+        related: Vec::new(),
     }
 }
 

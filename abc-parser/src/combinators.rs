@@ -82,6 +82,7 @@ use super::PartSequence;
 use super::PartToken;
 use super::Pitch;
 use super::PitchClass;
+use super::RelatedSpan;
 use super::Rest;
 use super::RestKind;
 use super::Slur;
@@ -104,6 +105,14 @@ type ParserDiagnostics<S> = (Vec<ParseError<S>>, Vec<ParseWarning<S>>);
 pub struct ParserStateValue<S> {
     errors: Vec<ParseError<S>>,
     warnings: Vec<ParseWarning<S>>,
+    last_field_led_span: Option<S>,
+}
+
+impl<S> ParserStateValue<S> {
+    /// Records the first-field span of the most recently resolved field-led block.
+    fn note_field_led_start(&mut self, span: S) {
+        self.last_field_led_span = Some(span);
+    }
 }
 
 type ParserState<S> = extra::SimpleState<ParserStateValue<S>>;
@@ -152,6 +161,25 @@ enum ParsedTuneUnit<S> {
 struct ParsedTuneCandidate<S> {
     leading_comments: Vec<ParsedLine<S>>,
     units: Vec<ParsedTuneUnit<S>>,
+}
+
+/// Returns the first information-field span among resolved tune units.
+fn first_field_span_in_units<S: Clone>(units: &[ParsedTuneUnit<S>]) -> Option<S> {
+    units.iter().find_map(|unit| match unit {
+        ParsedTuneUnit::Line(line) => match &line.value {
+            Line::Field(_) => Some(line.span.clone()),
+            _ => None,
+        },
+        ParsedTuneUnit::Typeset(_) => None,
+    })
+}
+
+/// Returns the first information-field span among parsed physical lines.
+fn first_field_span_in_lines<S: Clone>(lines: &[ParsedLine<S>]) -> Option<S> {
+    lines.iter().find_map(|line| match &line.value {
+        Line::Field(_) => Some(line.span.clone()),
+        _ => None,
+    })
 }
 
 /// One body line retained while parsing a grouped typeset block.
@@ -688,6 +716,7 @@ where
             kind: ErrorKind::DeprecatedSyntax,
             message: "deprecated Q: tempo syntax is retained without interpretation".to_owned(),
             span: span.clone(),
+            related: Vec::new(),
         });
         Tempo::Deprecated(SourceText::Span(span))
     });
@@ -995,6 +1024,7 @@ where
                     kind: ErrorKind::DeprecatedSyntax,
                     message: message.to_owned(),
                     span,
+                    related: Vec::new(),
                 });
             }
             field(key, FieldValue::Text(value))
@@ -2056,12 +2086,31 @@ where
             ),
         )
         .map_with(|(possible_music, (first, rest)), extra| {
+            let state = &mut extra.state().0;
+            // Previous-block gating: this block is text, so the signal resets
+            // whether or not the music-like warning fires.
+            let previous_field_led = state.last_field_led_span.take();
             if let Some(span) = possible_music {
-                extra.state().0.warnings.push(ParseWarning {
+                let (message, related) = match previous_field_led {
+                    Some(header_span) => (
+                        "block parses as music but has no leading information field; a preceding information field block may have been separated from this music by an extra blank line; treating it as free text"
+                            .to_owned(),
+                        vec![RelatedSpan {
+                            span: header_span,
+                            message: "preceding information field block".to_owned(),
+                        }],
+                    ),
+                    None => (
+                        "block parses as music but has no leading information field; treating it as free text"
+                            .to_owned(),
+                        Vec::new(),
+                    ),
+                };
+                state.warnings.push(ParseWarning {
                     kind: ErrorKind::MissingReference,
-                    message: "block parses as music but has no leading information field; treating it as free text"
-                        .to_owned(),
+                    message,
                     span,
+                    related,
                 });
             }
             ParsedBlock::Text {
@@ -2118,6 +2167,7 @@ where
                 message: "deprecated implicit multiline H: history syntax is retained as raw text"
                     .to_owned(),
                 span,
+                related: Vec::new(),
             });
             std::iter::once(ParsedTuneUnit::Line(history))
                 .chain(continuations.into_iter().map(ParsedTuneUnit::Line))
@@ -2217,6 +2267,7 @@ where
             message: "X: reference field should be the first information field in a tune"
                 .to_owned(),
             span: span.clone(),
+            related: Vec::new(),
         });
     }
 
@@ -2252,6 +2303,7 @@ where
             message: "K: key field should be the last information field in a tune header"
                 .to_owned(),
             span: (*key_span).clone(),
+            related: Vec::new(),
         });
     }
 }
@@ -2275,6 +2327,9 @@ where
         ParsedTuneUnit::Line(line) => line.span.clone(),
         ParsedTuneUnit::Typeset(text) => text.span.clone(),
     };
+    if let Some(span) = first_field_span_in_units(&candidate.units) {
+        state.0.note_field_led_start(span);
+    }
     if options.is_strict() {
         let fields = candidate.units.iter().filter_map(|unit| match unit {
             ParsedTuneUnit::Line(Spanned {
@@ -2343,6 +2398,9 @@ where
     S::Offset: Ord,
 {
     if is_header_candidate(&candidate) {
+        if let Some(span) = first_field_span_in_units(&candidate.units) {
+            state.0.note_field_led_start(span);
+        }
         ParsedFirstBlock::Header(
             candidate
                 .leading_comments
@@ -2570,7 +2628,12 @@ where
     let block = block_parser::<I>(options);
     let first = choice((
         first_tune_or_header_parser::<I>(options),
-        initial_header_parser::<I>().map(ParsedFirstBlock::Header),
+        initial_header_parser::<I>().map_with(|lines, extra| {
+            if let Some(span) = first_field_span_in_lines(&lines) {
+                extra.state().0.note_field_led_start(span);
+            }
+            ParsedFirstBlock::Header(lines)
+        }),
         text_block_parser::<I>(options).map(ParsedFirstBlock::Content),
     ));
     blank_line
@@ -2627,6 +2690,7 @@ where
     let mut state = extra::SimpleState(ParserStateValue {
         errors: Vec::new(),
         warnings: Vec::new(),
+        last_field_led_span: None,
     });
     let result = document_parser(options).parse_with_state(input, &mut state);
     (result, (state.0.errors, state.0.warnings))

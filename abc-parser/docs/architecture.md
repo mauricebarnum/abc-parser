@@ -76,9 +76,14 @@ granularity:
    recovery, while free text retains raw spans without invoking that grammar.
 4. A strict probe of a raw deciding line records a non-fatal
    [`ErrorKind::MissingReference`] warning when the whole line is valid music;
-   the parser classifies the block as free text.
+   the parser classifies the block as free text. When the immediately preceding
+   block was field-led, the warning also carries a [`RelatedSpan`] at that
+   block's first information field, suggesting an extra blank line may have
+   split the music from its header. Because the hint is gated on the preceding
+   block, a run of orphan music blocks only annotates the first one.
 5. `map_with` attaches native input spans. Parser state carries typed document
-   diagnostics separately from Chumsky's `Rich` token-error channel.
+   diagnostics and the most recent field-led block start separately from
+   Chumsky's `Rich` token-error channel.
 6. The initial metadata-only block is the file header. Subsequent field-led
    blocks are [`Tune`] values even when their first field is not `X:`.
 7. Text-retention options are applied while semantic text items and tune lines
@@ -98,7 +103,9 @@ optional initial header. A tune ends at an empty line or EOF. This prevents
 letters in inter-tune prose from being interpreted as notes. A fieldless block
 stays in text mode: ordinary lines become free text, while recognized comments,
 directives, and typeset constructs keep their semantic node types. If a raw
-deciding line is valid music, [`parse`] reports an advisory warning.
+deciding line is valid music, [`parse`] reports an advisory warning that points
+at the preceding field-led block's first field when that block was just
+resolved.
 
 `%%text` and `%%center` are typed text nodes. A `%%begintext` through
 `%%endtext` sequence is one block node; each standard body line must begin with

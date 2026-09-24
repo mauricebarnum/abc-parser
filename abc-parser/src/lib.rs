@@ -1021,12 +1021,25 @@ where
         S: ChumskySpan,
         S::Offset: fmt::Display,
     {
-        self.render(&warning.message, &warning.span)
+        self.render_with_related(&warning.message, &warning.span, &warning.related)
             .unwrap_or_else(|| warning.to_string())
     }
 
     /// Resolves and renders one native source span.
     fn render(&mut self, message: &str, span: &S) -> Option<String>
+    where
+        R: SourceResolver<S>,
+    {
+        self.render_with_related(message, span, &[])
+    }
+
+    /// Resolves one primary span and any related spans into one diagnostic.
+    fn render_with_related(
+        &mut self,
+        message: &str,
+        span: &S,
+        related: &[RelatedSpan<S>],
+    ) -> Option<String>
     where
         R: SourceResolver<S>,
     {
@@ -1036,16 +1049,34 @@ where
             self.source = <R as SourceResolver<S>>::full_source(resolver)
                 .map_or(DiagnosticSource::Unavailable, DiagnosticSource::Resolved);
         }
+        let resolver = self.resolver;
         let DiagnosticSource::Resolved(source) = &self.source else {
             return None;
         };
-        render_diagnostic(
-            message,
-            &range,
-            source,
-            &mut self.line_starts,
-            &mut self.indexed_to,
-        )
+        let line_starts = &mut self.line_starts;
+        let indexed_to = &mut self.indexed_to;
+        let primary = diagnostic_lines(&range, source, line_starts, indexed_to)?;
+        let mut related_lines = Vec::with_capacity(related.len());
+        for related_span in related {
+            let related_range = resolver.diagnostic_range(&related_span.span)?;
+            let lines = diagnostic_lines(&related_range, source, line_starts, indexed_to)?;
+            related_lines.push((related_span, lines));
+        }
+        let mut gutter_width = primary.line_number.to_string().len();
+        for (_, lines) in &related_lines {
+            gutter_width = gutter_width.max(lines.line_number.to_string().len());
+        }
+        let mut rendered = render_primary_diagnostic(message, &primary, source, gutter_width);
+        for (related_span, lines) in related_lines {
+            rendered.push('\n');
+            rendered.push_str(&render_related_diagnostic(
+                &related_span.message,
+                &lines,
+                source,
+                gutter_width,
+            ));
+        }
+        Some(rendered)
     }
 }
 
@@ -1105,6 +1136,15 @@ where
     }
 }
 
+/// A secondary source location attached to a parser advisory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelatedSpan<S = Span> {
+    /// Half-open native span in the original input.
+    pub span: S,
+    /// Human-readable note explaining the significance of this location.
+    pub message: String,
+}
+
 /// A non-fatal parser advisory with an exact source location.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseWarning<S = Span> {
@@ -1114,6 +1154,8 @@ pub struct ParseWarning<S = Span> {
     pub message: String,
     /// Half-open native span in the original input.
     pub span: S,
+    /// Additional source locations that give context for this advisory.
+    pub related: Vec<RelatedSpan<S>>,
 }
 
 impl<S> fmt::Display for ParseWarning<S>
@@ -1149,14 +1191,23 @@ where
     }
 }
 
-/// Renders one byte-spanned diagnostic against its complete source.
-fn render_diagnostic(
-    message: &str,
+/// Source line, caret, and gutter information for one byte span.
+struct DiagnosticLines {
+    line_start: usize,
+    line_end: usize,
+    line_number: usize,
+    column: usize,
+    prefix: String,
+    marker: String,
+}
+
+/// Computes source line and caret information for one byte span.
+fn diagnostic_lines(
     span: &Span,
     source: &str,
     line_starts: &mut Vec<usize>,
     indexed_to: &mut usize,
-) -> Option<String> {
+) -> Option<DiagnosticLines> {
     let start = span.start;
     let end = span.end;
     if start > end
@@ -1193,13 +1244,58 @@ fn render_diagnostic(
     let highlight_end = end.min(line_end);
     let highlight_width = source[start..highlight_end].chars().count().max(1);
     let marker = "^".repeat(highlight_width);
-    let gutter_width = line_number.to_string().len();
-    Some(format!(
-        "{line_number}:{column}: {}\n{empty:>gutter_width$} |\n{line_number:>gutter_width$} | {}\n{empty:>gutter_width$} | {prefix}{marker}",
-        message,
-        &source[line_start..line_end],
+    Some(DiagnosticLines {
+        line_start,
+        line_end,
+        line_number,
+        column,
+        prefix,
+        marker,
+    })
+}
+
+/// Formats one primary diagnostic block.
+fn render_primary_diagnostic(
+    message: &str,
+    lines: &DiagnosticLines,
+    source: &str,
+    gutter_width: usize,
+) -> String {
+    let DiagnosticLines {
+        line_start,
+        line_end,
+        line_number,
+        column,
+        prefix,
+        marker,
+    } = lines;
+    format!(
+        "{line_number}:{column}: {message}\n{empty:>gutter_width$} |\n{line_number:>gutter_width$} | {}\n{empty:>gutter_width$} | {prefix}{marker}",
+        &source[*line_start..*line_end],
         empty = "",
-    ))
+    )
+}
+
+/// Formats one related-span block attached to a diagnostic.
+fn render_related_diagnostic(
+    message: &str,
+    lines: &DiagnosticLines,
+    source: &str,
+    gutter_width: usize,
+) -> String {
+    let DiagnosticLines {
+        line_start,
+        line_end,
+        line_number,
+        column,
+        prefix,
+        marker,
+    } = lines;
+    let source_line = &source[*line_start..*line_end];
+    format!(
+        "{empty:>gutter_width$} |\n{empty:>gutter_width$} = note: {message} at {line_number}:{column}\n{line_number}:{column}: {source_line}\n{empty:>gutter_width$} |\n{line_number:>gutter_width$} | {source_line}\n{empty:>gutter_width$} | {prefix}{marker}",
+        empty = "",
+    )
 }
 
 /// The syntax tree and every diagnostic produced during recovering parsing.

@@ -495,3 +495,45 @@ fn possible_music_warning_is_independent_of_text_retention() {
     assert_eq!(report.warnings.len(), 1);
     assert!(document(&report).items.is_empty());
 }
+
+#[test]
+fn header_then_orphan_music_suggests_extra_blank_line() {
+    let source = "X:1\nT:Example\nK:F\n\n% A\nCDEF |\n";
+    let report = parse_owned(source, ParserOptions::default());
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert_eq!(report.warnings.len(), 1, "{:#?}", report.warnings);
+    let warning = &report.warnings[0];
+    assert_eq!(warning.kind, ErrorKind::MissingReference);
+    assert_eq!(warning.span, SimpleSpan::from(23..29));
+    assert_eq!(warning.related.len(), 1, "{:#?}", warning.related);
+    assert_eq!(warning.related[0].span, SimpleSpan::from(0..3));
+    assert_eq!(
+        warning.related[0].message,
+        "preceding information field block"
+    );
+    let diagnostic = warning.diagnostic(source);
+    assert!(diagnostic.contains("= note:"), "{diagnostic}");
+    assert!(diagnostic.contains("X:1"), "{diagnostic}");
+    assert!(diagnostic.contains("1:1:"), "{diagnostic}");
+}
+
+#[test]
+fn chained_orphans_only_first_carries_the_hint() {
+    let source = "X:1\nK:F\n\n% A\nCDEF |\n\n% B\nGABc |\n";
+    let report = parse_owned(source, ParserOptions::default());
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert_eq!(report.warnings.len(), 2, "{:#?}", report.warnings);
+    assert_eq!(report.warnings[0].span, SimpleSpan::from(13..19));
+    assert_eq!(report.warnings[0].related.len(), 1);
+    assert_eq!(report.warnings[0].related[0].span, SimpleSpan::from(0..3));
+    assert_eq!(report.warnings[1].span, SimpleSpan::from(25..31));
+    assert!(report.warnings[1].related.is_empty());
+}
+
+#[test]
+fn non_music_fieldless_block_does_not_warn_under_allow() {
+    let source = "X:1\nK:C\n\nThis is ordinary prose, not music.\n";
+    let report = parse_owned(source, ParserOptions::default());
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    assert!(report.warnings.is_empty(), "{:#?}", report.warnings);
+}
