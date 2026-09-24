@@ -10,6 +10,9 @@
 - Add examples for complex functionality
 - Follow the Rust API [guidelines](https://rust-lang.github.io/api-guidelines/) where practical, document deviations with motivation
 - Prefer to select [blessed](https://blessed.rs/crates) crates when choosing dependencies
+- Public API stability: this crate is not yet published; breaking changes to
+  the public API are acceptable while the design stabilizes. Note deliberate
+  breaks in commit messages.
 
 # Protected documentation
 

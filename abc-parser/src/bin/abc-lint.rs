@@ -204,6 +204,7 @@ fn fixable_syntax_warnings(
                 kind: ErrorKind::FixableSyntax,
                 message: "missing X: field will be assigned a unique reference by --fix".to_owned(),
                 span: line.span,
+                related: Vec::new(),
             });
         }
         let header_end = tune
@@ -224,6 +225,7 @@ fn fixable_syntax_warnings(
                                 kind: ErrorKind::FixableSyntax,
                                 message: "inline H: field will be removed by --fix".to_owned(),
                                 span: element.span,
+                                related: Vec::new(),
                             });
                         }
                         MusicElement::Decoration(Decoration {
@@ -235,6 +237,7 @@ fn fixable_syntax_warnings(
                                 message: "deprecated +name+ decoration will be rewritten as !name!"
                                     .to_owned(),
                                 span: element.span,
+                                related: Vec::new(),
                             });
                         }
                         _ => {}
@@ -271,6 +274,7 @@ fn canonical_form_warning(
                         "document is not in canonical form; first difference: --fix expects {expected:?}, found {found:?}"
                     ),
                     span: (start..start + found.len_utf8()).into(),
+                    related: Vec::new(),
                 });
             }
             (Some((start, found)), None) => {
@@ -280,6 +284,7 @@ fn canonical_form_warning(
                         "document is not in canonical form; first difference: --fix expects end of input, found {found:?}"
                     ),
                     span: (start..start + found.len_utf8()).into(),
+                    related: Vec::new(),
                 });
             }
             (None, Some((_, expected))) => {
@@ -289,6 +294,7 @@ fn canonical_form_warning(
                         "document is not in canonical form; first difference: --fix expects {expected:?}, found end of input"
                     ),
                     span: (source.len()..source.len()).into(),
+                    related: Vec::new(),
                 });
             }
             (None, None) => return None,
@@ -319,6 +325,7 @@ where
                         message: "field continuation will move next to its field during --fix"
                             .to_owned(),
                         span: line.span.clone(),
+                        related: Vec::new(),
                     });
                 }
                 has_intervening_line = false;
@@ -350,6 +357,7 @@ fn collect_line_fix_warnings<S>(
                     kind: ErrorKind::FixableSyntax,
                     message: "H: field will be removed by --fix".to_owned(),
                     span: line.span.clone(),
+                    related: Vec::new(),
                 }),
                 Field {
                     kind: FieldKind::Reference,
@@ -360,6 +368,7 @@ fn collect_line_fix_warnings<S>(
                     message: "empty X: field will be assigned a unique reference by --fix"
                         .to_owned(),
                     span: line.span.clone(),
+                    related: Vec::new(),
                 }),
                 _ => {}
             }
@@ -392,6 +401,7 @@ where
                     field.key
                 ),
                 span: line.span.clone(),
+                related: Vec::new(),
             });
         }
     }
@@ -442,6 +452,7 @@ where
                         field.key,
                     ),
                     span: line.span.clone(),
+                    related: Vec::new(),
                 });
             }
             preceding_fields.push((rank, field.key));
