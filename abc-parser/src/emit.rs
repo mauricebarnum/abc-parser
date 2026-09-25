@@ -1106,10 +1106,37 @@ where
     T: AsRef<str>,
 {
     fn write_abc(&self, output: &mut dyn Write) -> fmt::Result {
+        if let Some(character) = shorthand_decoration(self.name.as_ref()) {
+            return output.write_char(character);
+        }
         let delimiter = if self.legacy_delimiter { '+' } else { '!' };
         output.write_char(delimiter)?;
         output.write_str(self.name.as_ref())?;
         output.write_char(delimiter)
+    }
+}
+
+/// Returns the canonical shorthand character for a standard decoration name.
+///
+/// Names that resolve to one of the eleven shorthand symbols introduced in
+/// ABC 2.1 §4.14 are mapped to their single-character spelling, including
+/// documented aliases such as `!>!`, `!emphasis!`, `!mordent!`, and
+/// `!pralltriller!`. All other names are returned as `None` so the caller can
+/// fall back to emitting `!name!` (or the deprecated `+name+`) delimiters.
+fn shorthand_decoration(name: &str) -> Option<char> {
+    match name {
+        "staccato" => Some('.'),
+        "roll" => Some('~'),
+        "fermata" => Some('H'),
+        "accent" | "emphasis" | ">" => Some('L'),
+        "lowermordent" | "mordent" => Some('M'),
+        "coda" => Some('O'),
+        "uppermordent" | "pralltriller" => Some('P'),
+        "segno" => Some('S'),
+        "trill" => Some('T'),
+        "upbow" => Some('u'),
+        "downbow" => Some('v'),
+        _ => None,
     }
 }
 
@@ -1386,5 +1413,64 @@ mod tests {
         );
         emitter.emit(&LegacyValue).unwrap();
         assert_eq!(output, "legacy");
+    }
+
+    fn round_trip(input: &str) -> String {
+        let wrapped = format!("X:1\nK:C\n{input}");
+        let document = parse(wrapped.as_str())
+            .output
+            .unwrap()
+            .into_owned(wrapped.as_str())
+            .unwrap();
+        document.to_abc().trim_end().to_owned()
+    }
+
+    #[test]
+    fn decoration_shorthand_canonicalizes_to_their_character_form() {
+        for (input, expected) in [
+            (".A", ".A"),
+            ("!staccato!A", ".A"),
+            ("+staccato+A", ".A"),
+            ("~A", "~A"),
+            ("!roll!A", "~A"),
+            ("HA", "HA"),
+            ("!fermata!A", "HA"),
+            ("LA", "LA"),
+            ("!accent!A", "LA"),
+            ("!emphasis!A", "LA"),
+            ("!>!A", "LA"),
+            ("MA", "MA"),
+            ("!lowermordent!A", "MA"),
+            ("!mordent!A", "MA"),
+            ("OA", "OA"),
+            ("!coda!A", "OA"),
+            ("PA", "PA"),
+            ("!uppermordent!A", "PA"),
+            ("!pralltriller!A", "PA"),
+            ("SA", "SA"),
+            ("!segno!A", "SA"),
+            ("TA", "TA"),
+            ("!trill!A", "TA"),
+            ("uA", "uA"),
+            ("!upbow!A", "uA"),
+            ("vA", "vA"),
+            ("!downbow!A", "vA"),
+        ] {
+            let document = format!("X:1\nK:C\n{expected}");
+            assert_eq!(round_trip(input), document, "{input}");
+        }
+    }
+
+    #[test]
+    fn named_decorations_without_shorthand_preserve_their_delimiters() {
+        for (input, expected) in [
+            ("!turn!A", "!turn!A"),
+            ("!breath!A", "!breath!A"),
+            ("!pp!A", "!pp!A"),
+            ("!crescendo(!A", "!crescendo(!A"),
+        ] {
+            let document = format!("X:1\nK:C\n{expected}");
+            assert_eq!(round_trip(input), document, "{input}");
+        }
     }
 }
