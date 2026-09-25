@@ -65,6 +65,42 @@ fn erase_line_locations(line: &mut OwnedLine) {
     }
 }
 
+/// Rewrites each named decoration to its canonical shorthand spelling so the
+/// canonical emission and reparse round-trip agrees even when the source uses
+/// one of the documented aliases such as `!>!` for `L`.
+fn canonicalize_decorations(document: &mut OwnedDocument<SimpleSpan<usize>>) {
+    fn rewrite(decoration: &mut abc_parser::Decoration<String>) {
+        decoration.name = match decoration.name.as_str() {
+            "staccato" => ".".into(),
+            "roll" => "~".into(),
+            "fermata" => "H".into(),
+            "accent" | "emphasis" | ">" => "L".into(),
+            "lowermordent" | "mordent" => "M".into(),
+            "coda" => "O".into(),
+            "uppermordent" | "pralltriller" => "P".into(),
+            "segno" => "S".into(),
+            "trill" => "T".into(),
+            "upbow" => "u".into(),
+            "downbow" => "v".into(),
+            _ => return,
+        };
+    }
+    for item in &mut document.items {
+        if let abc_parser::DocumentItem::Tune(tune) = &mut item.value {
+            for line in &mut tune.lines {
+                if let Line::Music(elements) = &mut line.value {
+                    for element in elements {
+                        if let abc_parser::MusicElement::Decoration(decoration) = &mut element.value
+                        {
+                            rewrite(decoration);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn parses_kitchen_sink_with_spans() {
     let report = parse_owned(KITCHEN_SINK);
@@ -173,5 +209,7 @@ fn emitted_kitchen_sink_parses_as_a_complete_document() {
     let mut actual = reparsed.output.unwrap();
     erase_source_locations(&mut expected);
     erase_source_locations(&mut actual);
+    canonicalize_decorations(&mut expected);
+    canonicalize_decorations(&mut actual);
     assert_eq!(actual, expected);
 }
