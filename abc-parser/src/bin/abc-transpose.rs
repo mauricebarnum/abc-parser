@@ -17,7 +17,8 @@
 //! The command accepts either a destination key for each tune or a signed
 //! chromatic interval, plus an optional octave displacement. Transposed notes
 //! use explicit accidentals, making the emitted result independent of
-//! accidental propagation in the destination.
+//! accidental propagation in the destination. Chord symbols are transposed
+//! to match the destination key or interval.
 
 use std::fs;
 use std::io;
@@ -27,6 +28,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use abc_parser::Accidental;
+use abc_parser::AnnotationPlacement;
 use abc_parser::BarLine;
 use abc_parser::ChordMember;
 use abc_parser::DiagnosticRenderer;
@@ -532,7 +534,7 @@ fn transpose_field(
     Ok(())
 }
 
-/// Transposes notes, chords, grace notes, inline keys, and bar state.
+/// Transposes notes, chords, grace notes, chord symbols, inline keys, and bar state.
 fn transpose_music_element(
     element: &mut MusicElement<String>,
     state: &mut TranspositionState,
@@ -556,6 +558,16 @@ fn transpose_music_element(
             Ok(())
         }
         MusicElement::InlineField(field) => transpose_field(field, state),
+        MusicElement::Annotation(annotation) => {
+            if annotation.placement == AnnotationPlacement::ChordSymbol {
+                annotation.text = transpose_chord_annotation(
+                    &annotation.text,
+                    state.interval,
+                    state.prefer_flats,
+                );
+            }
+            Ok(())
+        }
         MusicElement::Bar(BarLine { .. }) => {
             state.source_measure_accidentals.clear();
             state.destination_measure_accidentals.clear();
@@ -1021,6 +1033,398 @@ const fn natural_semitone(class: PitchClass) -> i16 {
     }
 }
 
+/// Transposes chord symbols inside an annotation while preserving non-chord text.
+fn transpose_chord_annotation(text: &str, interval: i16, prefer_flats: bool) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remainder = text;
+    while !remainder.is_empty() {
+        if let Some((len, transposed)) = match_chord(remainder, interval, prefer_flats) {
+            result.push_str(&transposed);
+            remainder = &remainder[len..];
+        } else {
+            let next_char = remainder.chars().next().expect("remainder is not empty");
+            result.push(next_char);
+            remainder = &remainder[next_char.len_utf8()..];
+        }
+    }
+    result
+}
+
+/// Attempts to parse a leading chord symbol or standalone bass note.
+fn match_chord(s: &str, interval: i16, prefer_flats: bool) -> Option<(usize, String)> {
+    if let Some((bass_len, (bass_char, bass_acc))) = s.strip_prefix('/').and_then(parse_bass_note) {
+        let (new_bass, new_bass_acc) = transpose_note(bass_char, bass_acc, interval, prefer_flats);
+        return Some((1 + bass_len, format!("/{new_bass}{new_bass_acc}")));
+    }
+
+    let root_char = s.chars().next()?;
+    if !matches!(root_char, 'A'..='G') {
+        return None;
+    }
+    let after_root = &s[root_char.len_utf8()..];
+    let (root_acc_len, root_acc) = parse_accidental(after_root);
+    let after_acc = &after_root[root_acc_len..];
+
+    let mut type_end = 0;
+    let mut bass_info = None;
+
+    let mut char_indices = after_acc.char_indices().peekable();
+    while let Some((offset, ch)) = char_indices.next() {
+        let tail = &after_acc[offset..];
+        if ch == '/' {
+            if let Some((bass_len, (bass_char, bass_acc))) = parse_bass_note(&tail[1..]) {
+                type_end = offset;
+                bass_info = Some((1 + bass_len, bass_char, bass_acc));
+                break;
+            }
+        } else if ch == '(' {
+            let inside = &tail[1..];
+            if let Some(close_idx) = inside.find(')') {
+                let inner = &inside[..close_idx];
+                if starts_with_chord_root(inner) {
+                    type_end = offset;
+                    break;
+                }
+                let end_paren_offset = offset + 1 + close_idx;
+                while let Some(&(next_offset, _)) = char_indices.peek() {
+                    if next_offset <= end_paren_offset {
+                        char_indices.next();
+                    } else {
+                        break;
+                    }
+                }
+                type_end = end_paren_offset + 1;
+                continue;
+            }
+        } else if is_chord_boundary(tail) {
+            type_end = offset;
+            break;
+        }
+        type_end = offset + ch.len_utf8();
+    }
+
+    let chord_type = &after_acc[..type_end];
+    if !is_valid_chord_type(chord_type) {
+        return None;
+    }
+
+    let total_chord_len = root_char.len_utf8() + root_acc_len + type_end;
+    let (slash_len, (new_bass, new_bass_acc)) = if let Some((len, bass_char, bass_acc)) = bass_info
+    {
+        (
+            len,
+            transpose_note(bass_char, bass_acc, interval, prefer_flats),
+        )
+    } else if is_chord_boundary(&after_acc[type_end..]) {
+        (0, ('\0', ""))
+    } else {
+        return None;
+    };
+
+    let (new_root, new_root_acc) = transpose_note(root_char, root_acc, interval, prefer_flats);
+    let mut out = format!("{new_root}{new_root_acc}{chord_type}");
+    if slash_len > 0 {
+        out.push('/');
+        out.push(new_bass);
+        out.push_str(new_bass_acc);
+    }
+    Some((total_chord_len + slash_len, out))
+}
+
+/// Returns whether the inner text begins with a valid chord symbol.
+fn starts_with_chord_root(s: &str) -> bool {
+    let s = s.trim_start();
+    let Some(first) = s.chars().next() else {
+        return false;
+    };
+    if !matches!(first, 'A'..='G') {
+        return false;
+    }
+    let after_root = &s[first.len_utf8()..];
+    let (acc_len, _) = parse_accidental(after_root);
+    let after_acc = &after_root[acc_len..];
+    let type_candidate = if let Some(slash_idx) = after_acc.find('/') {
+        &after_acc[..slash_idx]
+    } else {
+        after_acc
+    };
+    is_valid_chord_type(type_candidate)
+}
+
+/// Parses an accidental prefix from a note or bass-note string.
+fn parse_accidental(s: &str) -> (usize, Option<&str>) {
+    if s.starts_with("##") {
+        (2, Some("##"))
+    } else if s.starts_with('#') {
+        (1, Some("#"))
+    } else if s.starts_with("bb") {
+        (2, Some("bb"))
+    } else if s.starts_with('b') {
+        (1, Some("b"))
+    } else if s.starts_with('♯') {
+        ('♯'.len_utf8(), Some("♯"))
+    } else if s.starts_with('♭') {
+        ('♭'.len_utf8(), Some("♭"))
+    } else if s.starts_with('♮') {
+        ('♮'.len_utf8(), Some("♮"))
+    } else {
+        (0, None)
+    }
+}
+
+/// Parses a bass note and optional accidental, verifying it ends at a boundary.
+fn parse_bass_note(s: &str) -> Option<(usize, (char, Option<&str>))> {
+    let bass_char = s.chars().next()?;
+    if !matches!(bass_char, 'A'..='G' | 'a'..='g') {
+        return None;
+    }
+    let after_bass_char = &s[bass_char.len_utf8()..];
+    let (acc_len, acc) = parse_accidental(after_bass_char);
+    let after_bass = &after_bass_char[acc_len..];
+    if !is_chord_boundary(after_bass) {
+        return None;
+    }
+    Some((bass_char.len_utf8() + acc_len, (bass_char, acc)))
+}
+
+/// Transposes a single note letter and accidental by a signed chromatic interval.
+fn transpose_note(
+    letter: char,
+    accidental: Option<&str>,
+    interval: i16,
+    prefer_flats: bool,
+) -> (char, &'static str) {
+    let is_lowercase = letter.is_ascii_lowercase();
+    let class = match letter.to_ascii_uppercase() {
+        'C' => PitchClass::C,
+        'D' => PitchClass::D,
+        'E' => PitchClass::E,
+        'F' => PitchClass::F,
+        'G' => PitchClass::G,
+        'A' => PitchClass::A,
+        'B' => PitchClass::B,
+        _ => return (letter, ""),
+    };
+    let offset: i16 = match accidental {
+        Some("#" | "♯") => 1,
+        Some("##") => 2,
+        Some("b" | "♭") => -1,
+        Some("bb") => -2,
+        _ => 0,
+    };
+    let semitone = natural_semitone(class) + offset;
+    let transposed_semitone = (semitone + interval).rem_euclid(12);
+    let transposed_semitone =
+        u8::try_from(transposed_semitone).expect("a value modulo twelve fits in u8");
+    let (new_class, new_acc) = chromatic_spelling(transposed_semitone, prefer_flats);
+    let new_letter = match new_class {
+        PitchClass::C => 'C',
+        PitchClass::D => 'D',
+        PitchClass::E => 'E',
+        PitchClass::F => 'F',
+        PitchClass::G => 'G',
+        PitchClass::A => 'A',
+        PitchClass::B => 'B',
+    };
+    let new_letter = if is_lowercase {
+        new_letter.to_ascii_lowercase()
+    } else {
+        new_letter
+    };
+    let is_unicode = accidental.is_some_and(|a| a.contains(['♯', '♭', '♮']));
+    let new_acc_str = match new_acc {
+        1 => {
+            if is_unicode {
+                "♯"
+            } else {
+                "#"
+            }
+        }
+        -1 => {
+            if is_unicode {
+                "♭"
+            } else {
+                "b"
+            }
+        }
+        _ => "",
+    };
+    (new_letter, new_acc_str)
+}
+
+/// Returns whether a slice starts at a valid boundary between chord tokens.
+fn is_chord_boundary(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    let first = s.chars().next().expect("slice is not empty");
+    first.is_ascii_whitespace()
+        || matches!(
+            first,
+            ')' | '(' | '[' | ']' | '{' | '}' | ',' | ';' | '|' | ':' | '"' | '<' | '>'
+        )
+        || (first == '-' && s.len() > 1 && matches!(s.as_bytes()[1], b'A'..=b'G'))
+}
+
+/// Returns whether the string is composed entirely of valid chord-type descriptors.
+fn is_valid_chord_type(mut s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    while !s.is_empty() {
+        if let Some(rest) = s.strip_prefix('(') {
+            let Some(close_idx) = rest.find(')') else {
+                return false;
+            };
+            let inside = &rest[..close_idx];
+            if !is_valid_chord_extension_list(inside) {
+                return false;
+            }
+            s = &rest[close_idx + 1..];
+            continue;
+        }
+
+        let Some(len) = match_chord_type_token(s) else {
+            return false;
+        };
+        s = &s[len..];
+    }
+    true
+}
+
+/// Returns whether a parenthesized list contains only valid chord extensions.
+fn is_valid_chord_extension_list(mut s: &str) -> bool {
+    s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    while !s.is_empty() {
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix([',', '/', ' ']) {
+            s = rest;
+            continue;
+        }
+        let Some(len) = match_chord_type_token(s) else {
+            return false;
+        };
+        s = &s[len..];
+    }
+    true
+}
+
+const CHORD_TYPE_TOKENS: &[&str] = &[
+    "diminished",
+    "augmented",
+    "minor",
+    "major",
+    "m/maj7",
+    "m/maj9",
+    "m(maj7)",
+    "m(maj9)",
+    "add11",
+    "add13",
+    "omit3",
+    "omit5",
+    "sus4",
+    "sus2",
+    "add2",
+    "add4",
+    "add9",
+    "maj7",
+    "maj9",
+    "maj11",
+    "maj13",
+    "min7",
+    "min9",
+    "min11",
+    "min13",
+    "dim7",
+    "aug7",
+    "sus",
+    "min",
+    "maj",
+    "dim",
+    "aug",
+    "add",
+    "alt",
+    "no3",
+    "no5",
+    "6/9",
+    "69",
+    "11",
+    "13",
+    "#11",
+    "b11",
+    "+11",
+    "♯11",
+    "♭11",
+    "#13",
+    "b13",
+    "-13",
+    "♯13",
+    "♭13",
+    "#5",
+    "b5",
+    "+5",
+    "-5",
+    "♯5",
+    "♭5",
+    "#9",
+    "b9",
+    "+9",
+    "-9",
+    "♯9",
+    "♭9",
+    "o7",
+    "°7",
+    "ø7",
+    "Δ7",
+    "^7",
+    "Δ9",
+    "^9",
+    "M7",
+    "M9",
+    "M11",
+    "M13",
+    "m7",
+    "m9",
+    "m11",
+    "m13",
+    "m6",
+    "m2",
+    "m4",
+    "m5",
+    "m8",
+    "m",
+    "M",
+    "2",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "+",
+    "-",
+    "°",
+    "ø",
+    "0",
+    "Δ",
+    "^",
+    "#",
+    "b",
+];
+
+/// Matches the longest recognized chord-type token at the start of a slice.
+fn match_chord_type_token(s: &str) -> Option<usize> {
+    for &token in CHORD_TYPE_TOKENS {
+        if s.starts_with(token) {
+            return Some(token.len());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use abc_parser::IntoOwnedAst;
@@ -1316,5 +1720,109 @@ mod tests {
         assert!(parse_steps("0.25").is_err());
         assert!(parse_steps("-+0.5").is_err());
         assert!(parse_steps("half").is_err());
+    }
+
+    #[test]
+    fn chord_symbols_transpose_with_semitone_interval() {
+        let output = transpose(
+            "X:1\nK:C\n\"C\"C \"Am\"A \"G7\"G | \"F#m\"F |\n",
+            &Request::Semitones(2),
+        );
+        assert!(
+            output.contains("\"D\"D \"Bm\"B \"A7\"A | \"G#m\"G |"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn slash_chords_transpose_root_and_bass() {
+        let output = transpose(
+            "X:1\nK:C\n\"C/E\"C \"Am/G\"A \"F/c\"F | \"/G\"G |\n",
+            &Request::Semitones(2),
+        );
+        assert!(
+            output.contains("\"D/F#\"D \"Bm/A\"B \"G/d\"G | \"/A\"A |"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn alternate_chords_transpose_both_chords() {
+        let output = transpose(
+            "X:1\nK:C\n\"G(Em)\"G \"C (Am)\"C | \"(Em)\"E \"C/E(G/B)\"C |\n",
+            &Request::Semitones(2),
+        );
+        assert!(
+            output.contains("\"A(F#m)\"A \"D (Bm)\"D | \"(F#m)\"F \"D/F#(A/C#)\"D |"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn complex_chords_preserve_tensions_and_alterations() {
+        let output = transpose(
+            "X:1\nK:C\n\"Cmaj7\"C \"Cm7b5\"C \"C7#9\"C \"C7(b9)\"C | \"C6/9\"C \"Caug\"C \"C+\"C \"C-7\"C \"C°7\"C \"Cø\"C \"CΔ7\"C \"Cadd9\"C |\n",
+            &Request::Semitones(2),
+        );
+        assert!(
+            output.contains("\"Dmaj7\"D \"Dm7b5\"D \"D7#9\"D \"D7(b9)\"D |"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "\"D6/9\"D \"Daug\"D \"D+\"D \"D-7\"D \"D°7\"D \"Dø\"D \"DΔ7\"D \"Dadd9\"D |"
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn multiple_chords_and_non_chord_annotations() {
+        let output = transpose(
+            "X:1\nK:C\n\"C G\"C \"C - G\"C \"C | G\"C | \"Fine\"C \"^C\"C \"_G\"G \"<D\"D |\n",
+            &Request::Semitones(2),
+        );
+        assert!(
+            output.contains("\"D A\"D \"D - A\"D \"D | A\"D | \"Fine\"D \"^C\"D \"_G\"A \"<D\"E |"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn chord_symbols_follow_enharmonic_spelling_preferences() {
+        let source = "X:1\nK:C\n\"C\"C |\n";
+        let sharps =
+            transpose_with_spelling(source, &Request::Semitones(1), SpellingPreference::Sharps);
+        assert!(sharps.contains("\"C#\""), "{sharps}");
+
+        let flats =
+            transpose_with_spelling(source, &Request::Semitones(1), SpellingPreference::Flats);
+        assert!(flats.contains("\"Db\""), "{flats}");
+    }
+
+    #[test]
+    fn octave_transposition_does_not_affect_chord_symbols() {
+        let output = transpose_with_options(
+            "X:1\nK:C\n\"C\"C \"Am\"A |\n",
+            &Request::Semitones(0),
+            SpellingPreference::Auto,
+            1,
+        );
+        assert!(output.contains("\"C\"c \"Am\"a |"), "{output}");
+    }
+
+    #[test]
+    fn chord_symbols_transpose_with_destination_key() {
+        let output = transpose(
+            "X:1\nK:C\n\"C\"C \"F\"F \"G\"G |\n",
+            &Request::Key(parse_key("D").unwrap()),
+        );
+        assert!(output.contains("K:D\n\"D\"D \"G\"G \"A\"A |"), "{output}");
+    }
+
+    #[test]
+    fn unicode_accidentals_in_chord_symbols() {
+        let output = transpose("X:1\nK:C\n\"C♯\"C \"B♭m\"A |\n", &Request::Semitones(2));
+        assert!(output.contains("\"D♯\"D \"Cm\"B |"), "{output}");
     }
 }
