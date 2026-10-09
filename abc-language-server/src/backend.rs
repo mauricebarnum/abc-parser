@@ -106,6 +106,17 @@ impl DocumentState {
             config,
         }
     }
+
+    fn reconfigure(&self, new_config: Config) -> Self {
+        let model = self.model.reconfigure(new_config);
+        let index = self.index.clone();
+        Self {
+            version: self.version,
+            index,
+            model,
+            config: new_config,
+        }
+    }
 }
 
 async fn analyze_document(
@@ -211,17 +222,11 @@ impl Backend {
         let republished = {
             let mut state = self.state.write().await;
             state.config = config;
-            let encoding = state.encoding.clone();
             let documents = state
                 .documents
                 .iter()
                 .map(|(uri, document)| {
-                    let replacement = Arc::new(DocumentState::new(
-                        document.index.source().to_owned(),
-                        document.version,
-                        &encoding,
-                        config,
-                    ));
+                    let replacement = Arc::new(document.reconfigure(config));
                     (uri.clone(), replacement)
                 })
                 .collect::<Vec<_>>();
@@ -236,21 +241,14 @@ impl Backend {
     }
 
     async fn refresh_configuration(&self) {
-        let (fallback, encoding, snapshots) = {
+        let (fallback, current_docs) = {
             let state = self.state.read().await;
             (
                 state.config,
-                state.encoding.clone(),
                 state
                     .documents
                     .iter()
-                    .map(|(uri, document)| {
-                        (
-                            uri.clone(),
-                            document.version,
-                            document.index.source().to_owned(),
-                        )
-                    })
+                    .map(|(uri, doc)| (uri.clone(), Arc::clone(doc)))
                     .collect::<Vec<_>>(),
             )
         };
@@ -258,7 +256,7 @@ impl Backend {
             scope_uri: None,
             section: Some("abc".to_owned()),
         }];
-        items.extend(snapshots.iter().map(|(uri, _, _)| ConfigurationItem {
+        items.extend(current_docs.iter().map(|(uri, _)| ConfigurationItem {
             scope_uri: Some(uri.clone()),
             section: Some("abc".to_owned()),
         }));
@@ -269,23 +267,15 @@ impl Backend {
             .first()
             .and_then(config_from_value)
             .unwrap_or(fallback);
-        let replacements = snapshots
+        let replacements = current_docs
             .into_iter()
             .enumerate()
-            .map(|(index, (uri, version, source))| {
+            .map(|(index, (uri, current_doc))| {
                 let document_config = values
                     .get(index + 1)
                     .and_then(config_from_value)
                     .unwrap_or(config);
-                (
-                    uri,
-                    Arc::new(DocumentState::new(
-                        source,
-                        version,
-                        &encoding,
-                        document_config,
-                    )),
-                )
+                (uri, Arc::new(current_doc.reconfigure(document_config)))
             })
             .collect::<Vec<_>>();
         let republished = {
@@ -1338,6 +1328,91 @@ mod tests {
         ];
         let result = apply_content_changes(Some(""), &edits, &PositionEncodingKind::UTF8);
         assert_eq!(result.as_deref(), Some("AB"));
+    }
+
+    #[tokio::test]
+    async fn configuration_change_republishes_diagnostics_without_reparse() {
+        let (mut service, mut client) = LspService::new(Backend::new);
+        let initialize = Request::build("initialize")
+            .params(json!({
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }))
+            .id(1)
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(initialize)
+            .await
+            .expect("initialize handled")
+            .expect("initialize response");
+
+        let uri = "file:///tmp/config_test.abc";
+        let source = "X:1\nT:Sample\nM:4/4\nL:1/4\nK:C\nCDEF |\nC D E |\n+trill+C |\n";
+        let open = Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "abc",
+                    "version": 1,
+                    "text": source
+                }
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(open)
+            .await
+            .expect("open handled");
+        let initial_published = next_publish(&mut client).await;
+        let initial_diagnostics = initial_published
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(initial_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("bar-duration")
+        }));
+        assert!(initial_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("legacy-decoration")
+        }));
+
+        let config_change = Request::build("workspace/didChangeConfiguration")
+            .params(json!({
+                "settings": {
+                    "abc": {
+                        "validation": {
+                            "barDuration": "off"
+                        }
+                    }
+                }
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(config_change)
+            .await
+            .expect("config change handled");
+
+        let updated_published = next_publish(&mut client).await;
+        let updated_diagnostics = updated_published
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(!updated_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("bar-duration")
+        }));
+        assert!(updated_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("legacy-decoration")
+        }));
     }
 
     #[tokio::test]
