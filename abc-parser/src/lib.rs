@@ -928,6 +928,14 @@ pub enum ErrorKind {
     FixableSyntax,
     /// A free text block appears outside any tune.
     FreeTextOutsideTune,
+    /// An information field letter is not part of the §3 standard table.
+    UnrecognizedField,
+    /// A field restricted to the file or tune header appears in the tune body.
+    HeaderFieldInBody,
+    /// An `I:linebreak` instruction appears in the tune body.
+    InstructionInBody,
+    /// A `\` continuation at the end of a music line is followed by an empty line.
+    MusicLineContinuationBeforeEmpty,
 }
 
 /// A recoverable syntax error with an exact source location.

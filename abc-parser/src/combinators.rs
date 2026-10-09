@@ -522,6 +522,20 @@ where
     .map(SourceText::Span)
 }
 
+/// Parses the value of an `I:` instruction as owned text so the `linebreak`
+/// token can be inspected without resolving a span.
+fn instruction_text_value<'src, I>()
+-> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    line_character()
+        .repeated()
+        .collect::<String>()
+        .map(SourceText::Synthesized)
+}
+
 /// Parses the uninterpreted remainder of a comment line.
 fn comment_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
 where
@@ -529,6 +543,19 @@ where
     I::Span: Clone,
 {
     line_character().repeated().to_span().map(SourceText::Span)
+}
+
+/// Parses the uninterpreted remainder of an inline information field value.
+fn inline_field_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    any()
+        .filter(|character| !matches!(character, ']' | '\r' | '\n'))
+        .repeated()
+        .to_span()
+        .map(SourceText::Span)
 }
 
 /// Parses a comment line, including the permitted leading horizontal space.
@@ -1011,17 +1038,21 @@ where
             .labelled("m: macro definition (pattern=replacement)")
             .as_context(),
     ));
+    let textual_instruction = just('I')
+        .then_ignore(just(':'))
+        .then(instruction_text_value())
+        .map(|(key, value)| field(key, FieldValue::Text(value)));
     let textual = any()
         .filter(|key: &char| key.is_ascii_alphabetic() && !has_structured_field_parser(*key))
         .then_ignore(just(':'))
         .then(remaining_text())
         .map_with(|(key, value), extra| {
-            let message = match key {
+            let deprecated = match key {
                 'A' => Some("deprecated A: area field; use O: origin instead"),
                 'E' => Some("deprecated E: element-spacing field is retained as text"),
                 _ => None,
             };
-            if let Some(message) = message {
+            if let Some(message) = deprecated {
                 let span = extra.span();
                 extra.state().0.warnings.push(ParseWarning {
                     kind: ErrorKind::DeprecatedSyntax,
@@ -1029,10 +1060,18 @@ where
                     span,
                     related: Vec::new(),
                 });
+            } else if matches!(field_kind(key), FieldKind::Extension(_)) {
+                let span = extra.span();
+                extra.state().0.warnings.push(ParseWarning {
+                    kind: ErrorKind::UnrecognizedField,
+                    message: format!("unrecognized information field {key}:"),
+                    span,
+                    related: Vec::new(),
+                });
             }
             field(key, FieldValue::Text(value))
         });
-    choice((structured, textual))
+    choice((structured, textual_instruction, textual))
 }
 
 /// Retains malformed structured fields as spans and emits a non-fatal error.
@@ -1257,14 +1296,19 @@ where
             key.is_ascii_alphabetic() && !matches!(*key, 'L' | 'M' | 'K' | 'X' | 'Q' | 'V' | 'P')
         })
         .then_ignore(just(':'))
-        .then(
-            any()
-                .filter(|character| !matches!(character, ']' | '\r' | '\n'))
-                .repeated()
-                .to_span()
-                .map(SourceText::Span),
-        )
-        .map(|(key, value)| field(key, FieldValue::Text(value)));
+        .then(inline_field_text())
+        .map_with(|(key, value), extra| {
+            if matches!(field_kind(key), FieldKind::Extension(_)) {
+                let span = extra.span();
+                extra.state().0.warnings.push(ParseWarning {
+                    kind: ErrorKind::UnrecognizedField,
+                    message: format!("unrecognized inline information field [{key}:...]"),
+                    span,
+                    related: Vec::new(),
+                });
+            }
+            field(key, FieldValue::Text(value))
+        });
     just('[')
         .ignore_then(choice((
             common_structured_field_parser(FieldContext::Inline),
@@ -1820,6 +1864,29 @@ const fn is_tune_only_header_field(kind: FieldKind) -> bool {
     )
 }
 
+/// Returns whether a field is restricted to the file or tune header per §3 line 443.
+///
+/// Letters `A-G`, `X-Z`, `a-g`, and `x-z` are not permitted in the tune body
+/// to avoid confusion with note symbols, rests, and spacers. The deprecated
+/// `A:` and `E:` fields are excluded because they already emit their own
+/// `DeprecatedSyntax` advisory and would double-warn here.
+const fn is_body_forbidden_field(kind: FieldKind) -> bool {
+    matches!(
+        kind,
+        FieldKind::Book
+            | FieldKind::Composer
+            | FieldKind::Discography
+            | FieldKind::FileUrl
+            | FieldKind::Group
+            | FieldKind::History
+            | FieldKind::Origin
+            | FieldKind::Source
+            | FieldKind::Reference
+            | FieldKind::Transcription
+            | FieldKind::Extension(_)
+    )
+}
+
 /// Recognizes the boundary following a nonblank block without consuming it.
 fn block_end<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
 where
@@ -2311,6 +2378,84 @@ where
     }
 }
 
+/// Emits strict, non-fatal guidance for constructs that §3 and §6.1.1 forbid
+/// inside a tune body once music code has begun.
+fn validate_tune_body_strictness<S>(units: &[ParsedTuneUnit<S>], state: &mut ParserState<S>)
+where
+    S: Clone,
+{
+    let mut music_started = false;
+    let mut last_music_ended_with_continuation = false;
+    let mut last_music_span: Option<S> = None;
+    for unit in units {
+        if let ParsedTuneUnit::Line(line) = unit {
+            match &line.value {
+                Line::Music(_) => {
+                    music_started = true;
+                    last_music_ended_with_continuation = music_ends_with_continuation(&line.value);
+                    last_music_span = Some(line.span.clone());
+                }
+                Line::Field(field) if music_started => {
+                    if is_body_forbidden_field(field.kind) {
+                        state.0.warnings.push(ParseWarning {
+                            kind: ErrorKind::HeaderFieldInBody,
+                            message: format!(
+                                "{}: field is not permitted in the tune body (§3)",
+                                field.key
+                            ),
+                            span: line.span.clone(),
+                            related: Vec::new(),
+                        });
+                    } else if field.kind == FieldKind::Instruction
+                        && matches!(&field.value, FieldValue::Text(text) if starts_with_linebreak(text))
+                    {
+                        state.0.warnings.push(ParseWarning {
+                            kind: ErrorKind::InstructionInBody,
+                            message: "I:linebreak instruction is not allowed in the tune body"
+                                .to_owned(),
+                            span: line.span.clone(),
+                            related: Vec::new(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let (true, Some(span)) = (last_music_ended_with_continuation, last_music_span) {
+        state.0.warnings.push(ParseWarning {
+            kind: ErrorKind::MusicLineContinuationBeforeEmpty,
+            message:
+                "music line ends with a \\ continuation and is followed by an empty line (§6.1.1)"
+                    .to_owned(),
+            span,
+            related: Vec::new(),
+        });
+    }
+}
+
+/// Returns whether `text` starts with the literal `linebreak` token used by
+/// the `I:linebreak` instruction, ignoring leading horizontal whitespace.
+fn starts_with_linebreak<S>(text: &SourceText<S>) -> bool {
+    let value = match text {
+        SourceText::Synthesized(value) => value.as_str(),
+        SourceText::Span(_) => return false,
+    };
+    let trimmed = value.trim_start();
+    let token = "linebreak";
+    trimmed.len() >= token.len() && trimmed[..token.len()].eq_ignore_ascii_case(token)
+}
+
+/// Returns whether the music line ends with a `\` continuation.
+fn music_ends_with_continuation<S>(line: &Line<S, SourceText<S>>) -> bool {
+    match line {
+        Line::Music(elements) => elements.last().is_some_and(|element| {
+            matches!(element.value, MusicElement::LineBreak(LineBreak::Continue))
+        }),
+        _ => false,
+    }
+}
+
 /// Converts a resolved tune candidate and applies retention and strict validation.
 fn resolve_tune_candidate<S>(
     candidate: ParsedTuneCandidate<S>,
@@ -2368,6 +2513,7 @@ where
             }
         }
         validate_tune_header_order(&candidate.units, state);
+        validate_tune_body_strictness(&candidate.units, state);
     }
     let lines = candidate
         .units
