@@ -728,19 +728,19 @@ fn whitespace_edits(
     let source = index.source();
     let mut edits = Vec::new();
     if options.trim_trailing_whitespace == Some(true) {
-        let mut base = 0;
-        for line in source.split_inclusive('\n') {
-            let content = line.trim_end_matches(['\r', '\n']);
+        for (line_start, content) in index.line_iter() {
             let trimmed = content.trim_end_matches([' ', '\t']);
             if trimmed.len() < content.len() {
                 edits.push(TextEdit::new(
                     index
-                        .lsp_range(base + trimmed.len()..base + content.len(), encoding)
+                        .lsp_range(
+                            line_start + trimmed.len()..line_start + content.len(),
+                            encoding,
+                        )
                         .expect("ASCII whitespace is on character boundaries"),
                     String::new(),
                 ));
             }
-            base += line.len();
         }
     }
     if options.insert_final_newline == Some(true) && !source.ends_with('\n') {
