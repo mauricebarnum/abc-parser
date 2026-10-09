@@ -9,21 +9,27 @@ use serde::Deserialize;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    pub(super) validation: ValidationConfig,
-    pub(super) format: FormatConfig,
+    /// Validation and diagnostic settings.
+    pub validation: ValidationConfig,
+    /// Source formatting preferences.
+    pub format: FormatConfig,
 }
 
 /// Parser and advisory settings.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct ValidationConfig {
-    pub(super) strict: bool,
+    /// Whether strict ABC 2.1 conformance rules are enforced.
+    pub strict: bool,
+    /// Severity level for missing reference fields on music-like text.
     #[serde(rename = "ambiguousMusic")]
-    pub(super) ambiguous_music: DiagnosticLevel,
+    pub ambiguous_music: DiagnosticLevel,
+    /// Severity level for bar-duration mismatch diagnostics.
     #[serde(rename = "barDuration")]
-    pub(super) bar_duration: DiagnosticLevel,
+    pub bar_duration: DiagnosticLevel,
+    /// Severity level for deprecated legacy decoration warnings.
     #[serde(rename = "legacyDecoration")]
-    pub(super) legacy_decoration: DiagnosticLevel,
+    pub legacy_decoration: DiagnosticLevel,
 }
 
 impl Default for ValidationConfig {
@@ -41,10 +47,15 @@ impl Default for ValidationConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum DiagnosticLevel {
+    /// Suppress the diagnostic entirely.
     Off,
+    /// Render the diagnostic as an LSP hint (grey underline).
     Hint,
+    /// Render the diagnostic as informational (blue underline).
     Information,
+    /// Render the diagnostic as a warning (yellow underline).
     Warning,
+    /// Render the diagnostic as an error (red underline).
     Error,
 }
 
@@ -52,17 +63,21 @@ pub enum DiagnosticLevel {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct FormatConfig {
+    /// Note-length divisor formatting style.
     #[serde(rename = "noteLength")]
-    pub(super) note_length: NoteLengthStyle,
+    pub note_length: NoteLengthStyle,
 }
 
 /// Preferred spelling for power-of-two note-length divisors.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum NoteLengthStyle {
+    /// Leave the author's spelling unchanged (default).
     #[default]
     Preserve,
+    /// Use repeated slashes (e.g. `A//`).
     Shorthand,
+    /// Use explicit numeric denominators (e.g. `A/4`).
     Explicit,
 }
 

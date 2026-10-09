@@ -61,34 +61,48 @@ use tower_lsp_server::ls_types::SemanticTokensResult;
 use tower_lsp_server::ls_types::ServerCapabilities;
 use tower_lsp_server::ls_types::ServerInfo;
 use tower_lsp_server::ls_types::SymbolInformation;
-use tower_lsp_server::ls_types::TextDocumentSyncKind;
+use tower_lsp_server::ls_types::TextDocumentContentChangeEvent;
+use tower_lsp_server::ls_types::TextDocumentSyncOptions;
 use tower_lsp_server::ls_types::TextEdit;
 use tower_lsp_server::ls_types::Uri;
 use tower_lsp_server::ls_types::WorkspaceEdit;
 
 use crate::analysis;
-use crate::analysis::Analysis;
 use crate::config::Config;
 use crate::config::NoteLengthStyle;
+use crate::document::DocumentModel;
 use crate::position::LineIndex;
+use crate::position::apply_text_edit;
 
 /// One immutable synchronized document version.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct DocumentState {
     version: i32,
     index: LineIndex,
-    analysis: Analysis,
+    model: DocumentModel,
     config: Config,
 }
 
 impl DocumentState {
     fn new(text: String, version: i32, encoding: &PositionEncodingKind, config: Config) -> Self {
-        let index = LineIndex::new(text);
-        let analysis = Analysis::new(&index, encoding, config);
+        let model = DocumentModel::full(text, version, encoding.clone(), config);
+        let index = LineIndex::new(model.text.clone());
         Self {
             version,
             index,
-            analysis,
+            model,
+            config,
+        }
+    }
+
+    fn from_model(model: DocumentModel, _encoding: &PositionEncodingKind) -> Self {
+        let version = model.version;
+        let config = model.config;
+        let index = LineIndex::new(model.text.clone());
+        Self {
+            version,
+            index,
+            model,
             config,
         }
     }
@@ -137,6 +151,7 @@ pub struct Backend {
 }
 
 impl Backend {
+    /// Creates a new [`Backend`] instance.
     pub fn new(client: Client) -> Self {
         Self {
             client,
@@ -153,10 +168,20 @@ impl Backend {
     }
 
     async fn publish(&self, uri: Uri, document: &DocumentState) {
+        {
+            let state = self.state.read().await;
+            if state
+                .documents
+                .get(&uri)
+                .is_some_and(|current| current.version > document.version)
+            {
+                return;
+            }
+        }
         self.client
             .publish_diagnostics(
                 uri,
-                document.analysis.diagnostics.clone(),
+                document.model.diagnostics.clone(),
                 Some(document.version),
             )
             .await;
@@ -294,7 +319,7 @@ impl Backend {
         options: &FormattingOptions,
     ) -> Option<Vec<TextEdit>> {
         let (document, encoding) = self.document(uri).await?;
-        if document.analysis.has_errors {
+        if document.model.has_errors {
             return Some(Vec::new());
         }
         let style = self.state.read().await.config.format.note_length;
@@ -310,6 +335,7 @@ impl Backend {
 }
 
 impl LanguageServer for Backend {
+    #[allow(clippy::too_many_lines)]
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let offered = params
             .capabilities
@@ -375,7 +401,14 @@ impl LanguageServer for Backend {
         };
         let capabilities = ServerCapabilities {
             position_encoding: Some(encoding),
-            text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
+            text_document_sync: Some(
+                TextDocumentSyncOptions {
+                    open_close: Some(true),
+                    change: Some(tower_lsp_server::ls_types::TextDocumentSyncKind::INCREMENTAL),
+                    ..TextDocumentSyncOptions::default()
+                }
+                .into(),
+            ),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             completion_provider: Some(CompletionOptions {
                 trigger_characters: Some(vec!["%".to_owned(), ":".to_owned(), "[".to_owned()]),
@@ -433,12 +466,9 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let Some(change) = params.content_changes.into_iter().last() else {
-            return;
-        };
         let uri = params.text_document.uri;
         let version = params.text_document.version;
-        let (encoding, config) = {
+        let (encoding, config, previous) = {
             let state = self.state.read().await;
             if state
                 .documents
@@ -451,9 +481,34 @@ impl LanguageServer for Backend {
                 .documents
                 .get(&uri)
                 .map_or(state.config, |current| current.config);
-            (state.encoding.clone(), config)
+            let previous = state
+                .documents
+                .get(&uri)
+                .map(|current| current.model.clone());
+            (state.encoding.clone(), config, previous)
         };
-        let document = analyze_document(change.text, version, encoding, config).await;
+        let document = match previous {
+            None => {
+                // No prior document: splice the new text into the slot
+                // without an LSP edit (the client is using INCREMENTAL
+                // before sending didOpen, which we tolerate by treating
+                // the first change as a full replacement).
+                let Some(new_text) = full_replacement_text(&params.content_changes) else {
+                    return;
+                };
+                analyze_document(new_text, version, encoding, config).await
+            }
+            Some(previous_model) => {
+                analyze_incremental(
+                    previous_model,
+                    &params.content_changes,
+                    version,
+                    encoding,
+                    config,
+                )
+                .await
+            }
+        };
         {
             let mut state = self.state.write().await;
             if state
@@ -652,7 +707,7 @@ impl LanguageServer for Backend {
         let Some((document, encoding)) = self.document(&uri).await else {
             return Ok(None);
         };
-        if document.analysis.has_errors {
+        if document.model.has_errors {
             return Ok(Some(Vec::new()));
         }
         let Some(scope) = document.index.byte_range(params.range, &encoding) else {
@@ -700,6 +755,73 @@ impl LanguageServer for Backend {
 fn config_from_value(value: &serde_json::Value) -> Option<Config> {
     let value = value.get("abc").unwrap_or(value);
     serde_json::from_value(value.clone()).ok()
+}
+
+/// Applies every [`TextDocumentContentChangeEvent`] in `changes` to
+/// `previous_text` and returns the resulting document text.
+///
+/// Changes are processed in forward order according to the LSP 3.17
+/// specification, where each edit applies to the document state produced
+/// by the preceding edit. The deprecated `rangeLength` field is ignored.
+/// A change whose `range` is `None` replaces the entire document.
+///
+/// Returns `None` when the document has not yet been observed (no
+/// previous text is available to splice into) or when a ranged change
+/// cannot be applied because its range does not correspond to the
+/// indexed source.
+fn apply_content_changes(
+    previous_text: Option<&str>,
+    changes: &[TextDocumentContentChangeEvent],
+    encoding: &PositionEncodingKind,
+) -> Option<String> {
+    let previous = previous_text?;
+    let mut text = previous.to_owned();
+    for change in changes {
+        let Some(range) = change.range else {
+            text.clone_from(&change.text);
+            continue;
+        };
+        let index = LineIndex::new(text.clone());
+        text = apply_text_edit(&text, &index, encoding, range, &change.text).ok()?;
+    }
+    Some(text)
+}
+
+/// Returns the `text` of the last `range: None` change in `changes`, or
+/// `None` if every change is ranged. Used when the server receives an
+/// `INCREMENTAL` notification without a prior `didOpen` and must
+/// materialise the initial document text.
+fn full_replacement_text(changes: &[TextDocumentContentChangeEvent]) -> Option<String> {
+    changes
+        .iter()
+        .rev()
+        .find(|change| change.range.is_none())
+        .map(|change| change.text.clone())
+}
+
+/// Drives the incremental update path: compute the spliced text via
+/// [`apply_content_changes`], then hand it to [`DocumentModel::apply_changes`]
+/// for region-driven parsing. Falls back to [`DocumentModel::full`] when
+/// the change set cannot be applied incrementally (line 1 edited, any
+/// `range: None`, or the regional parse fails an invariant check).
+async fn analyze_incremental(
+    previous: DocumentModel,
+    changes: &[TextDocumentContentChangeEvent],
+    version: i32,
+    encoding: PositionEncodingKind,
+    config: Config,
+) -> Arc<DocumentState> {
+    let Some(new_text) = apply_content_changes(Some(previous.text.as_str()), changes, &encoding)
+    else {
+        return analyze_document(previous.text.clone(), version, encoding, config).await;
+    };
+    let next = DocumentModel::apply_changes(&previous, changes, new_text.clone());
+    if next.is_err() {
+        return analyze_document(new_text, version, encoding, config).await;
+    }
+    let mut model = next.unwrap();
+    model.version = version;
+    Arc::new(DocumentState::from_model(model, &encoding))
 }
 
 #[allow(deprecated)]
@@ -885,5 +1007,432 @@ mod tests {
         assert_eq!(edits[0].range.start, Position::new(1, 0));
         assert_eq!(edits[0].range.end, Position::new(2, 0));
         assert!(edits[0].new_text.is_empty());
+    }
+
+    async fn next_publish(client: &mut tower_lsp_server::ClientSocket) -> serde_json::Value {
+        let request = client
+            .next()
+            .await
+            .expect("diagnostics notification expected");
+        assert_eq!(request.method(), "textDocument/publishDiagnostics");
+        request
+            .params()
+            .cloned()
+            .expect("diagnostics notification has parameters")
+    }
+
+    async fn drain_initial_diagnostics(client: &mut tower_lsp_server::ClientSocket) {
+        // After didOpen the server publishes a first diagnostic batch. Pull
+        // it so the incremental notifications below can be matched cleanly.
+        let _ = next_publish(client).await;
+    }
+
+    #[tokio::test]
+    async fn ranged_did_change_publishes_full_sync_baseline_diagnostics() {
+        let (mut service, mut client) = LspService::new(Backend::new);
+        let initialize = Request::build("initialize")
+            .params(json!({
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }))
+            .id(1)
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(initialize)
+            .await
+            .expect("initialize handled")
+            .expect("initialize response");
+
+        let open = Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": "file:///tmp/incremental.abc",
+                    "languageId": "abc",
+                    "version": 1,
+                    "text": "X:1\nK:C\nCDEF |\n"
+                }
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(open)
+            .await
+            .expect("open handled");
+        drain_initial_diagnostics(&mut client).await;
+
+        // Replace "CDEF" with "CDEF GABc" via a ranged edit. The resulting
+        // text is exactly what a full-sync baseline would produce.
+        let change = Request::build("textDocument/didChange")
+            .params(json!({
+                "textDocument": {
+                    "uri": "file:///tmp/incremental.abc",
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "range": {
+                        "start": { "line": 2, "character": 1 },
+                        "end": { "line": 2, "character": 5 }
+                    },
+                    "text": "CDEF GABc"
+                }]
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(change)
+            .await
+            .expect("change handled");
+
+        let published = next_publish(&mut client).await;
+        assert_eq!(
+            published.get("version").and_then(serde_json::Value::as_i64),
+            Some(2)
+        );
+        let ranged_diagnostics = published
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        // Now perform the same edit by sending a full replacement (range =
+        // None) and capture the diagnostics. They must match the ranged
+        // version byte-for-byte.
+        let full_replace = Request::build("textDocument/didChange")
+            .params(json!({
+                "textDocument": {
+                    "uri": "file:///tmp/incremental.abc",
+                    "version": 3
+                },
+                "contentChanges": [{
+                    "text": "X:1\nK:C\nCDEF GABc |\n"
+                }]
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(full_replace)
+            .await
+            .expect("change handled");
+        let published_full = next_publish(&mut client).await;
+        let full_diagnostics = published_full
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(ranged_diagnostics, full_diagnostics);
+    }
+
+    #[tokio::test]
+    async fn did_change_ignores_regressed_versions() {
+        let (mut service, mut client) = LspService::new(Backend::new);
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("initialize")
+                    .params(json!({
+                        "capabilities": {
+                            "general": { "positionEncodings": ["utf-16"] }
+                        }
+                    }))
+                    .id(1)
+                    .finish(),
+            )
+            .await
+            .expect("initialize handled");
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///tmp/regressed.abc",
+                            "languageId": "abc",
+                            "version": 5,
+                            "text": "X:1\nK:C\nC |\n"
+                        }
+                    }))
+                    .finish(),
+            )
+            .await
+            .expect("open handled");
+        drain_initial_diagnostics(&mut client).await;
+
+        // Send a change with a regressed (older) version; it must be ignored.
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///tmp/regressed.abc",
+                            "version": 4
+                        },
+                        "contentChanges": [{
+                            "range": {
+                                "start": { "line": 2, "character": 1 },
+                                "end": { "line": 2, "character": 2 }
+                            },
+                            "text": "Z"
+                        }]
+                    }))
+                    .finish(),
+            )
+            .await
+            .expect("regressed change handled");
+        // Poll briefly for any further notification. None should arrive
+        // because the regressed change was dropped.
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_millis(150), client.next()).await;
+        if let Ok(Some(req)) = outcome {
+            panic!(
+                "regressed version must not publish diagnostics, got method={}",
+                req.method()
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn did_change_applies_multiple_ranged_edits_in_order() {
+        let (mut service, mut client) = LspService::new(Backend::new);
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("initialize")
+                    .params(json!({
+                        "capabilities": {
+                            "general": { "positionEncodings": ["utf-16"] }
+                        }
+                    }))
+                    .id(1)
+                    .finish(),
+            )
+            .await
+            .expect("initialize handled");
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///tmp/multi.abc",
+                            "languageId": "abc",
+                            "version": 1,
+                            "text": "X:1\nK:C\nABCD |\n"
+                        }
+                    }))
+                    .finish(),
+            )
+            .await
+            .expect("open handled");
+        drain_initial_diagnostics(&mut client).await;
+
+        // Two edits: insert " | " before the bar, and append "GABc" after.
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///tmp/multi.abc",
+                            "version": 2
+                        },
+                        "contentChanges": [
+                            {
+                                "range": {
+                                    "start": { "line": 2, "character": 4 },
+                                    "end": { "line": 2, "character": 4 }
+                                },
+                                "text": " GABc"
+                            },
+                            {
+                                "range": {
+                                    "start": { "line": 2, "character": 4 },
+                                    "end": { "line": 2, "character": 4 }
+                                },
+                                "text": " | "
+                            }
+                        ]
+                    }))
+                    .finish(),
+            )
+            .await
+            .expect("change handled");
+        let published = next_publish(&mut client).await;
+        assert_eq!(
+            published.get("version").and_then(serde_json::Value::as_i64),
+            Some(2)
+        );
+
+        // Cross-check: a single full-replace with the expected result must
+        // produce the same diagnostics.
+        let _ = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///tmp/multi.abc",
+                            "version": 3
+                        },
+                        "contentChanges": [{
+                            "text": "X:1\nK:C\nABCD |  GABc |\n"
+                        }]
+                    }))
+                    .finish(),
+            )
+            .await
+            .expect("change handled");
+        let published_full = next_publish(&mut client).await;
+        let ranged_diagnostics = published
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let full_diagnostics = published_full
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(ranged_diagnostics, full_diagnostics);
+    }
+
+    #[test]
+    fn sequential_content_changes_apply_in_forward_order() {
+        let edits = vec![
+            TextDocumentContentChangeEvent {
+                range: Some(LspRange::new(Position::new(0, 0), Position::new(0, 0))),
+                range_length: None,
+                text: "A".to_owned(),
+            },
+            TextDocumentContentChangeEvent {
+                range: Some(LspRange::new(Position::new(0, 1), Position::new(0, 1))),
+                range_length: None,
+                text: "B".to_owned(),
+            },
+        ];
+        let result = apply_content_changes(Some(""), &edits, &PositionEncodingKind::UTF8);
+        assert_eq!(result.as_deref(), Some("AB"));
+    }
+
+    #[tokio::test]
+    async fn publish_ignores_stale_versions() {
+        let (mut service, mut client) = LspService::new(Backend::new);
+        let initialize = Request::build("initialize")
+            .params(json!({
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }))
+            .id(1)
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(initialize)
+            .await
+            .expect("initialize handled")
+            .expect("initialize response");
+
+        let uri = "file:///tmp/stale.abc";
+        let source = "X:1\nK:C\nCDEF |\n";
+        let open = Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "abc",
+                    "version": 1,
+                    "text": source
+                }
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(open)
+            .await
+            .expect("open handled");
+        drain_initial_diagnostics(&mut client).await;
+
+        let backend = service.inner();
+        let uri_parsed: Uri = uri.parse().unwrap();
+        // Artificially advance the stored document state to version 5
+        {
+            let mut state = backend.state.write().await;
+            let current = Arc::clone(state.documents.get(&uri_parsed).unwrap());
+            let mut model = current.model.clone();
+            model.version = 5;
+            state.documents.insert(
+                uri_parsed.clone(),
+                Arc::new(DocumentState::from_model(
+                    model,
+                    &PositionEncodingKind::UTF16,
+                )),
+            );
+        }
+
+        // Calling backend.publish directly with version 4 should be dropped by the guard
+        let model_v4 = DocumentModel::full(
+            "X:1\nK:C\nC D E F |\n".to_owned(),
+            4,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let state_v4 = DocumentState::from_model(model_v4, &PositionEncodingKind::UTF16);
+        backend.publish(uri_parsed.clone(), &state_v4).await;
+
+        // Now send a fresh change with version 6; this must be published
+        let fresh_change = Request::build("textDocument/didChange")
+            .params(json!({
+                "textDocument": {
+                    "uri": uri,
+                    "version": 6
+                },
+                "contentChanges": [{
+                    "text": "X:1\nK:C\nCDEF GABc |\n"
+                }]
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(fresh_change)
+            .await
+            .expect("change handled");
+
+        // The next notification published must be version 6, confirming version 4 was dropped
+        let published = next_publish(&mut client).await;
+        assert_eq!(
+            published.get("version").and_then(serde_json::Value::as_i64),
+            Some(6)
+        );
     }
 }
