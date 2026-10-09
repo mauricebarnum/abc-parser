@@ -687,12 +687,12 @@ Track A (conformance, parallel; independent of Track B):
 
 Track B (incremental core):
 
-- [ ] T8 — block model + full-rebuild path (needs T1, T2)
-- [ ] T9 — incremental text sync (needs T1; parallel with T8, land
+- [x] T8 — block model + full-rebuild path (needs T1, T2)
+- [x] T9 — incremental text sync (needs T1; parallel with T8, land
       sequentially in `backend.rs`)
-- [ ] T10 — incremental analysis driver (needs T2, T8, T9)
-- [ ] T11 — equivalence/fuzz harness (started with T8, done with T10)
-- [ ] T12 — config/open paths over the model (needs T10)
+- [x] T10 — incremental analysis driver (needs T2, T8, T9)
+- [x] T11 — equivalence/fuzz harness (started with T8, done with T10)
+- [x] T12 — config/open paths over the model (needs T10)
 
 Track C (follow-ups):
 
