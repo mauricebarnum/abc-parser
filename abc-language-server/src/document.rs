@@ -287,6 +287,100 @@ impl DocumentModel {
         })
     }
 
+    /// Reconfigures an existing model with new [`Config`] settings.
+    ///
+    /// When strict mode changes, a full rebuild is performed via [`Self::full`].
+    ///
+    /// For severity-only changes, the existing parsed blocks and line index
+    /// are retained without reparsing (`parse_count` is 0). If the bar-duration
+    /// setting changed, tune analysis is re-run for all tunes; otherwise,
+    /// previously computed tune analyses are preserved. Diagnostics are then
+    /// re-assembled using the new severities.
+    #[must_use]
+    pub fn reconfigure(&self, config: Config) -> Self {
+        if self.config.validation.strict != config.validation.strict {
+            return Self::full(
+                self.text.clone(),
+                self.version,
+                self.encoding.clone(),
+                config,
+            );
+        }
+
+        let mut blocks = self.blocks.clone();
+        let mut bar_duration_count = 0;
+
+        let old_bar_duration = self.config.validation.bar_duration;
+        let new_bar_duration = config.validation.bar_duration;
+        let bar_duration_needs_reanalysis = match (old_bar_duration, new_bar_duration) {
+            (DiagnosticLevel::Off, DiagnosticLevel::Off) => false,
+            (DiagnosticLevel::Off, _) | (_, DiagnosticLevel::Off) => true,
+            _ => false,
+        };
+        if bar_duration_needs_reanalysis {
+            if new_bar_duration == DiagnosticLevel::Off {
+                for record in &mut blocks {
+                    record.tune_analysis = None;
+                }
+            } else {
+                let file_header = blocks
+                    .first()
+                    .filter(|record| !record.parsed.header.is_empty())
+                    .map(|record| record.parsed.header.clone());
+                for record in &mut blocks {
+                    if let Some(warnings) = analyze_tune_block(
+                        &record.parsed,
+                        record.base,
+                        file_header.as_ref(),
+                        &self.text,
+                    ) {
+                        bar_duration_count += 1;
+                        record.tune_analysis = Some(TuneAnalysis { warnings });
+                    } else {
+                        record.tune_analysis = None;
+                    }
+                }
+            }
+        }
+
+        let old_legacy = self.config.validation.legacy_decoration;
+        let new_legacy = config.validation.legacy_decoration;
+        let legacy_needs_reanalysis = match (old_legacy, new_legacy) {
+            (DiagnosticLevel::Off, DiagnosticLevel::Off) => false,
+            (DiagnosticLevel::Off, _) | (_, DiagnosticLevel::Off) => true,
+            _ => false,
+        };
+        if legacy_needs_reanalysis {
+            if new_legacy == DiagnosticLevel::Off {
+                for record in &mut blocks {
+                    record.diagnostics.legacy_decoration_ranges.clear();
+                }
+            } else {
+                populate_legacy_decorations(&mut blocks, &self.text);
+            }
+        }
+
+        let diagnostics = assemble_diagnostics(&blocks, &self.index, &self.encoding, config);
+        let has_errors = blocks
+            .iter()
+            .any(|record| !record.diagnostics.errors.is_empty());
+
+        Self {
+            version: self.version,
+            encoding: self.encoding.clone(),
+            config,
+            strict: self.strict,
+            text: self.text.clone(),
+            index: self.index.clone(),
+            header: self.header.clone(),
+            blocks,
+            diagnostics,
+            has_errors,
+            parse_count: 0,
+            bar_duration_count,
+        }
+    }
+
     /// Applies a batch of LSP `didChange` events to `previous`,
     /// returning the next document model.
     ///
@@ -1348,6 +1442,101 @@ mod tests {
     }
 
     #[test]
+    fn reconfigure_severity_levels_match_cold_open_and_do_not_reparse() {
+        let source = "X:1\nT:Sample\nM:4/4\nL:1/4\nK:C\nCDEF |\nC D E |\n~C |\n\nC D E |\n";
+        let levels = [
+            DiagnosticLevel::Off,
+            DiagnosticLevel::Hint,
+            DiagnosticLevel::Information,
+            DiagnosticLevel::Warning,
+            DiagnosticLevel::Error,
+        ];
+
+        let baseline_model = DocumentModel::full(
+            source.to_owned(),
+            1,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+
+        for level in levels {
+            let mut config = Config::default();
+            config.validation.bar_duration = level;
+            let cold =
+                DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
+            let reconfigured = baseline_model.reconfigure(config);
+            assert_eq!(
+                reconfigured.parse_count, 0,
+                "severity changes must not reparse"
+            );
+            assert_eq!(
+                reconfigured.diagnostics, cold.diagnostics,
+                "diagnostics must match cold open for bar_duration={level:?}"
+            );
+        }
+
+        for level in levels {
+            let mut config = Config::default();
+            config.validation.legacy_decoration = level;
+            let cold =
+                DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
+            let reconfigured = baseline_model.reconfigure(config);
+            assert_eq!(
+                reconfigured.parse_count, 0,
+                "severity changes must not reparse"
+            );
+            assert_eq!(
+                reconfigured.diagnostics, cold.diagnostics,
+                "diagnostics must match cold open for legacy_decoration={level:?}"
+            );
+        }
+
+        for level in levels {
+            let mut config = Config::default();
+            config.validation.ambiguous_music = level;
+            let cold =
+                DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
+            let reconfigured = baseline_model.reconfigure(config);
+            assert_eq!(
+                reconfigured.parse_count, 0,
+                "severity changes must not reparse"
+            );
+            assert_eq!(
+                reconfigured.diagnostics, cold.diagnostics,
+                "diagnostics must match cold open for ambiguous_music={level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconfigure_strict_mode_flip_uses_full_path() {
+        let source = "X:1\nT:Sample\nK:C\nCDEF |\nB:Book in body\n";
+        let mut strict_config = Config::default();
+        strict_config.validation.strict = true;
+
+        let loose_model = DocumentModel::full(
+            source.to_owned(),
+            1,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let cold_strict = DocumentModel::full(
+            source.to_owned(),
+            1,
+            PositionEncodingKind::UTF16,
+            strict_config,
+        );
+
+        let reconfigured = loose_model.reconfigure(strict_config);
+        assert!(
+            reconfigured.parse_count > 0,
+            "strict mode flip must use full rebuild path"
+        );
+        assert_eq!(reconfigured.diagnostics, cold_strict.diagnostics);
+        assert!(reconfigured.strict);
+    }
+
+    #[test]
     fn leading_separator_edit_touches_block_zero_without_full_rebuild() {
         let source = "\n\n\n\n\nX:1\nK:C\nCDEF |\n";
         let model = DocumentModel::full(
@@ -1371,5 +1560,68 @@ mod tests {
         assert!(result.is_ok(), "leading edit must not require full rebuild");
         let updated = result.unwrap();
         assert!(updated.parse_count <= 1, "parse_count should be <= 1");
+    }
+
+    #[test]
+    fn reconfigure_between_warning_and_error_skips_bar_duration_reanalysis() {
+        let source = "X:1\nT:Sample\nM:4/4\nL:1/4\nK:C\nCDEF | C | CDEF |\n";
+        let mut warning_config = Config::default();
+        warning_config.validation.bar_duration = DiagnosticLevel::Warning;
+        let model = DocumentModel::full(
+            source.to_owned(),
+            1,
+            PositionEncodingKind::UTF16,
+            warning_config,
+        );
+        assert!(
+            model
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Some(DiagnosticSeverity::WARNING)
+                    && d.code == Some(NumberOrString::String("bar-duration".to_owned()))),
+            "initial model must have Warning bar-duration diagnostic"
+        );
+
+        let mut error_config = Config::default();
+        error_config.validation.bar_duration = DiagnosticLevel::Error;
+        let reconfigured = model.reconfigure(error_config);
+        assert_eq!(
+            reconfigured.bar_duration_count, 0,
+            "reconfiguring from Warning to Error must not re-run bar duration analysis"
+        );
+        assert!(
+            reconfigured
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Some(DiagnosticSeverity::ERROR)
+                    && d.code == Some(NumberOrString::String("bar-duration".to_owned()))),
+            "reconfigured diagnostics must reflect Error severity"
+        );
+
+        let mut off_config = Config::default();
+        off_config.validation.bar_duration = DiagnosticLevel::Off;
+        let reconfigured_off = model.reconfigure(off_config);
+        assert_eq!(reconfigured_off.bar_duration_count, 0);
+        assert!(
+            !reconfigured_off
+                .diagnostics
+                .iter()
+                .any(|d| d.code == Some(NumberOrString::String("bar-duration".to_owned()))),
+            "reconfiguring to Off must clear bar-duration diagnostics"
+        );
+
+        let reconfigured_back = reconfigured_off.reconfigure(warning_config);
+        assert!(
+            reconfigured_back.bar_duration_count > 0,
+            "reconfiguring from Off to Warning must re-run bar duration analysis"
+        );
+        assert!(
+            reconfigured_back
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Some(DiagnosticSeverity::WARNING)
+                    && d.code == Some(NumberOrString::String("bar-duration".to_owned()))),
+            "reconfigured diagnostics must reflect Warning severity"
+        );
     }
 }
