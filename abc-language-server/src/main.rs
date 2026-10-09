@@ -14,16 +14,10 @@
 
 //! Language Server Protocol support for ABC music notation.
 
-mod analysis;
-mod backend;
-mod config;
-mod position;
-
+use abc_language_server::Backend;
 use clap::Parser;
 use tower_lsp_server::LspService;
 use tower_lsp_server::Server;
-
-use crate::backend::Backend;
 
 /// Starts an ABC language server over standard input and output.
 #[derive(Debug, Parser)]
