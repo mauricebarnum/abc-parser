@@ -1,0 +1,5 @@
+# Suppress terminal notifications for future-incompatibility reports in upstream
+# dependencies (such as proc-macro-error2). Detailed reports remain accessible
+# on-demand via `cargo report future-incompatibilities`.
+[future-incompat-report]
+frequency = "never"
