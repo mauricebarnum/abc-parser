@@ -112,6 +112,18 @@ resolved.
 `%%`. The same nodes may occur in tune headers and bodies through
 [`Line::TypesetText`].
 
+### Indented information fields
+
+Per ABC 2.1 §3 an information field is a line beginning with a letter;
+a line beginning with horizontal whitespace is therefore not a field.
+The line grammar, the tune grammar, and the free-text grammar are all
+consistent on this: an indented letter+`:` line is classified as
+[`Line::Music`] with errors. Because the line is never classified as a
+field, the "information fields are not allowed in free text" diagnostic
+does not fire on indented field-like lines. A consequence is that an
+indented `X:` cannot start a tune; the surrounding block is
+fieldless and falls into the text branch.
+
 [`ParserOptions`] retains both text categories by default. Its
 [`ParserOptions::retain_free_text`] and
 [`ParserOptions::retain_typeset_text`] builders independently omit the

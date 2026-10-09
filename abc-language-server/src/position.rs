@@ -18,13 +18,25 @@ pub struct LineIndex {
 
 impl LineIndex {
     pub fn new(source: String) -> Self {
+        let bytes = source.as_bytes();
         let mut line_starts = vec![0];
-        line_starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(offset, byte)| (byte == b'\n').then_some(offset + 1)),
-        );
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\r' => {
+                    cursor += 1;
+                    if cursor < bytes.len() && bytes[cursor] == b'\n' {
+                        cursor += 1;
+                    }
+                    line_starts.push(cursor);
+                }
+                b'\n' => {
+                    cursor += 1;
+                    line_starts.push(cursor);
+                }
+                _ => cursor += 1,
+            }
+        }
         Self {
             source,
             line_starts,
@@ -86,6 +98,27 @@ impl LineIndex {
         let start = self.line_starts[line];
         let end = self.line_content_end(line);
         Some(start..end)
+    }
+
+    /// Iterates over physical lines with their byte-offset start.
+    ///
+    /// Each yielded `&str` is the line content without any trailing line
+    /// terminator (`\n`, `\r`, or `\r\n`), matching the column
+    /// accounting used by [`Self::position`]. Supports LF, CRLF, and
+    /// bare CR line endings per ABC 2.1 §8.1.
+    pub fn line_iter(&self) -> impl Iterator<Item = (usize, &str)> {
+        let source = self.source.as_str();
+        let mut line_starts = self.line_starts.iter().copied().peekable();
+        std::iter::from_fn(move || {
+            let start = line_starts.next()?;
+            let end = line_starts.peek().copied().unwrap_or(source.len());
+            let content_end = match source.as_bytes()[start..end] {
+                [.., b'\r', b'\n'] => end - 2,
+                [.., b'\n'] | [.., b'\r'] => end - 1,
+                _ => end,
+            };
+            Some((start, &source[start..content_end]))
+        })
     }
 
     fn byte_offset(&self, position: Position, encoding: &PositionEncodingKind) -> Option<usize> {
@@ -169,6 +202,58 @@ mod tests {
                 &PositionEncodingKind::UTF16,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn line_starts_handle_all_three_line_endings() {
+        let lf = LineIndex::new("X:1\nK:C\n".to_owned());
+        assert_eq!(lf.line_starts, vec![0, 4, 8]);
+
+        let crlf = LineIndex::new("X:1\r\nK:C\r\n".to_owned());
+        assert_eq!(crlf.line_starts, vec![0, 5, 10]);
+
+        let cr = LineIndex::new("X:1\rK:C\r".to_owned());
+        assert_eq!(cr.line_starts, vec![0, 4, 8]);
+
+        let crlf_at_end = LineIndex::new("X:1\r\nK:C".to_owned());
+        assert_eq!(crlf_at_end.line_starts, vec![0, 5]);
+
+        let cr_at_end = LineIndex::new("X:1\rK:C".to_owned());
+        assert_eq!(cr_at_end.line_starts, vec![0, 4]);
+    }
+
+    #[test]
+    fn line_iter_skips_all_three_line_terminators() {
+        let index = LineIndex::new("a\r\nb\nc\rd".to_owned());
+        let collected: Vec<&str> = index.line_iter().map(|(_, line)| line).collect();
+        assert_eq!(collected, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn position_round_trip_on_cr_only_document() {
+        let cr = LineIndex::new("X:1\rK:C\rCDEF |\r".to_owned());
+        assert_eq!(cr.line_starts, vec![0, 4, 8, 15]);
+        assert_eq!(
+            cr.position(8, &PositionEncodingKind::UTF16),
+            Some(Position::new(2, 0))
+        );
+        assert_eq!(
+            cr.position(8, &PositionEncodingKind::UTF16)
+                .and_then(|pos| cr.byte_offset(pos, &PositionEncodingKind::UTF16)),
+            Some(8)
+        );
+        assert_eq!(
+            cr.position(15, &PositionEncodingKind::UTF16),
+            Some(Position::new(3, 0))
+        );
+        assert_eq!(
+            cr.byte_offset(Position::new(2, 0), &PositionEncodingKind::UTF16),
+            Some(8)
+        );
+        assert_eq!(
+            cr.byte_offset(Position::new(3, 0), &PositionEncodingKind::UTF16),
+            Some(15)
         );
     }
 }

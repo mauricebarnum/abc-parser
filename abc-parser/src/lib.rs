@@ -1224,13 +1224,25 @@ fn diagnostic_lines(
         line_starts.push(0);
     }
     if start > *indexed_to {
-        line_starts.extend(
-            source[*indexed_to..start]
-                .bytes()
-                .enumerate()
-                .filter_map(|(offset, byte)| (byte == b'\n').then_some(*indexed_to + offset + 1)),
-        );
-        *indexed_to = start;
+        let bytes = source.as_bytes();
+        let mut cursor = *indexed_to;
+        while cursor < start {
+            match bytes[cursor] {
+                b'\r' => {
+                    cursor += 1;
+                    if cursor < start && bytes[cursor] == b'\n' {
+                        cursor += 1;
+                    }
+                    line_starts.push(cursor);
+                }
+                b'\n' => {
+                    cursor += 1;
+                    line_starts.push(cursor);
+                }
+                _ => cursor += 1,
+            }
+        }
+        *indexed_to = cursor;
     }
     let line_index = line_starts.partition_point(|line_start| *line_start <= start) - 1;
     let line_start = line_starts[line_index];
@@ -1625,6 +1637,32 @@ mod tests {
             renderer.render_error(&invalid_boundary),
             invalid_boundary.to_string()
         );
+    }
+
+    #[test]
+    fn diagnostic_renderer_line_numbers_match_across_line_endings() {
+        let lf = "X:1\nK:C\nCDEF |\n";
+        let crlf = "X:1\r\nK:C\r\nCDEF |\r\n";
+        let cr = "X:1\rK:C\rCDEF |\r";
+
+        let mut lf_renderer = DiagnosticRenderer::new(lf);
+        let mut crlf_renderer = DiagnosticRenderer::new(crlf);
+        let mut cr_renderer = DiagnosticRenderer::new(cr);
+
+        let lf_err = lf_renderer.render_error(&error(ErrorKind::InvalidMusic, "x", 15, 15));
+        let crlf_err = crlf_renderer.render_error(&error(ErrorKind::InvalidMusic, "x", 18, 18));
+        let cr_err = cr_renderer.render_error(&error(ErrorKind::InvalidMusic, "x", 15, 15));
+        assert!(lf_err.starts_with("4:1: x"), "{lf_err}");
+        assert!(crlf_err.starts_with("4:1: x"), "{crlf_err}");
+        assert!(cr_err.starts_with("4:1: x"), "{cr_err}");
+        assert_eq!(lf_renderer.line_starts, vec![0, 4, 8, 15]);
+        assert_eq!(crlf_renderer.line_starts, vec![0, 5, 10, 18]);
+        assert_eq!(cr_renderer.line_starts, vec![0, 4, 8, 15]);
+
+        let mut renderer = DiagnosticRenderer::new(cr);
+        let second_line = error(ErrorKind::InvalidMusic, "second", 4, 5);
+        let diagnostic = renderer.render_error(&second_line);
+        assert!(diagnostic.starts_with("2:1: second"), "{diagnostic}");
     }
 
     fn parse_single_music_element(source: &str) -> MusicElement {

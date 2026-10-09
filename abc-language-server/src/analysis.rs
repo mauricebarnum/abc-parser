@@ -327,31 +327,37 @@ fn simple_completions(values: &[&str]) -> Vec<CompletionItem> {
 
 pub fn document_symbols(index: &LineIndex, encoding: &PositionEncodingKind) -> Vec<DocumentSymbol> {
     let source = index.source();
-    let mut starts = source
-        .split_inclusive('\n')
-        .scan(0, |offset, line| {
-            let start = *offset;
-            *offset += line.len();
-            Some((start, line.trim_end_matches(['\r', '\n'])))
-        })
+    let mut starts = index
+        .line_iter()
         .filter(|(_, line)| line.starts_with("X:"))
         .collect::<Vec<_>>();
     if starts.is_empty() {
         return Vec::new();
     }
     starts.push((source.len(), ""));
+    let line_set: std::collections::HashSet<usize> =
+        starts.iter().map(|(start, _)| *start).collect();
     starts
         .windows(2)
         .filter_map(|window| {
             let (start, reference_line) = window[0];
             let end = window[1].0;
             let body = &source[start..end];
-            let title = body
-                .lines()
-                .find_map(|line| line.strip_prefix("T:").map(str::trim))
-                .filter(|title| !title.is_empty());
+            let title = index
+                .line_iter()
+                .filter_map(|(line_start, line)| {
+                    if line_start < start || line_start >= end {
+                        return None;
+                    }
+                    if line_set.contains(&line_start) {
+                        return None;
+                    }
+                    line.strip_prefix("T:").map(str::trim)
+                })
+                .find(|title| !title.is_empty())
+                .map(str::to_owned);
             let reference = reference_line.trim_start_matches("X:").trim();
-            let name = title.map_or_else(|| format!("Tune {reference}"), ToOwned::to_owned);
+            let name = title.unwrap_or_else(|| format!("Tune {reference}"));
             let range = index.lsp_range(start..end, encoding)?;
             let selection_range = index.lsp_range(start..start + reference_line.len(), encoding)?;
             #[allow(deprecated)]
@@ -375,15 +381,15 @@ fn voice_symbols(
     base: usize,
     body: &str,
 ) -> Option<Vec<DocumentSymbol>> {
-    let mut offset = base;
-    let voices = body
-        .split_inclusive('\n')
-        .filter_map(|line| {
-            let start = offset;
-            offset += line.len();
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            let id = trimmed.strip_prefix("V:")?.split_whitespace().next()?;
-            let range = index.lsp_range(start..start + trimmed.len(), encoding)?;
+    let end = base + body.len();
+    let voices = index
+        .line_iter()
+        .filter_map(|(start, line)| {
+            if start < base || start >= end {
+                return None;
+            }
+            let id = line.strip_prefix("V:")?.split_whitespace().next()?;
+            let range = index.lsp_range(start..start + line.len(), encoding)?;
             #[allow(deprecated)]
             Some(DocumentSymbol {
                 name: id.to_owned(),
@@ -401,12 +407,11 @@ fn voice_symbols(
 }
 
 pub fn folding_ranges(index: &LineIndex) -> Vec<FoldingRange> {
-    let source = index.source();
+    let lines = index.line_iter().collect::<Vec<_>>();
     let mut tune_start = None;
     let mut text_start = None;
     let mut ranges = Vec::new();
-    let lines = source.lines().collect::<Vec<_>>();
-    for (line_number, line) in lines.iter().enumerate() {
+    for (line_number, (_, line)) in lines.iter().enumerate() {
         if line.starts_with("%%begintext") {
             text_start = Some(line_number);
         } else if line.starts_with("%%endtext")
@@ -424,11 +429,12 @@ pub fn folding_ranges(index: &LineIndex) -> Vec<FoldingRange> {
             push_fold(&mut ranges, start, line_number.saturating_sub(1), "tune");
         }
     }
+    let last_line = lines.len().saturating_sub(1);
     if let Some(start) = tune_start {
-        push_fold(&mut ranges, start, lines.len().saturating_sub(1), "tune");
+        push_fold(&mut ranges, start, last_line, "tune");
     }
     if let Some(start) = text_start {
-        push_fold(&mut ranges, start, lines.len().saturating_sub(1), "text");
+        push_fold(&mut ranges, start, last_line, "text");
     }
     ranges.sort_by_key(|range| (range.start_line, range.end_line));
     ranges
@@ -496,7 +502,7 @@ pub fn semantic_tokens(
     filter: Option<LspRange>,
 ) -> SemanticTokens {
     let filter = filter.and_then(|range| index.byte_range(range, encoding));
-    let mut raw = lexical_tokens(index.source());
+    let mut raw = lexical_tokens(index.source(), index);
     if let Some(filter) = filter {
         raw.retain(|token| token.range.start < filter.end && token.range.end > filter.start);
     }
@@ -540,11 +546,9 @@ struct RawToken {
     modifiers: u32,
 }
 
-fn lexical_tokens(source: &str) -> Vec<RawToken> {
+fn lexical_tokens(_source: &str, index: &LineIndex) -> Vec<RawToken> {
     let mut tokens = Vec::new();
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        let content = line.trim_end_matches(['\r', '\n']);
+    for (offset, content) in index.line_iter() {
         if content.starts_with('%') && !content.starts_with("%%") {
             tokens.push(RawToken {
                 range: offset..offset + content.len(),
@@ -587,7 +591,6 @@ fn lexical_tokens(source: &str) -> Vec<RawToken> {
                 });
             }
         }
-        offset += line.len();
     }
     tokens
 }
@@ -601,7 +604,7 @@ pub fn duration_edits(
     if style == NoteLengthStyle::Preserve {
         return Vec::new();
     }
-    note_duration_ranges(index.source())
+    note_duration_ranges(index)
         .filter(|(range, _)| range.start >= scope.start && range.end <= scope.end)
         .filter_map(|(range, suffix)| {
             let (numerator, denominator) = parse_duration(suffix)?;
@@ -625,44 +628,38 @@ pub fn duration_edits(
         .collect()
 }
 
-fn note_duration_ranges(source: &str) -> impl Iterator<Item = (Range<usize>, &str)> {
-    source
-        .split_inclusive('\n')
-        .scan(0, |base, line| {
-            let line_start = *base;
-            *base += line.len();
-            let content = line.trim_end_matches(['\r', '\n']);
-            if content.starts_with('%') || content.as_bytes().get(1) == Some(&b':') {
-                return Some(Vec::new());
-            }
-            let mut found = Vec::new();
-            let bytes = content.as_bytes();
-            let mut cursor = 0;
-            while cursor < bytes.len() {
-                if matches!(bytes[cursor], b'A'..=b'G' | b'a'..=b'g' | b'z' | b'x') {
-                    cursor += 1;
-                    while cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b',') {
-                        cursor += 1;
-                    }
-                    let start = cursor;
-                    while cursor < bytes.len()
-                        && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
-                    {
-                        cursor += 1;
-                    }
-                    if cursor > start {
-                        found.push((
-                            line_start + start..line_start + cursor,
-                            &content[start..cursor],
-                        ));
-                    }
-                } else {
+fn note_duration_ranges(index: &LineIndex) -> impl Iterator<Item = (Range<usize>, &str)> + '_ {
+    index.line_iter().flat_map(|(line_start, content)| {
+        if content.starts_with('%') || content.as_bytes().get(1) == Some(&b':') {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        let bytes = content.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if matches!(bytes[cursor], b'A'..=b'G' | b'a'..=b'g' | b'z' | b'x') {
+                cursor += 1;
+                while cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b',') {
                     cursor += 1;
                 }
+                let start = cursor;
+                while cursor < bytes.len()
+                    && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
+                {
+                    cursor += 1;
+                }
+                if cursor > start {
+                    found.push((
+                        line_start + start..line_start + cursor,
+                        &content[start..cursor],
+                    ));
+                }
+            } else {
+                cursor += 1;
             }
-            Some(found)
-        })
-        .flatten()
+        }
+        found
+    })
 }
 
 fn duration_suffix(text: &str) -> Option<&str> {
