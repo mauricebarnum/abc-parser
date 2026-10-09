@@ -106,8 +106,8 @@ fn help_describes_validation_and_fix_options() {
 fn valid_input_succeeds_without_emitting_a_document() {
     let output = run_stdin("X:1\nT:Valid\nK:C\nCDEF |\n", &[]);
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"");
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn deprecated_syntax_warns_without_failing_or_rewriting() {
     let source = "X:1\nT:Deprecated\nA:Donegal\nE:1.2\nQ:C=120\nK:C\nCDEF |\n";
     let output = run_stdin(source, &[]);
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let warnings = String::from_utf8(output.stderr).unwrap();
     assert!(warnings.contains("deprecated A: area field"), "{warnings}");
     assert!(
@@ -310,7 +310,7 @@ fn out_of_order_recommended_fields_warn_without_fixing() {
     let source = "X:1\nT:Order\nL:1/8\nM:4/4\nK:C\nCDEF |\n";
     let output = run_stdin(source, &[]);
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let warning = String::from_utf8(output.stderr).unwrap();
     assert!(
         warning.contains(
@@ -686,7 +686,7 @@ fn out_writes_fixed_output_to_a_file() {
         &["--fix", "--out", path.to_str().unwrap()],
     );
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
 
     let fixed = fs::read_to_string(&path).unwrap();
     fs::remove_file(path).unwrap();

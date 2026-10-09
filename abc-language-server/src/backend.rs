@@ -884,6 +884,6 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start, Position::new(1, 0));
         assert_eq!(edits[0].range.end, Position::new(2, 0));
-        assert!(edits[0].new_text.is_empty());
+        assert_eq!(edits[0].new_text, "");
     }
 }

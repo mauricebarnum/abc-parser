@@ -96,7 +96,7 @@ fn out_writes_the_transposed_document_to_a_file() {
         std::env::temp_dir().join(format!("abc-transpose-output-{}.abc", std::process::id()));
     let output = run(&["--semitones", "1", "--out", path.to_str().unwrap()]);
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
 
     let source = fs::read_to_string(&path).unwrap();
     fs::remove_file(path).unwrap();
