@@ -47,12 +47,16 @@ include!(concat!(env!("OUT_DIR"), "/architecture.rs"));
 pub use bar_duration::BarDurationOptions;
 pub use bar_duration::BarDurationPickupPolicy;
 pub use bar_duration::bar_duration_warnings;
+pub use combinators::Block;
+pub use combinators::BlocksContext;
 pub use combinators::chord_parser;
 pub use combinators::directive_parser;
 pub use combinators::field_parser;
 pub use combinators::line_parser;
 pub use combinators::music_element_parser;
 pub use combinators::music_line_parser;
+pub use combinators::parse_blocks;
+pub use combinators::version_marker;
 pub use emit::AbcEmitter;
 pub use emit::EmitOptions;
 pub use emit::NoteLengthStyle;
@@ -1509,7 +1513,7 @@ pub fn parse_music_line(
     }
 }
 
-fn chumsky_error<S>(error: &Rich<'_, char, S>) -> ParseError<S>
+pub(crate) fn chumsky_error<S>(error: &Rich<'_, char, S>) -> ParseError<S>
 where
     S: Clone,
 {
@@ -1548,7 +1552,7 @@ fn first_parser_error(
 }
 
 /// Formats Chumsky's reason and production contexts without internal spans.
-fn rich_error_message<S>(error: &Rich<'_, char, S>) -> String {
+pub(crate) fn rich_error_message<S>(error: &Rich<'_, char, S>) -> String {
     let mut message = error
         .reason()
         .to_string()
