@@ -749,7 +749,7 @@ mod tests {
     fn opening_pickup_resets_for_each_meter_section() {
         let source = "X:1\nM:4/4\nL:1/4\nK:C\nC | CDEF | [M:3/4] C | CDE |\n";
         let options = BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::OpeningBar);
-        assert!(warnings(source, options).is_empty());
+        assert_eq!(warnings(source, options), []);
     }
 
     #[test]

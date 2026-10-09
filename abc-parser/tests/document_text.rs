@@ -290,7 +290,7 @@ fn stray_endtext_is_reported_outside_a_typeset_block() {
 fn character_input_preserves_character_index_spans_for_free_text() {
     let characters: Vec<char> = TEXT_DOCUMENT.chars().collect();
     let result = parse(characters.as_slice());
-    assert!(result.errors.is_empty());
+    assert_eq!(result.errors, []);
     let document = result.output.as_ref().unwrap();
     let free = document
         .items
@@ -406,7 +406,7 @@ fn initial_metadata_only_block_remains_the_file_header() {
 
     let report = parse_owned("X:1\nT:Header-only tune\nK:C\n", ParserOptions::default());
     assert!(report.is_valid(), "{:#?}", report.errors);
-    assert!(document(&report).header.is_empty());
+    assert_eq!(document(&report).header, []);
     assert_eq!(document(&report).tunes().count(), 1);
 }
 
@@ -416,7 +416,7 @@ fn tune_only_fields_disambiguate_an_initial_block_without_x() {
     let report = parse_owned(source, ParserOptions::default());
 
     assert!(report.is_valid(), "{:#?}", report.errors);
-    assert!(document(&report).header.is_empty());
+    assert_eq!(document(&report).header, []);
     assert_eq!(document(&report).tunes().count(), 1);
 }
 
@@ -477,11 +477,11 @@ fn music_like_text_warns_without_becoming_invalid_or_a_tune() {
 
     let prose = parse_owned("ABC letters here are prose.\n", ParserOptions::default());
     assert!(prose.is_valid());
-    assert!(prose.warnings.is_empty());
+    assert_eq!(prose.warnings, []);
 
     let later_music = parse_owned("Ordinary prose.\nCDEF |\n", ParserOptions::default());
     assert!(later_music.is_valid());
-    assert!(later_music.warnings.is_empty());
+    assert_eq!(later_music.warnings, []);
 
     let two_blocks = parse_owned("CDEF |\n\nGABc |\n", ParserOptions::default());
     assert!(two_blocks.is_valid());
@@ -493,7 +493,7 @@ fn possible_music_warning_is_independent_of_text_retention() {
     let report = parse_owned("CDEF |\n", ParserOptions::new().retain_free_text(false));
     assert!(report.is_valid());
     assert_eq!(report.warnings.len(), 1);
-    assert!(document(&report).items.is_empty());
+    assert_eq!(document(&report).items, []);
 }
 
 #[test]
@@ -527,7 +527,7 @@ fn chained_orphans_only_first_carries_the_hint() {
     assert_eq!(report.warnings[0].related.len(), 1);
     assert_eq!(report.warnings[0].related[0].span, SimpleSpan::from(0..3));
     assert_eq!(report.warnings[1].span, SimpleSpan::from(25..31));
-    assert!(report.warnings[1].related.is_empty());
+    assert_eq!(report.warnings[1].related, []);
 }
 
 #[test]
