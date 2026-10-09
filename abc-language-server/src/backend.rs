@@ -101,8 +101,18 @@ impl DocumentState {
             config,
         }
     }
+
     const fn index(&self) -> &LineIndex {
         &self.model.index
+    }
+
+    fn reconfigure(&self, new_config: Config) -> Self {
+        let model = self.model.reconfigure(new_config);
+        Self {
+            version: self.version,
+            model,
+            config: new_config,
+        }
     }
 }
 
@@ -206,49 +216,27 @@ impl Backend {
     }
 
     async fn replace_config(&self, config: Config) {
-        let republished = {
+        let tasks = {
             let mut state = self.state.write().await;
             state.config = config;
-            let encoding = state.encoding.clone();
-            let documents = state
+            state
                 .documents
                 .iter()
-                .map(|(uri, document)| {
-                    let replacement = Arc::new(DocumentState::new(
-                        document.index().source().to_owned(),
-                        document.version,
-                        &encoding,
-                        config,
-                    ));
-                    (uri.clone(), replacement)
-                })
-                .collect::<Vec<_>>();
-            for (uri, document) in &documents {
-                state.documents.insert(uri.clone(), Arc::clone(document));
-            }
-            documents
+                .map(|(uri, document)| (uri.clone(), Arc::clone(document), config))
+                .collect::<Vec<_>>()
         };
-        for (uri, document) in republished {
-            self.publish(uri, &document).await;
-        }
+        self.apply_reconfigured_documents(config, tasks).await;
     }
 
     async fn refresh_configuration(&self) {
-        let (fallback, encoding, snapshots) = {
+        let (fallback, current_docs) = {
             let state = self.state.read().await;
             (
                 state.config,
-                state.encoding.clone(),
                 state
                     .documents
                     .iter()
-                    .map(|(uri, document)| {
-                        (
-                            uri.clone(),
-                            document.version,
-                            document.index().source().to_owned(),
-                        )
-                    })
+                    .map(|(uri, doc)| (uri.clone(), Arc::clone(doc)))
                     .collect::<Vec<_>>(),
             )
         };
@@ -256,7 +244,7 @@ impl Backend {
             scope_uri: None,
             section: Some("abc".to_owned()),
         }];
-        items.extend(snapshots.iter().map(|(uri, _, _)| ConfigurationItem {
+        items.extend(current_docs.iter().map(|(uri, _)| ConfigurationItem {
             scope_uri: Some(uri.clone()),
             section: Some("abc".to_owned()),
         }));
@@ -267,25 +255,35 @@ impl Backend {
             .first()
             .and_then(config_from_value)
             .unwrap_or(fallback);
-        let replacements = snapshots
+        let tasks = current_docs
             .into_iter()
             .enumerate()
-            .map(|(index, (uri, version, source))| {
+            .map(|(index, (uri, current_doc))| {
                 let document_config = values
                     .get(index + 1)
                     .and_then(config_from_value)
                     .unwrap_or(config);
-                (
-                    uri,
-                    Arc::new(DocumentState::new(
-                        source,
-                        version,
-                        &encoding,
-                        document_config,
-                    )),
-                )
+                (uri, current_doc, document_config)
             })
             .collect::<Vec<_>>();
+        self.apply_reconfigured_documents(config, tasks).await;
+    }
+
+    async fn apply_reconfigured_documents(
+        &self,
+        config: Config,
+        tasks: Vec<(Uri, Arc<DocumentState>, Config)>,
+    ) {
+        let replacements = tokio::task::spawn_blocking(move || {
+            tasks
+                .into_iter()
+                .map(|(uri, current_doc, document_config)| {
+                    (uri, Arc::new(current_doc.reconfigure(document_config)))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .expect("ABC configuration task should not panic");
         let republished = {
             let mut state = self.state.write().await;
             state.config = config;
@@ -1400,6 +1398,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configuration_change_republishes_diagnostics_without_reparse() {
+        let (mut service, mut client) = LspService::new(Backend::new);
+        let initialize = Request::build("initialize")
+            .params(json!({
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }))
+            .id(1)
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(initialize)
+            .await
+            .expect("initialize handled")
+            .expect("initialize response");
+
+        let uri = "file:///tmp/config_test.abc";
+        let source = "X:1\nT:Sample\nM:4/4\nL:1/4\nK:C\nCDEF |\nC D E |\n+trill+C |\n";
+        let open = Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "abc",
+                    "version": 1,
+                    "text": source
+                }
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(open)
+            .await
+            .expect("open handled");
+        let initial_published = next_publish(&mut client).await;
+        let initial_diagnostics = initial_published
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(initial_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("bar-duration")
+        }));
+        assert!(initial_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("legacy-decoration")
+        }));
+
+        let config_change = Request::build("workspace/didChangeConfiguration")
+            .params(json!({
+                "settings": {
+                    "abc": {
+                        "validation": {
+                            "barDuration": "off"
+                        }
+                    }
+                }
+            }))
+            .finish();
+        service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(config_change)
+            .await
+            .expect("config change handled");
+
+        let updated_published = next_publish(&mut client).await;
+        let updated_diagnostics = updated_published
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(!updated_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("bar-duration")
+        }));
+        assert!(updated_diagnostics.iter().any(|d| {
+            d.get("code").and_then(serde_json::Value::as_str) == Some("legacy-decoration")
+        }));
+    }
+
+    #[tokio::test]
     async fn publish_ignores_stale_versions() {
         let (mut service, mut client) = LspService::new(Backend::new);
         let initialize = Request::build("initialize")
@@ -1493,5 +1576,55 @@ mod tests {
             published.get("version").and_then(serde_json::Value::as_i64),
             Some(6)
         );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_skips_write_back_when_document_version_advances() {
+        let (service, _client) = LspService::new(Backend::new);
+        let backend = service.inner();
+        let uri: Uri = "file:///tmp/reconfig_race.abc".parse().unwrap();
+
+        let v1 = Arc::new(DocumentState::new(
+            "X:1\nK:C\n+trill+C |\n".to_owned(),
+            1,
+            &PositionEncodingKind::UTF16,
+            Config::default(),
+            Some(uri.clone()),
+        ));
+        let v2 = Arc::new(DocumentState::new(
+            "X:1\nK:C\nCDEF |\n".to_owned(),
+            2,
+            &PositionEncodingKind::UTF16,
+            Config::default(),
+            Some(uri.clone()),
+        ));
+
+        // Store v2 as the current document state while reconfiguring a stale v1 snapshot
+        backend
+            .state
+            .write()
+            .await
+            .documents
+            .insert(uri.clone(), Arc::clone(&v2));
+
+        let mut new_config = Config::default();
+        new_config.validation.legacy_decoration = crate::config::DiagnosticLevel::Off;
+        backend
+            .apply_reconfigured_documents(
+                new_config,
+                vec![(uri.clone(), Arc::clone(&v1), new_config)],
+            )
+            .await;
+
+        let (stored_config, stored) = {
+            let state = backend.state.read().await;
+            (
+                state.config,
+                Arc::clone(state.documents.get(&uri).expect("document present")),
+            )
+        };
+        assert_eq!(stored_config, new_config);
+        assert_eq!(stored.version, 2);
+        assert_eq!(stored.model.text, "X:1\nK:C\nCDEF |\n");
     }
 }
