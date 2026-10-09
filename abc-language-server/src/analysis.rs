@@ -195,6 +195,10 @@ const fn error_kind_code(kind: ErrorKind) -> &'static str {
         ErrorKind::InvalidMusic => "invalid-music",
         ErrorKind::MissingReference => "missing-reference",
         ErrorKind::InvalidFieldOrder => "invalid-field-order",
+        ErrorKind::UnrecognizedField => "unrecognized-field",
+        ErrorKind::HeaderFieldInBody => "header-field-in-body",
+        ErrorKind::InstructionInBody => "instruction-in-body",
+        ErrorKind::MusicLineContinuationBeforeEmpty => "music-continuation-before-empty",
         _ => "parser-diagnostic",
     }
 }
