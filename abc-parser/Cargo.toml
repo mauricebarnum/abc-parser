@@ -10,7 +10,11 @@ rust-version = "1.95"
 [dependencies]
 chumsky = { version = "0.13.0", default-features = false, features = ["std"] }
 clap = { version = "4.6.4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
-aquamarine = "0.6.0"
+aquamarine = { version = "0.6.0", optional = true }
+
+[features]
+default = []
+doc-mermaid = ["dep:aquamarine"]
 
 [[bin]]
 name = "abc-transpose"
@@ -21,6 +25,16 @@ doc = true
 name = "abc-lint"
 path = "src/bin/abc-lint.rs"
 doc = true
+
+[[example]]
+name = "kitchen_sink"
+path = "examples/kitchen_sink.rs"
+test = false
+
+[[example]]
+name = "transpose_kitchen_sink"
+path = "examples/transpose_kitchen_sink.rs"
+test = false
 
 [lints]
 workspace = true

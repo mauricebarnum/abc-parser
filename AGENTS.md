@@ -36,6 +36,8 @@
   tests.
 - Use `cargo test` only when the task is particularly suited to it, such as
   running documentation tests that Nextest does not support.
+- Use `--profile dev-debug` (or `--cargo-profile test-debug` for Nextest)
+  when debugger inspection requires full variable information.
 
 # Commit Messages
 
