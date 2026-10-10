@@ -26,7 +26,8 @@ fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed={ARCHITECTURE_PATH}");
 
     let architecture = fs::read_to_string(ARCHITECTURE_PATH)?;
-    let mut generated = String::from("#[cfg_attr(doc, aquamarine::aquamarine)]\n");
+    let mut generated =
+        String::from("#[cfg_attr(all(doc, feature = \"doc-mermaid\"), aquamarine::aquamarine)]\n");
 
     for line in architecture.lines() {
         writeln!(generated, "#[doc = {line:?}]").expect("writing to a String cannot fail");
