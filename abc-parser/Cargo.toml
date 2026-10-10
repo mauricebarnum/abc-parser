@@ -22,5 +22,15 @@ name = "abc-lint"
 path = "src/bin/abc-lint.rs"
 doc = true
 
+[[example]]
+name = "kitchen_sink"
+path = "examples/kitchen_sink.rs"
+test = false
+
+[[example]]
+name = "transpose_kitchen_sink"
+path = "examples/transpose_kitchen_sink.rs"
+test = false
+
 [lints]
 workspace = true
