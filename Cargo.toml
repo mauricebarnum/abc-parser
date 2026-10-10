@@ -3,6 +3,12 @@ members = ["abc-language-server", "abc-parser"]
 resolver = "3"
 
 [profile.dev]
+debug = "line-tables-only"
+
+# Use `cargo build --profile dev-debug` when development builds need complete
+# debugger information, including local variables.
+[profile.dev-debug]
+inherits = "dev"
 debug = "full"
 
 [profile.test]
