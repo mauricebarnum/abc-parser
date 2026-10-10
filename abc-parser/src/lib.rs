@@ -30,6 +30,7 @@ use std::ops::Range;
 // on the build.rs-generated `architecture` module. This no-op import
 // satisfies Cargo's `unused_dependencies` lint; it has minimal compile-time
 // impact and no runtime impact.
+#[cfg(feature = "doc-mermaid")]
 use aquamarine as _;
 use chumsky::Parser;
 use chumsky::error::Rich;
