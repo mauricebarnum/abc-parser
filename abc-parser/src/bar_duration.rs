@@ -19,6 +19,7 @@ use std::fmt;
 
 use chumsky::span::SimpleSpan;
 
+use crate::BarKind;
 use crate::ChordMember;
 use crate::Document;
 use crate::ErrorKind;
@@ -410,6 +411,14 @@ fn apply_body_timing_field(
             voice.meter = meter;
         }
         FieldValue::UnitLength(unit_length) => voice.unit_length = *unit_length,
+        FieldValue::Parts(_) => {
+            if has_complementary_boundary_pair(voice) {
+                finish_pickup_section(voice, options.pickup_policy, warnings);
+                voice.opening_bar_available = true;
+            } else if options.pickup_policy == BarDurationPickupPolicy::OpeningBar {
+                voice.opening_bar_available = true;
+            }
+        }
         _ => {}
     }
 }
@@ -455,7 +464,10 @@ fn apply_music_timing(
         MusicElement::BrokenRhythm(rhythm) => {
             apply_broken_rhythm(rhythm.greater, rhythm.count, voice);
         }
-        MusicElement::Bar(_) => complete_bar(voice, span, options, warnings),
+        MusicElement::Bar(bar) => {
+            complete_bar(voice, span, options, warnings);
+            apply_bar_line_boundary(bar.kind, voice, options, warnings);
+        }
         MusicElement::Overlay(_) => {
             flush_pending_timed_group(voice);
             make_bar_indeterminate(voice);
@@ -613,6 +625,51 @@ fn process_completed_bar(
     warnings.push(bar_duration_warning(&bar));
 }
 
+fn apply_bar_line_boundary(
+    kind: BarKind,
+    voice: &mut VoiceTiming,
+    options: BarDurationOptions,
+    warnings: &mut Vec<ParseWarning<SimpleSpan<usize>>>,
+) {
+    match kind {
+        BarKind::ThinThick | BarKind::Double => {
+            finish_pickup_section(voice, options.pickup_policy, warnings);
+            voice.opening_bar_available = true;
+        }
+        BarKind::RepeatEnd | BarKind::RepeatBoth | BarKind::ThickThin => {
+            if has_complementary_boundary_pair(voice) {
+                finish_pickup_section(voice, options.pickup_policy, warnings);
+                voice.opening_bar_available = true;
+            } else if options.pickup_policy == BarDurationPickupPolicy::OpeningBar {
+                voice.opening_bar_available = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn has_complementary_boundary_pair(voice: &VoiceTiming) -> bool {
+    voice.incomplete_bars.len() >= 2
+        && voice
+            .incomplete_bars
+            .first()
+            .is_some_and(|bar| bar.position == 0)
+        && voice
+            .incomplete_bars
+            .last()
+            .is_some_and(|bar| bar.position + 1 == voice.completed_bars)
+        && bars_are_complementary(
+            voice
+                .incomplete_bars
+                .first()
+                .expect("incomplete bars has at least 2 entries"),
+            voice
+                .incomplete_bars
+                .last()
+                .expect("incomplete bars has at least 2 entries"),
+        )
+}
+
 fn finish_pickup_section(
     voice: &mut VoiceTiming,
     pickup_policy: BarDurationPickupPolicy,
@@ -620,6 +677,7 @@ fn finish_pickup_section(
 ) {
     let bars = std::mem::take(&mut voice.incomplete_bars);
     let completed_bars = std::mem::take(&mut voice.completed_bars);
+    voice.opening_bar_available = true;
     if bars.is_empty() {
         return;
     }
@@ -777,5 +835,40 @@ mod tests {
         assert_eq!(Duration::new(8, 2).to_string(), "4");
         assert_eq!(Duration::new(2, 4).to_string(), "1/2");
         assert_eq!(Duration::new(14, 4).to_string(), "3 1/2");
+    }
+
+    #[test]
+    fn pickup_pairs_reset_at_section_boundaries() {
+        let source = "X:1\nM:6/8\nL:1/8\nK:Am\na | e2a c2a | cde A2 |]\na | f2a fga | A3 A2 |]\n";
+        let options =
+            BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::FirstAndLast);
+        assert_eq!(warnings(source, options), []);
+    }
+
+    #[test]
+    fn incomplete_bars_at_section_boundaries_warn_when_noncomplementary() {
+        let source = "X:1\nM:6/8\nL:1/8\nK:Am\na | e2a c2a | A3 |]\n";
+        let options =
+            BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::FirstAndLast);
+        let found = warnings(source, options);
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn pickup_pairs_reset_at_repeated_section_boundaries() {
+        let source = "X:1\nM:4/4\nL:1/8\nK:C\nC2 |: C8 | C6 :| C2 |: C8 | C6 :|\n";
+        let options =
+            BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::FirstAndLast);
+        assert_eq!(warnings(source, options), []);
+    }
+
+    #[test]
+    fn opening_pickup_resets_at_section_boundaries() {
+        let source =
+            "X:1\nM:6/8\nL:1/8\nK:Am\na | e2a c2a | e2a c2a |]\na | f2a fga | e2a c2a |]\n";
+        let options = BarDurationOptions::new()
+            .pickup_policy(BarDurationPickupPolicy::OpeningBar)
+            .check_trailing_bar(false);
+        assert_eq!(warnings(source, options), []);
     }
 }
