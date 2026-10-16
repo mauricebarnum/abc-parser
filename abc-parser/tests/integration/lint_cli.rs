@@ -239,6 +239,24 @@ fn pickup_pairing_obeys_meter_boundaries_but_not_part_or_repeat_markers() {
 }
 
 #[test]
+fn complementary_pickups_across_multiple_sections_are_accepted() {
+    let source = concat!(
+        "X:1\n",
+        "T:Multiple sections\n",
+        "M:6/8\n",
+        "L:1/8\n",
+        "K:Am\n",
+        "a | e2a c2a | cde A2 |]\n",
+        "a | f2a fga | A3 A2 |]\n",
+        "d | efe f3 | A3 A2 |]\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let warnings = String::from_utf8(output.stderr).unwrap();
+    assert!(!warnings.contains("bar duration is"), "{warnings}");
+}
+
+#[test]
 fn pickup_sections_are_independent_for_each_voice() {
     let source = concat!(
         "X:1\n",
