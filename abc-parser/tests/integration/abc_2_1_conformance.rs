@@ -307,6 +307,168 @@ fn section_10_1_warns_for_deprecated_a_and_e_fields() {
 }
 
 #[test]
+fn section_3_warns_for_unrecognized_information_fields() {
+    for source in ["Y:note", "J:editor", "y:lowercase", "j:editor"] {
+        let report = parse(source);
+        assert!(report.is_valid(), "{source:?}: {:#?}", report.errors);
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.kind == ErrorKind::UnrecognizedField)
+                .count(),
+            1,
+            "{source:?}: {:#?}",
+            report.warnings
+        );
+    }
+
+    let source = "X:1\nT:Unknown\nY:editor\nK:C\nCDEF |\n[Y:hidden]\n";
+    let report = parse(source);
+    assert!(report.is_valid(), "{:#?}", report.errors);
+    let unknown = report
+        .warnings
+        .iter()
+        .filter(|warning| warning.kind == ErrorKind::UnrecognizedField)
+        .collect::<Vec<_>>();
+    assert_eq!(unknown.len(), 2, "{:#?}", report.warnings);
+    assert!(unknown.iter().any(|warning| warning.message.contains("Y:")));
+    assert!(
+        unknown
+            .iter()
+            .any(|warning| warning.message.contains("inline"))
+    );
+    let document = report.output.unwrap().into_owned(source).unwrap();
+    let mut seen_physical = false;
+    let mut seen_inline = false;
+    for line in &document.tunes().next().unwrap().lines {
+        if let Line::Field(field) = &line.value
+            && field.kind == FieldKind::Extension('Y')
+        {
+            seen_physical = true;
+        }
+        if let Line::Music(elements) = &line.value {
+            for element in elements {
+                if let MusicElement::InlineField(field) = &element.value
+                    && field.kind == FieldKind::Extension('Y')
+                {
+                    seen_inline = true;
+                }
+            }
+        }
+    }
+    assert!(seen_physical, "the Y: payload must be retained as today");
+    assert!(seen_inline, "the [Y:...] payload must be retained as today");
+}
+
+#[test]
+fn section_3_does_not_warn_for_defined_or_deprecated_field_letters() {
+    for source in [
+        "T:title",
+        "X:1",
+        "K:C",
+        "M:4/4",
+        "L:1/8",
+        "Q:120",
+        "V:1",
+        "P:A",
+        "U:H=!trill!",
+        "m:A=B",
+        "s:!trill!",
+        "w:words",
+    ] {
+        let report = parse(source);
+        assert!(report.is_valid(), "{source:?}: {:#?}", report.errors);
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.kind == ErrorKind::UnrecognizedField)
+                .count(),
+            0,
+            "{source:?}: {:#?}",
+            report.warnings
+        );
+    }
+}
+
+#[test]
+fn strict_mode_warns_for_header_only_fields_in_the_tune_body() {
+    let source = "X:1\nT:Title\nK:C\nCDEF |\nB:book\nC:composer\nD:discography\nF:url\nG:group\nH:history\nO:origin\nS:source\nX:9\nZ:transcriber\nY:vendor\n";
+    let loose = parse(source);
+    assert_eq!(
+        loose
+            .warnings
+            .iter()
+            .filter(|warning| warning.kind == ErrorKind::HeaderFieldInBody)
+            .count(),
+        0,
+        "{:#?}",
+        loose.warnings
+    );
+    let strict = parse_with_options(source, ParserOptions::new().strict(true));
+    let body_warnings = strict
+        .warnings
+        .iter()
+        .filter(|warning| warning.kind == ErrorKind::HeaderFieldInBody)
+        .collect::<Vec<_>>();
+    assert_eq!(body_warnings.len(), 11, "{:#?}", strict.warnings);
+    let letters = body_warnings
+        .iter()
+        .map(|warning| warning.message.chars().next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        letters,
+        vec!['B', 'C', 'D', 'F', 'G', 'H', 'O', 'S', 'X', 'Z', 'Y'],
+        "{body_warnings:#?}"
+    );
+}
+
+#[test]
+fn strict_mode_warns_for_linebreak_instruction_in_the_tune_body() {
+    let source = "X:1\nT:Title\nK:C\nCDEF |\nI:linebreak\n";
+    let loose = parse(source);
+    assert_eq!(
+        loose
+            .warnings
+            .iter()
+            .filter(|warning| warning.kind == ErrorKind::InstructionInBody)
+            .count(),
+        0
+    );
+    let strict = parse_with_options(source, ParserOptions::new().strict(true));
+    let body_warnings = strict
+        .warnings
+        .iter()
+        .filter(|warning| warning.kind == ErrorKind::InstructionInBody)
+        .collect::<Vec<_>>();
+    assert_eq!(body_warnings.len(), 1, "{:#?}", strict.warnings);
+    assert!(body_warnings[0].message.contains("I:linebreak"));
+}
+
+#[test]
+fn strict_mode_warns_for_music_line_continuation_before_empty_line() {
+    let source = "X:1\nT:Title\nK:C\nCDEF |\n\\\n\nX:2\nT:Next\nK:C\nCDEF |\n";
+    let loose = parse(source);
+    assert_eq!(
+        loose
+            .warnings
+            .iter()
+            .filter(|warning| warning.kind == ErrorKind::MusicLineContinuationBeforeEmpty)
+            .count(),
+        0
+    );
+    let strict = parse_with_options(source, ParserOptions::new().strict(true));
+    let continuation_warnings = strict
+        .warnings
+        .iter()
+        .filter(|warning| warning.kind == ErrorKind::MusicLineContinuationBeforeEmpty)
+        .collect::<Vec<_>>();
+    assert_eq!(continuation_warnings.len(), 1, "{:#?}", strict.warnings);
+    assert!(continuation_warnings[0].message.contains("continuation"));
+}
+
+#[test]
 fn section_10_1_retains_implicit_multiline_history_until_the_next_field() {
     let source =
         "H:first line\nCDEF | remains history\n%also history\n\nX:1\nT:History\nK:C\nCDEF |\n";

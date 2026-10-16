@@ -37,6 +37,7 @@ use chumsky::prelude::just;
 use chumsky::prelude::one_of;
 use chumsky::prelude::select;
 use chumsky::recovery::via_parser;
+use chumsky::span::SimpleSpan;
 use chumsky::span::Span as ChumskySpan;
 
 use super::Accidental;
@@ -75,6 +76,7 @@ use super::Note;
 use super::NoteLength;
 use super::Overlay;
 use super::ParseError;
+use super::ParseReport;
 use super::ParseWarning;
 use super::ParsedDocument;
 use super::ParserOptions;
@@ -96,6 +98,7 @@ use super::Tuplet;
 use super::TypesetText;
 use super::VariantEnding;
 use super::VoiceDefinition;
+use super::chumsky_error;
 use super::field_kind;
 
 type ParserDiagnostics<S> = (Vec<ParseError<S>>, Vec<ParseWarning<S>>);
@@ -519,6 +522,20 @@ where
     .map(SourceText::Span)
 }
 
+/// Parses the value of an `I:` instruction as owned text so the `linebreak`
+/// token can be inspected without resolving a span.
+fn instruction_text_value<'src, I>()
+-> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    line_character()
+        .repeated()
+        .collect::<String>()
+        .map(SourceText::Synthesized)
+}
+
 /// Parses the uninterpreted remainder of a comment line.
 fn comment_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
 where
@@ -526,6 +543,19 @@ where
     I::Span: Clone,
 {
     line_character().repeated().to_span().map(SourceText::Span)
+}
+
+/// Parses the uninterpreted remainder of an inline information field value.
+fn inline_field_text<'src, I>() -> impl Parser<'src, I, SourceText<I::Span>, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    any()
+        .filter(|character| !matches!(character, ']' | '\r' | '\n'))
+        .repeated()
+        .to_span()
+        .map(SourceText::Span)
 }
 
 /// Parses a comment line, including the permitted leading horizontal space.
@@ -1008,17 +1038,21 @@ where
             .labelled("m: macro definition (pattern=replacement)")
             .as_context(),
     ));
+    let textual_instruction = just('I')
+        .then_ignore(just(':'))
+        .then(instruction_text_value())
+        .map(|(key, value)| field(key, FieldValue::Text(value)));
     let textual = any()
         .filter(|key: &char| key.is_ascii_alphabetic() && !has_structured_field_parser(*key))
         .then_ignore(just(':'))
         .then(remaining_text())
         .map_with(|(key, value), extra| {
-            let message = match key {
+            let deprecated = match key {
                 'A' => Some("deprecated A: area field; use O: origin instead"),
                 'E' => Some("deprecated E: element-spacing field is retained as text"),
                 _ => None,
             };
-            if let Some(message) = message {
+            if let Some(message) = deprecated {
                 let span = extra.span();
                 extra.state().0.warnings.push(ParseWarning {
                     kind: ErrorKind::DeprecatedSyntax,
@@ -1026,10 +1060,18 @@ where
                     span,
                     related: Vec::new(),
                 });
+            } else if matches!(field_kind(key), FieldKind::Extension(_)) {
+                let span = extra.span();
+                extra.state().0.warnings.push(ParseWarning {
+                    kind: ErrorKind::UnrecognizedField,
+                    message: format!("unrecognized information field {key}:"),
+                    span,
+                    related: Vec::new(),
+                });
             }
             field(key, FieldValue::Text(value))
         });
-    choice((structured, textual))
+    choice((structured, textual_instruction, textual))
 }
 
 /// Retains malformed structured fields as spans and emits a non-fatal error.
@@ -1254,14 +1296,19 @@ where
             key.is_ascii_alphabetic() && !matches!(*key, 'L' | 'M' | 'K' | 'X' | 'Q' | 'V' | 'P')
         })
         .then_ignore(just(':'))
-        .then(
-            any()
-                .filter(|character| !matches!(character, ']' | '\r' | '\n'))
-                .repeated()
-                .to_span()
-                .map(SourceText::Span),
-        )
-        .map(|(key, value)| field(key, FieldValue::Text(value)));
+        .then(inline_field_text())
+        .map_with(|(key, value), extra| {
+            if matches!(field_kind(key), FieldKind::Extension(_)) {
+                let span = extra.span();
+                extra.state().0.warnings.push(ParseWarning {
+                    kind: ErrorKind::UnrecognizedField,
+                    message: format!("unrecognized inline information field [{key}:...]"),
+                    span,
+                    related: Vec::new(),
+                });
+            }
+            field(key, FieldValue::Text(value))
+        });
     just('[')
         .ignore_then(choice((
             common_structured_field_parser(FieldContext::Inline),
@@ -1817,6 +1864,29 @@ const fn is_tune_only_header_field(kind: FieldKind) -> bool {
     )
 }
 
+/// Returns whether a field is restricted to the file or tune header per §3 line 443.
+///
+/// Letters `A-G`, `X-Z`, `a-g`, and `x-z` are not permitted in the tune body
+/// to avoid confusion with note symbols, rests, and spacers. The deprecated
+/// `A:` and `E:` fields are excluded because they already emit their own
+/// `DeprecatedSyntax` advisory and would double-warn here.
+const fn is_body_forbidden_field(kind: FieldKind) -> bool {
+    matches!(
+        kind,
+        FieldKind::Book
+            | FieldKind::Composer
+            | FieldKind::Discography
+            | FieldKind::FileUrl
+            | FieldKind::Group
+            | FieldKind::History
+            | FieldKind::Origin
+            | FieldKind::Source
+            | FieldKind::Reference
+            | FieldKind::Transcription
+            | FieldKind::Extension(_)
+    )
+}
+
 /// Recognizes the boundary following a nonblank block without consuming it.
 fn block_end<'src, I>() -> impl Parser<'src, I, (), Extra<'src, I>> + Clone
 where
@@ -2308,6 +2378,84 @@ where
     }
 }
 
+/// Emits strict, non-fatal guidance for constructs that §3 and §6.1.1 forbid
+/// inside a tune body once music code has begun.
+fn validate_tune_body_strictness<S>(units: &[ParsedTuneUnit<S>], state: &mut ParserState<S>)
+where
+    S: Clone,
+{
+    let mut music_started = false;
+    let mut last_music_ended_with_continuation = false;
+    let mut last_music_span: Option<S> = None;
+    for unit in units {
+        if let ParsedTuneUnit::Line(line) = unit {
+            match &line.value {
+                Line::Music(_) => {
+                    music_started = true;
+                    last_music_ended_with_continuation = music_ends_with_continuation(&line.value);
+                    last_music_span = Some(line.span.clone());
+                }
+                Line::Field(field) if music_started => {
+                    if is_body_forbidden_field(field.kind) {
+                        state.0.warnings.push(ParseWarning {
+                            kind: ErrorKind::HeaderFieldInBody,
+                            message: format!(
+                                "{}: field is not permitted in the tune body (§3)",
+                                field.key
+                            ),
+                            span: line.span.clone(),
+                            related: Vec::new(),
+                        });
+                    } else if field.kind == FieldKind::Instruction
+                        && matches!(&field.value, FieldValue::Text(text) if starts_with_linebreak(text))
+                    {
+                        state.0.warnings.push(ParseWarning {
+                            kind: ErrorKind::InstructionInBody,
+                            message: "I:linebreak instruction is not allowed in the tune body"
+                                .to_owned(),
+                            span: line.span.clone(),
+                            related: Vec::new(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let (true, Some(span)) = (last_music_ended_with_continuation, last_music_span) {
+        state.0.warnings.push(ParseWarning {
+            kind: ErrorKind::MusicLineContinuationBeforeEmpty,
+            message:
+                "music line ends with a \\ continuation and is followed by an empty line (§6.1.1)"
+                    .to_owned(),
+            span,
+            related: Vec::new(),
+        });
+    }
+}
+
+/// Returns whether `text` starts with the literal `linebreak` token used by
+/// the `I:linebreak` instruction, ignoring leading horizontal whitespace.
+fn starts_with_linebreak<S>(text: &SourceText<S>) -> bool {
+    let value = match text {
+        SourceText::Synthesized(value) => value.as_str(),
+        SourceText::Span(_) => return false,
+    };
+    let trimmed = value.trim_start();
+    let token = "linebreak";
+    trimmed.len() >= token.len() && trimmed[..token.len()].eq_ignore_ascii_case(token)
+}
+
+/// Returns whether the music line ends with a `\` continuation.
+fn music_ends_with_continuation<S>(line: &Line<S, SourceText<S>>) -> bool {
+    match line {
+        Line::Music(elements) => elements.last().is_some_and(|element| {
+            matches!(element.value, MusicElement::LineBreak(LineBreak::Continue))
+        }),
+        _ => false,
+    }
+}
+
 /// Converts a resolved tune candidate and applies retention and strict validation.
 fn resolve_tune_candidate<S>(
     candidate: ParsedTuneCandidate<S>,
@@ -2365,6 +2513,7 @@ where
             }
         }
         validate_tune_header_order(&candidate.units, state);
+        validate_tune_body_strictness(&candidate.units, state);
     }
     let lines = candidate
         .units
@@ -2621,38 +2770,90 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord,
 {
+    let blocks = blocks_combinator(options, true);
+    blocks.map(|seq| {
+        let (first, rest) = seq
+            .into_iter()
+            .next()
+            .map_or((None, Vec::new()), |entry| (Some(entry.0), entry.1));
+        assemble_document(first, rest)
+    })
+}
+
+/// Parses zero or more blank-line-separated blocks from `input`.
+///
+/// `at_document_start` enables the document prologue (optional BOM, optional
+/// strict version marker) and the first-block header-ambiguity resolution;
+/// when `false` the slice is parsed as a contiguous region with no header
+/// resolution. The output pairs the resolved first block (or `Header`)
+/// with the sequence of subsequent blocks.
+///
+/// The two callers — [`document_body_parser`] for the full-document path
+/// and [`parse_blocks`] for the incremental path — share this grammar so
+/// the two paths cannot diverge.
+#[allow(clippy::type_complexity)]
+fn blocks_combinator<'src, I>(
+    options: ParserOptions,
+    at_document_start: bool,
+) -> impl Parser<'src, I, Vec<(ParsedFirstBlock<I::Span>, Vec<ParsedBlock<I::Span>>)>, Extra<'src, I>>
++ Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+    <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
+    <I::Span as ChumskySpan>::Offset: Ord,
+{
     let blank_line = horizontal_space::<I>().then_ignore(newline());
     let block_separator = newline()
         .ignore_then(blank_line.clone().repeated().at_least(1))
         .ignored();
     let block = block_parser::<I>(options);
-    let first = choice((
-        first_tune_or_header_parser::<I>(options),
-        initial_header_parser::<I>().map_with(|lines, extra| {
-            if let Some(span) = first_field_span_in_lines(&lines) {
-                extra.state().0.note_field_led_start(span);
-            }
-            ParsedFirstBlock::Header(lines)
-        }),
-        text_block_parser::<I>(options).map(ParsedFirstBlock::Content),
-    ));
-    blank_line
-        .repeated()
-        .ignore_then(
-            first.or_not().then(
-                block_separator
-                    .clone()
-                    .ignore_then(block)
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .then_ignore(block_separator.or_not())
-        .then_ignore(newline().or_not())
-        .then_ignore(horizontal_space())
-        .then_ignore(end())
-        .map(|(first, rest)| assemble_document(first, rest))
+    let first = if at_document_start {
+        choice((
+            first_tune_or_header_parser::<I>(options),
+            initial_header_parser::<I>().map_with(|lines, extra| {
+                if let Some(span) = first_field_span_in_lines(&lines) {
+                    extra.state().0.note_field_led_start(span);
+                }
+                ParsedFirstBlock::Header(lines)
+            }),
+            text_block_parser::<I>(options).map(ParsedFirstBlock::Content),
+        ))
         .boxed()
+    } else {
+        block.clone().map(ParsedFirstBlock::Content).boxed()
+    };
+    let pair = first.or_not().then(
+        block_separator
+            .clone()
+            .ignore_then(block)
+            .repeated()
+            .collect::<Vec<_>>(),
+    );
+    let sequence = pair
+        .map(|(first, rest)| match first {
+            Some(first) => vec![(first, rest)],
+            None => Vec::new(),
+        })
+        .boxed();
+    if at_document_start {
+        just('\u{feff}')
+            .or_not()
+            .ignored()
+            .ignore_then(blank_line.repeated())
+            .ignore_then(sequence)
+            .then_ignore(block_separator.or_not())
+            .then_ignore(newline().or_not())
+            .then_ignore(horizontal_space())
+            .then_ignore(end())
+            .boxed()
+    } else {
+        sequence
+            .then_ignore(block_separator.or_not())
+            .then_ignore(newline().or_not())
+            .then_ignore(end())
+            .boxed()
+    }
 }
 
 /// Builds a complete-document parser with version-selected strictness.
@@ -2694,4 +2895,232 @@ where
     });
     let result = document_parser(options).parse_with_state(input, &mut state);
     (result, (state.0.errors, state.0.warnings))
+}
+
+/// One blank-line-delimited block parsed in isolation.
+///
+/// This is the public, slice-relative output of [`parse_blocks`]. A block
+/// is either a tune (one or more header lines followed by an optional body)
+/// or a text-mode block containing free text, typeset text, comments, or
+/// stylesheet directives. Leading comments of a tune become
+/// [`DocumentItem::Comment`] entries in `items`.
+///
+/// The spans and [`SourceText`] offsets in `items` and `header` are
+/// relative to the slice passed to `parse_blocks`; callers re-base them to
+/// the document-absolute coordinate space when combining results.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::type_complexity)]
+pub struct Block {
+    /// Physical-line span of the block content, slice-relative, excluding
+    /// the surrounding blank-line separators.
+    pub span: SimpleSpan<usize>,
+    /// Document items produced by the block, in source order.
+    pub items: Vec<
+        Spanned<DocumentItem<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>,
+    >,
+    /// File-header lines when this block resolved as the file header.
+    pub header:
+        Vec<Spanned<Line<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>>,
+    /// Span of the first information field when the block is field-led
+    /// (`Some` exactly for tune and file-header blocks).
+    pub first_field: Option<SimpleSpan<usize>>,
+}
+
+/// Context needed to parse blocks in isolation with full-parse fidelity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlocksContext {
+    /// The slice begins the document; enables the BOM/version-marker
+    /// prologue and file-header resolution of the first block.
+    pub at_document_start: bool,
+    /// First-field span of the immediately preceding field-led block,
+    /// seeding the `MissingReference` extra-blank-line hint.
+    pub previous_field_led: Option<SimpleSpan<usize>>,
+}
+
+/// Parses one or more blank-line-separated blocks from `input`.
+///
+/// Diagnostics and spans are relative to `input` (the caller re-bases them
+/// to the document-absolute coordinate space). When
+/// [`BlocksContext::at_document_start`] is `true`, the parser reproduces
+/// the document prologue (optional BOM, optional strict version marker
+/// that forces strict interpretation, leading blank lines) and resolves
+/// the first block as a file header or tune; when `false`, the slice is
+/// treated as a region of the document and the first block is parsed
+/// without header resolution.
+pub fn parse_blocks(
+    input: &str,
+    options: ParserOptions,
+    context: BlocksContext,
+) -> ParseReport<Vec<Block>, SimpleSpan<usize>> {
+    let options = if context.at_document_start {
+        prologue_options(input, options)
+    } else {
+        options
+    };
+    let mut state = extra::SimpleState(ParserStateValue {
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        last_field_led_span: context.previous_field_led,
+    });
+    let parser = blocks_combinator(options, context.at_document_start);
+    let result = parser.parse_with_state(input, &mut state);
+    let (output, faults) = result.into_output_errors();
+    let mut errors: Vec<ParseError<SimpleSpan<usize>>> = faults.iter().map(chumsky_error).collect();
+    errors.extend(state.0.errors);
+    let mut warnings = state.0.warnings;
+    warnings.sort_by_key(|warning| (warning.span.start(), warning.span.end()));
+    ParseReport {
+        output: output.map(rebase_blocks),
+        errors,
+        warnings,
+    }
+}
+
+/// Returns the strict-marker decision for the first line of a document.
+///
+/// Returns `Some(true)` if `line` is a `%abc-` version marker whose version
+/// is 2.1 or later (in which case the marker is consumed by the document
+/// prologue and strict interpretation is selected). Returns `None` for
+/// any other line, including `%abc` without the dash, `%abc-2.0`,
+/// `%abc-2` (no minor), `%abc-2x` (junk after the major digit), and any
+/// other text. Used by incremental callers that need to know whether a
+/// line-1 edit invalidates a previously cached strictness choice.
+pub fn version_marker(line: &str) -> Option<bool> {
+    let trimmed = line.strip_suffix('\r').unwrap_or(line);
+    let rest = trimmed.strip_prefix("%abc-")?;
+    let mut chars = rest.chars();
+    let major = chars.next()?.to_digit(10)?;
+    let (minor, has_minor) = if chars.next() == Some('.') {
+        (chars.next()?.to_digit(10)?, true)
+    } else {
+        (0, false)
+    };
+    let strict = major > 2 || (major == 2 && has_minor && minor >= 1);
+    strict.then_some(true)
+}
+
+/// Inspects the optional BOM and strict version marker to select parser options.
+fn prologue_options(input: &str, options: ParserOptions) -> ParserOptions {
+    let slice = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let first_line = slice.split(['\r', '\n']).next().unwrap_or("");
+    if version_marker(first_line) == Some(true) {
+        options.strict(true)
+    } else {
+        options
+    }
+}
+
+/// Converts the internal per-block shape into the public [`Block`] shape.
+#[allow(clippy::type_complexity)]
+fn rebase_blocks(
+    blocks: Vec<(
+        ParsedFirstBlock<SimpleSpan<usize>>,
+        Vec<ParsedBlock<SimpleSpan<usize>>>,
+    )>,
+) -> Vec<Block> {
+    blocks
+        .into_iter()
+        .flat_map(|(first, rest)| {
+            let mut out = Vec::with_capacity(1 + rest.len());
+            out.push(block_from_first(first, &rest));
+            out.extend(rest.into_iter().map(block_from_subsequent));
+            out
+        })
+        .collect()
+}
+
+fn block_from_first(
+    first: ParsedFirstBlock<SimpleSpan<usize>>,
+    rest: &[ParsedBlock<SimpleSpan<usize>>],
+) -> Block {
+    match first {
+        ParsedFirstBlock::Header(lines) => {
+            let first_field = first_field_span_in_lines(&lines);
+            let span_start = lines.first().map_or_else(
+                || match rest.first() {
+                    Some(ParsedBlock::Tune { tune, .. }) => tune.span.start,
+                    Some(ParsedBlock::Text { items }) => items.first().map_or(0, |i| i.span.start),
+                    None => 0,
+                },
+                |l| l.span.start,
+            );
+            let span_end = lines.last().map_or(span_start, |l| l.span.end);
+            Block {
+                span: SimpleSpan {
+                    start: span_start,
+                    end: span_end,
+                    context: (),
+                },
+                items: Vec::new(),
+                header: lines,
+                first_field,
+            }
+        }
+        ParsedFirstBlock::Content(ParsedBlock::Tune {
+            leading_comments,
+            tune,
+        }) => tune_block(leading_comments, tune),
+        ParsedFirstBlock::Content(ParsedBlock::Text { items }) => text_block(items),
+    }
+}
+
+fn block_from_subsequent(block: ParsedBlock<SimpleSpan<usize>>) -> Block {
+    match block {
+        ParsedBlock::Tune {
+            leading_comments,
+            tune,
+        } => tune_block(leading_comments, tune),
+        ParsedBlock::Text { items } => text_block(items),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn tune_block(
+    leading_comments: Vec<
+        Spanned<Line<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>,
+    >,
+    tune: Spanned<Tune<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>,
+) -> Block {
+    let span_start = leading_comments
+        .first()
+        .map_or(tune.span.start, |l| l.span.start);
+    let span_end = tune.span.end;
+    let first_field = first_field_span_in_lines(&tune.value.lines);
+    let mut items: Vec<
+        Spanned<DocumentItem<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>,
+    > = comment_items(leading_comments).collect();
+    items.push(Spanned {
+        value: DocumentItem::Tune(tune.value),
+        span: tune.span,
+    });
+    Block {
+        span: SimpleSpan {
+            start: span_start,
+            end: span_end,
+            context: (),
+        },
+        items,
+        header: Vec::new(),
+        first_field,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn text_block(
+    items: Vec<
+        Spanned<DocumentItem<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>,
+    >,
+) -> Block {
+    let span_start = items.first().map_or(0, |i| i.span.start);
+    let span_end = items.last().map_or(span_start, |i| i.span.end);
+    Block {
+        span: SimpleSpan {
+            start: span_start,
+            end: span_end,
+            context: (),
+        },
+        first_field: None,
+        header: Vec::new(),
+        items,
+    }
 }

@@ -5,23 +5,14 @@
 
 use std::ops::Range;
 
-use abc_parser::BarDurationOptions;
-use abc_parser::BarDurationPickupPolicy;
 use abc_parser::ErrorKind;
-use abc_parser::IntoOwnedAst;
-use abc_parser::ParserOptions;
-use abc_parser::bar_duration_warnings;
-use abc_parser::parse_with_options;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
 use tower_lsp_server::ls_types::CompletionTextEdit;
 use tower_lsp_server::ls_types::Diagnostic;
-use tower_lsp_server::ls_types::DiagnosticSeverity;
-use tower_lsp_server::ls_types::DiagnosticTag;
 use tower_lsp_server::ls_types::DocumentSymbol;
 use tower_lsp_server::ls_types::FoldingRange;
 use tower_lsp_server::ls_types::FoldingRangeKind;
-use tower_lsp_server::ls_types::NumberOrString;
 use tower_lsp_server::ls_types::PositionEncodingKind;
 use tower_lsp_server::ls_types::Range as LspRange;
 use tower_lsp_server::ls_types::SelectionRange;
@@ -31,8 +22,8 @@ use tower_lsp_server::ls_types::SymbolKind;
 use tower_lsp_server::ls_types::TextEdit;
 
 use crate::config::Config;
-use crate::config::DiagnosticLevel;
 use crate::config::NoteLengthStyle;
+use crate::document::DocumentModel;
 use crate::position::LineIndex;
 
 const FIELD_COMPLETIONS: &[(char, &str)] = &[
@@ -51,143 +42,31 @@ const FIELD_COMPLETIONS: &[(char, &str)] = &[
 ];
 
 /// Immutable analysis of one synchronized document version.
+///
+/// In Track B the block-oriented [`DocumentModel`] owns diagnostic assembly;
+/// this wrapper preserves the old constructor signature for callers (and
+/// golden tests) that still build an analysis from a [`LineIndex`].
 #[derive(Clone, Debug)]
 pub struct Analysis {
-    pub(super) diagnostics: Vec<Diagnostic>,
-    pub(super) has_errors: bool,
+    /// Diagnostics produced by analysing the document.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Whether any error-level diagnostics were emitted.
+    pub has_errors: bool,
 }
 
 impl Analysis {
+    /// Builds an [`Analysis`] from the document text by delegating to
+    /// [`DocumentModel::full`] and discarding the block structure.
     pub fn new(index: &LineIndex, encoding: &PositionEncodingKind, config: Config) -> Self {
-        let report = parse_with_options(
-            index.source(),
-            ParserOptions::new().strict(config.validation.strict),
-        );
-        let has_errors = !report.errors.is_empty();
-        let abc_parser::ParseReport {
-            output,
-            errors,
-            warnings,
-        } = report;
-        let bar_duration_warnings = severity(config.validation.bar_duration).and_then(|level| {
-            output
-                .and_then(|document| document.into_owned(index.source()).ok())
-                .map(|document| {
-                    (
-                        level,
-                        bar_duration_warnings(
-                            &document,
-                            BarDurationOptions::new()
-                                .pickup_policy(BarDurationPickupPolicy::OpeningBar)
-                                .check_trailing_bar(false),
-                        ),
-                    )
-                })
-        });
-        let mut diagnostics = errors
-            .into_iter()
-            .filter_map(|error| {
-                diagnostic(
-                    index,
-                    encoding,
-                    error.span.start..error.span.end,
-                    DiagnosticSeverity::ERROR,
-                    error_kind_code(error.kind),
-                    error.message,
-                    None,
-                )
-            })
-            .collect::<Vec<_>>();
-        diagnostics.extend(warnings.into_iter().filter_map(|warning| {
-            let level = if warning.kind == ErrorKind::MissingReference {
-                config.validation.ambiguous_music
-            } else {
-                DiagnosticLevel::Warning
-            };
-            diagnostic(
-                index,
-                encoding,
-                warning.span.start..warning.span.end,
-                severity(level)?,
-                error_kind_code(warning.kind),
-                warning.message,
-                None,
-            )
-        }));
-        if let Some((level, warnings)) = bar_duration_warnings {
-            diagnostics.extend(warnings.into_iter().filter_map(|warning| {
-                diagnostic(
-                    index,
-                    encoding,
-                    warning.span.start..warning.span.end,
-                    level,
-                    "bar-duration",
-                    lsp_bar_duration_message(warning.message),
-                    None,
-                )
-            }));
-        }
-        if let Some(level) = severity(config.validation.legacy_decoration) {
-            diagnostics.extend(legacy_decorations(index.source()).filter_map(|range| {
-                diagnostic(
-                    index,
-                    encoding,
-                    range,
-                    level,
-                    "legacy-decoration",
-                    "legacy +name+ decoration; prefer !name!".to_owned(),
-                    Some(vec![DiagnosticTag::DEPRECATED]),
-                )
-            }));
-        }
+        let model = DocumentModel::full(index.source().to_owned(), 0, encoding.clone(), config);
         Self {
-            diagnostics,
-            has_errors,
+            diagnostics: model.diagnostics,
+            has_errors: model.has_errors,
         }
     }
 }
 
-fn lsp_bar_duration_message(message: String) -> String {
-    if let Some(prefix) = message.strip_suffix(" beats under the effective meter") {
-        return prefix.to_owned();
-    }
-    if let Some(prefix) = message.strip_suffix(" beat under the effective meter") {
-        return prefix.to_owned();
-    }
-    message
-}
-
-fn diagnostic(
-    index: &LineIndex,
-    encoding: &PositionEncodingKind,
-    range: Range<usize>,
-    severity: DiagnosticSeverity,
-    code: &'static str,
-    message: String,
-    tags: Option<Vec<DiagnosticTag>>,
-) -> Option<Diagnostic> {
-    Some(Diagnostic::new(
-        index.lsp_range(range, encoding)?,
-        Some(severity),
-        Some(NumberOrString::String(code.to_owned())),
-        Some("abc-parser".to_owned()),
-        message,
-        None,
-        tags,
-    ))
-}
-
-const fn severity(level: DiagnosticLevel) -> Option<DiagnosticSeverity> {
-    match level {
-        DiagnosticLevel::Off => None,
-        DiagnosticLevel::Hint => Some(DiagnosticSeverity::HINT),
-        DiagnosticLevel::Information => Some(DiagnosticSeverity::INFORMATION),
-        DiagnosticLevel::Warning => Some(DiagnosticSeverity::WARNING),
-        DiagnosticLevel::Error => Some(DiagnosticSeverity::ERROR),
-    }
-}
-
-const fn error_kind_code(kind: ErrorKind) -> &'static str {
+pub const fn error_kind_code(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::UnclosedDelimiter => "unclosed-delimiter",
         ErrorKind::InvalidField => "invalid-field",
@@ -195,11 +74,15 @@ const fn error_kind_code(kind: ErrorKind) -> &'static str {
         ErrorKind::InvalidMusic => "invalid-music",
         ErrorKind::MissingReference => "missing-reference",
         ErrorKind::InvalidFieldOrder => "invalid-field-order",
+        ErrorKind::UnrecognizedField => "unrecognized-field",
+        ErrorKind::HeaderFieldInBody => "header-field-in-body",
+        ErrorKind::InstructionInBody => "instruction-in-body",
+        ErrorKind::MusicLineContinuationBeforeEmpty => "music-continuation-before-empty",
         _ => "parser-diagnostic",
     }
 }
 
-fn legacy_decorations(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+pub fn legacy_decorations(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     source.match_indices('+').filter_map(|(start, _)| {
         let tail = &source[start + 1..];
         let length = tail
@@ -327,31 +210,37 @@ fn simple_completions(values: &[&str]) -> Vec<CompletionItem> {
 
 pub fn document_symbols(index: &LineIndex, encoding: &PositionEncodingKind) -> Vec<DocumentSymbol> {
     let source = index.source();
-    let mut starts = source
-        .split_inclusive('\n')
-        .scan(0, |offset, line| {
-            let start = *offset;
-            *offset += line.len();
-            Some((start, line.trim_end_matches(['\r', '\n'])))
-        })
+    let mut starts = index
+        .line_iter()
         .filter(|(_, line)| line.starts_with("X:"))
         .collect::<Vec<_>>();
     if starts.is_empty() {
         return Vec::new();
     }
     starts.push((source.len(), ""));
+    let line_set: std::collections::HashSet<usize> =
+        starts.iter().map(|(start, _)| *start).collect();
     starts
         .windows(2)
         .filter_map(|window| {
             let (start, reference_line) = window[0];
             let end = window[1].0;
             let body = &source[start..end];
-            let title = body
-                .lines()
-                .find_map(|line| line.strip_prefix("T:").map(str::trim))
-                .filter(|title| !title.is_empty());
+            let title = index
+                .line_iter()
+                .filter_map(|(line_start, line)| {
+                    if line_start < start || line_start >= end {
+                        return None;
+                    }
+                    if line_set.contains(&line_start) {
+                        return None;
+                    }
+                    line.strip_prefix("T:").map(str::trim)
+                })
+                .find(|title| !title.is_empty())
+                .map(str::to_owned);
             let reference = reference_line.trim_start_matches("X:").trim();
-            let name = title.map_or_else(|| format!("Tune {reference}"), ToOwned::to_owned);
+            let name = title.unwrap_or_else(|| format!("Tune {reference}"));
             let range = index.lsp_range(start..end, encoding)?;
             let selection_range = index.lsp_range(start..start + reference_line.len(), encoding)?;
             #[allow(deprecated)]
@@ -375,15 +264,15 @@ fn voice_symbols(
     base: usize,
     body: &str,
 ) -> Option<Vec<DocumentSymbol>> {
-    let mut offset = base;
-    let voices = body
-        .split_inclusive('\n')
-        .filter_map(|line| {
-            let start = offset;
-            offset += line.len();
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            let id = trimmed.strip_prefix("V:")?.split_whitespace().next()?;
-            let range = index.lsp_range(start..start + trimmed.len(), encoding)?;
+    let end = base + body.len();
+    let voices = index
+        .line_iter()
+        .filter_map(|(start, line)| {
+            if start < base || start >= end {
+                return None;
+            }
+            let id = line.strip_prefix("V:")?.split_whitespace().next()?;
+            let range = index.lsp_range(start..start + line.len(), encoding)?;
             #[allow(deprecated)]
             Some(DocumentSymbol {
                 name: id.to_owned(),
@@ -401,12 +290,11 @@ fn voice_symbols(
 }
 
 pub fn folding_ranges(index: &LineIndex) -> Vec<FoldingRange> {
-    let source = index.source();
+    let lines = index.line_iter().collect::<Vec<_>>();
     let mut tune_start = None;
     let mut text_start = None;
     let mut ranges = Vec::new();
-    let lines = source.lines().collect::<Vec<_>>();
-    for (line_number, line) in lines.iter().enumerate() {
+    for (line_number, (_, line)) in lines.iter().enumerate() {
         if line.starts_with("%%begintext") {
             text_start = Some(line_number);
         } else if line.starts_with("%%endtext")
@@ -424,11 +312,12 @@ pub fn folding_ranges(index: &LineIndex) -> Vec<FoldingRange> {
             push_fold(&mut ranges, start, line_number.saturating_sub(1), "tune");
         }
     }
+    let last_line = lines.len().saturating_sub(1);
     if let Some(start) = tune_start {
-        push_fold(&mut ranges, start, lines.len().saturating_sub(1), "tune");
+        push_fold(&mut ranges, start, last_line, "tune");
     }
     if let Some(start) = text_start {
-        push_fold(&mut ranges, start, lines.len().saturating_sub(1), "text");
+        push_fold(&mut ranges, start, last_line, "text");
     }
     ranges.sort_by_key(|range| (range.start_line, range.end_line));
     ranges
@@ -496,7 +385,7 @@ pub fn semantic_tokens(
     filter: Option<LspRange>,
 ) -> SemanticTokens {
     let filter = filter.and_then(|range| index.byte_range(range, encoding));
-    let mut raw = lexical_tokens(index.source());
+    let mut raw = lexical_tokens(index.source(), index);
     if let Some(filter) = filter {
         raw.retain(|token| token.range.start < filter.end && token.range.end > filter.start);
     }
@@ -540,11 +429,9 @@ struct RawToken {
     modifiers: u32,
 }
 
-fn lexical_tokens(source: &str) -> Vec<RawToken> {
+fn lexical_tokens(_source: &str, index: &LineIndex) -> Vec<RawToken> {
     let mut tokens = Vec::new();
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        let content = line.trim_end_matches(['\r', '\n']);
+    for (offset, content) in index.line_iter() {
         if content.starts_with('%') && !content.starts_with("%%") {
             tokens.push(RawToken {
                 range: offset..offset + content.len(),
@@ -587,7 +474,6 @@ fn lexical_tokens(source: &str) -> Vec<RawToken> {
                 });
             }
         }
-        offset += line.len();
     }
     tokens
 }
@@ -601,7 +487,7 @@ pub fn duration_edits(
     if style == NoteLengthStyle::Preserve {
         return Vec::new();
     }
-    note_duration_ranges(index.source())
+    note_duration_ranges(index)
         .filter(|(range, _)| range.start >= scope.start && range.end <= scope.end)
         .filter_map(|(range, suffix)| {
             let (numerator, denominator) = parse_duration(suffix)?;
@@ -625,44 +511,38 @@ pub fn duration_edits(
         .collect()
 }
 
-fn note_duration_ranges(source: &str) -> impl Iterator<Item = (Range<usize>, &str)> {
-    source
-        .split_inclusive('\n')
-        .scan(0, |base, line| {
-            let line_start = *base;
-            *base += line.len();
-            let content = line.trim_end_matches(['\r', '\n']);
-            if content.starts_with('%') || content.as_bytes().get(1) == Some(&b':') {
-                return Some(Vec::new());
-            }
-            let mut found = Vec::new();
-            let bytes = content.as_bytes();
-            let mut cursor = 0;
-            while cursor < bytes.len() {
-                if matches!(bytes[cursor], b'A'..=b'G' | b'a'..=b'g' | b'z' | b'x') {
-                    cursor += 1;
-                    while cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b',') {
-                        cursor += 1;
-                    }
-                    let start = cursor;
-                    while cursor < bytes.len()
-                        && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
-                    {
-                        cursor += 1;
-                    }
-                    if cursor > start {
-                        found.push((
-                            line_start + start..line_start + cursor,
-                            &content[start..cursor],
-                        ));
-                    }
-                } else {
+fn note_duration_ranges(index: &LineIndex) -> impl Iterator<Item = (Range<usize>, &str)> + '_ {
+    index.line_iter().flat_map(|(line_start, content)| {
+        if content.starts_with('%') || content.as_bytes().get(1) == Some(&b':') {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        let bytes = content.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if matches!(bytes[cursor], b'A'..=b'G' | b'a'..=b'g' | b'z' | b'x') {
+                cursor += 1;
+                while cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b',') {
                     cursor += 1;
                 }
+                let start = cursor;
+                while cursor < bytes.len()
+                    && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
+                {
+                    cursor += 1;
+                }
+                if cursor > start {
+                    found.push((
+                        line_start + start..line_start + cursor,
+                        &content[start..cursor],
+                    ));
+                }
+            } else {
+                cursor += 1;
             }
-            Some(found)
-        })
-        .flatten()
+        }
+        found
+    })
 }
 
 fn duration_suffix(text: &str) -> Option<&str> {
@@ -699,7 +579,11 @@ fn parse_duration(value: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use tower_lsp_server::ls_types::DiagnosticSeverity;
+    use tower_lsp_server::ls_types::NumberOrString;
+
     use super::*;
+    use crate::config::DiagnosticLevel;
 
     #[test]
     fn duration_spellings_are_semantically_distinct_and_rewritable() {
