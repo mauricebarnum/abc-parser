@@ -36,7 +36,6 @@ use abc_parser::FieldValue;
 use abc_parser::Fraction;
 use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
-use abc_parser::Meter;
 use abc_parser::MusicElement;
 use abc_parser::ParseWarning;
 use abc_parser::ParserOptions;
@@ -47,15 +46,6 @@ use abc_parser::bar_duration_warnings;
 use abc_parser::parse_with_options;
 use chumsky::span::SimpleSpan;
 use clap::Parser;
-
-const EIGHTH_NOTE: Fraction = Fraction {
-    numerator: 1,
-    denominator: 8,
-};
-const SIXTEENTH_NOTE: Fraction = Fraction {
-    numerator: 1,
-    denominator: 16,
-};
 
 /// How free text blocks outside any tune are handled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -112,7 +102,7 @@ struct HeaderFieldBlock<S> {
 impl Default for UnitLengthState {
     fn default() -> Self {
         Self {
-            value: EIGHTH_NOTE,
+            value: Fraction::EIGHTH,
             explicit: false,
             body_started: false,
         }
@@ -923,7 +913,7 @@ fn fix_field(field: &mut Field<String>, state: &mut UnitLengthState) -> Result<b
             state.explicit = true;
         }
         FieldValue::Meter(meter) if !state.body_started && !state.explicit => {
-            state.value = default_unit_length(meter);
+            state.value = meter.default_unit_length();
         }
         FieldValue::Tempo(tempo) => fix_tempo(tempo, state.value)?,
         _ => {}
@@ -968,31 +958,6 @@ fn deprecated_tempo_bpm(raw: &str) -> Result<u32, String> {
         .map_err(|error| format!("could not resolve deprecated tempo {raw:?}: {error}"))
 }
 
-/// Computes the default unit note length selected by a meter.
-///
-/// ABC 2.1 §3.1.7 requires `L:1/16` when the effective meter is below 3/4 and
-/// `L:1/8` otherwise, including `M:C`, `M:C|`, and `M:none`.
-fn default_unit_length(meter: &Meter) -> Fraction {
-    let below_three_quarters = match meter {
-        Meter::Simple(fraction) => {
-            u128::from(fraction.numerator) * 4 < u128::from(fraction.denominator) * 3
-        }
-        Meter::Compound {
-            groups,
-            denominator,
-        } => {
-            let numerator = groups.iter().map(|group| u128::from(*group)).sum::<u128>();
-            numerator * 4 < u128::from(*denominator) * 3
-        }
-        Meter::Common | Meter::Cut | Meter::None => false,
-    };
-    if below_three_quarters {
-        SIXTEENTH_NOTE
-    } else {
-        EIGHTH_NOTE
-    }
-}
-
 /// Ensures the fixed document remains valid ABC 2.1.
 fn validate_fixed_output(source: &str) -> Result<(), String> {
     let report = parse_with_options(source, ParserOptions::new().strict(true));
@@ -1014,33 +979,6 @@ fn validate_fixed_output(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn meter_selects_the_standard_default_unit_length() {
-        assert_eq!(default_unit_length(&Meter::None), EIGHTH_NOTE);
-        assert_eq!(default_unit_length(&Meter::Common), EIGHTH_NOTE);
-        assert_eq!(
-            default_unit_length(&Meter::Simple(Fraction {
-                numerator: 2,
-                denominator: 4,
-            })),
-            SIXTEENTH_NOTE
-        );
-        assert_eq!(
-            default_unit_length(&Meter::Simple(Fraction {
-                numerator: 3,
-                denominator: 4,
-            })),
-            EIGHTH_NOTE
-        );
-        assert_eq!(
-            default_unit_length(&Meter::Compound {
-                groups: vec![2, 3, 2],
-                denominator: 8,
-            }),
-            EIGHTH_NOTE
-        );
-    }
 
     #[test]
     fn deprecated_tempo_digits_are_checked_only_while_fixing() {
