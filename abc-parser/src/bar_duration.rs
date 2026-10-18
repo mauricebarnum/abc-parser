@@ -35,15 +35,6 @@ use crate::ParseWarning;
 use crate::Tune;
 use crate::Tuplet;
 
-const EIGHTH_NOTE: Fraction = Fraction {
-    numerator: 1,
-    denominator: 8,
-};
-const SIXTEENTH_NOTE: Fraction = Fraction {
-    numerator: 1,
-    denominator: 16,
-};
-
 /// Heuristic used to avoid reporting legitimate pickup bars as incomplete.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -144,13 +135,9 @@ impl Duration {
         numerator: 1,
         denominator: 1,
     };
-    const THREE_QUARTERS: Self = Self {
-        numerator: 3,
-        denominator: 4,
-    };
 
     const fn new(numerator: u128, denominator: u128) -> Self {
-        let divisor = greatest_common_divisor(numerator, denominator);
+        let divisor = Fraction::gcd(numerator, denominator);
         Self {
             numerator: numerator / divisor,
             denominator: denominator / divisor,
@@ -230,7 +217,7 @@ impl Default for TimingDefaults {
     fn default() -> Self {
         Self {
             meter: None,
-            unit_length: EIGHTH_NOTE,
+            unit_length: Fraction::EIGHTH,
             explicit_unit_length: false,
         }
     }
@@ -368,7 +355,7 @@ fn apply_header_timing(field: &Field<String>, defaults: &mut TimingDefaults) {
         FieldValue::Meter(meter) => {
             defaults.meter = effective_meter(meter);
             if !defaults.explicit_unit_length {
-                defaults.unit_length = default_unit_length(meter);
+                defaults.unit_length = meter.default_unit_length();
             }
         }
         FieldValue::UnitLength(unit_length) => {
@@ -756,25 +743,6 @@ fn effective_meter(meter: &Meter) -> Option<EffectiveMeter> {
             })
         }
     }
-}
-
-fn default_unit_length(meter: &Meter) -> Fraction {
-    let short_meter = effective_meter(meter)
-        .is_some_and(|meter| meter.duration.is_shorter_than(Duration::THREE_QUARTERS));
-    if short_meter {
-        SIXTEENTH_NOTE
-    } else {
-        EIGHTH_NOTE
-    }
-}
-
-const fn greatest_common_divisor(mut left: u128, mut right: u128) -> u128 {
-    while right != 0 {
-        let remainder = left % right;
-        left = right;
-        right = remainder;
-    }
-    if left == 0 { 1 } else { left }
 }
 
 #[cfg(test)]

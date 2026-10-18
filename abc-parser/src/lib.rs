@@ -241,6 +241,48 @@ pub enum Meter {
     },
 }
 
+impl Meter {
+    /// Computes the default unit note length selected by this meter.
+    ///
+    /// ABC 2.1 §3.1.7 requires `L:1/16` when the effective meter is below 3/4 and
+    /// `L:1/8` otherwise, including `M:C`, `M:C|`, and `M:none`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abc_parser::Fraction;
+    /// use abc_parser::Meter;
+    ///
+    /// assert_eq!(Meter::None.default_unit_length(), Fraction::EIGHTH);
+    /// assert_eq!(Meter::Common.default_unit_length(), Fraction::EIGHTH);
+    /// assert_eq!(
+    ///     Meter::Simple(Fraction { numerator: 2, denominator: 4 }).default_unit_length(),
+    ///     Fraction::SIXTEENTH
+    /// );
+    /// ```
+    #[must_use]
+    pub fn default_unit_length(&self) -> Fraction {
+        let below_three_quarters = match self {
+            Self::Simple(fraction) => {
+                u128::from(fraction.numerator) * 4 < u128::from(fraction.denominator) * 3
+            }
+            Self::Compound {
+                groups,
+                denominator,
+            } => {
+                let numerator = groups.iter().map(|group| u128::from(*group)).sum::<u128>();
+                numerator * 4 < u128::from(*denominator) * 3
+            }
+            Self::Common | Self::Cut | Self::None => false,
+        };
+        if below_three_quarters {
+            Fraction::SIXTEENTH
+        } else {
+            Fraction::EIGHTH
+        }
+    }
+}
+
 /// A tempo from a `Q:` field.
 ///
 /// Parsed quoted descriptions are owned directly by the source-backed AST,
@@ -594,6 +636,43 @@ pub struct Fraction {
     pub numerator: u32,
     /// Denominator.
     pub denominator: u32,
+}
+
+impl Fraction {
+    /// An eighth note (1/8).
+    pub const EIGHTH: Self = Self {
+        numerator: 1,
+        denominator: 8,
+    };
+
+    /// A sixteenth note (1/16).
+    pub const SIXTEENTH: Self = Self {
+        numerator: 1,
+        denominator: 16,
+    };
+
+    /// Returns the greatest common divisor of two 128-bit integers.
+    ///
+    /// Returns 1 when both inputs are zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abc_parser::Fraction;
+    ///
+    /// assert_eq!(Fraction::gcd(12, 8), 4);
+    /// assert_eq!(Fraction::gcd(7, 0), 7);
+    /// assert_eq!(Fraction::gcd(0, 0), 1);
+    /// ```
+    #[must_use]
+    pub const fn gcd(mut left: u128, mut right: u128) -> u128 {
+        while right != 0 {
+            let remainder = left % right;
+            left = right;
+            right = remainder;
+        }
+        if left == 0 { 1 } else { left }
+    }
 }
 
 /// An explicitly written accidental.
@@ -1598,6 +1677,36 @@ fn error(kind: ErrorKind, message: &str, start: usize, end: usize) -> ParseError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meter_selects_the_standard_default_unit_length() {
+        assert_eq!(Meter::None.default_unit_length(), Fraction::EIGHTH);
+        assert_eq!(Meter::Common.default_unit_length(), Fraction::EIGHTH);
+        assert_eq!(
+            Meter::Simple(Fraction {
+                numerator: 2,
+                denominator: 4,
+            })
+            .default_unit_length(),
+            Fraction::SIXTEENTH
+        );
+        assert_eq!(
+            Meter::Simple(Fraction {
+                numerator: 3,
+                denominator: 4,
+            })
+            .default_unit_length(),
+            Fraction::EIGHTH
+        );
+        assert_eq!(
+            Meter::Compound {
+                groups: vec![2, 3, 2],
+                denominator: 8,
+            }
+            .default_unit_length(),
+            Fraction::EIGHTH
+        );
+    }
 
     #[test]
     fn diagnostic_renderer_preserves_unicode_tabs_and_line_endings() {
