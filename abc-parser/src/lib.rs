@@ -35,7 +35,6 @@ use aquamarine as _;
 use chumsky::Parser;
 use chumsky::error::Rich;
 use chumsky::input::ValueInput;
-use chumsky::span::SimpleSpan;
 use chumsky::span::Span as ChumskySpan;
 
 mod bar_duration;
@@ -48,6 +47,7 @@ include!(concat!(env!("OUT_DIR"), "/architecture.rs"));
 pub use bar_duration::BarDurationOptions;
 pub use bar_duration::BarDurationPickupPolicy;
 pub use bar_duration::bar_duration_warnings;
+pub use chumsky::span::SimpleSpan;
 pub use combinators::Block;
 pub use combinators::BlocksContext;
 pub use combinators::chord_parser;

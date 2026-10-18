@@ -11,7 +11,7 @@ cargo install --path abc-language-server
 ```
 
 Configure an LSP client to run `abc-language-server` for `*.abc` files. The
-server uses full document synchronization and negotiates UTF-8 or UTF-16
+server uses incremental text synchronization and negotiates UTF-8 or UTF-16
 positions with the client. It currently provides:
 
 - versioned push diagnostics from the recovering ABC parser;
