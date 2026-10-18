@@ -25,7 +25,6 @@ use abc_parser::parse_note_length;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
 use tower_lsp_server::ls_types::CompletionTextEdit;
-use tower_lsp_server::ls_types::Diagnostic;
 use tower_lsp_server::ls_types::DocumentSymbol;
 use tower_lsp_server::ls_types::FoldingRange;
 use tower_lsp_server::ls_types::FoldingRangeKind;
@@ -37,10 +36,8 @@ use tower_lsp_server::ls_types::SemanticTokens;
 use tower_lsp_server::ls_types::SymbolKind;
 use tower_lsp_server::ls_types::TextEdit;
 
-use crate::config::Config;
 use crate::config::NoteLengthStyle;
 use crate::document::BlockRecord;
-use crate::document::DocumentModel;
 use crate::document::rebase;
 use crate::position::LineIndex;
 
@@ -58,31 +55,6 @@ const FIELD_COMPLETIONS: &[(char, &str)] = &[
     ('w', "Aligned lyrics"),
     ('W', "Unaligned words"),
 ];
-
-/// Immutable analysis of one synchronized document version.
-///
-/// In Track B the block-oriented [`DocumentModel`] owns diagnostic assembly;
-/// this wrapper preserves the old constructor signature for callers (and
-/// golden tests) that still build an analysis from a [`LineIndex`].
-#[derive(Clone, Debug)]
-pub struct Analysis {
-    /// Diagnostics produced by analysing the document.
-    pub diagnostics: Vec<Diagnostic>,
-    /// Whether any error-level diagnostics were emitted.
-    pub has_errors: bool,
-}
-
-impl Analysis {
-    /// Builds an [`Analysis`] from the document text by delegating to
-    /// [`DocumentModel::full`] and discarding the block structure.
-    pub fn new(index: &LineIndex, encoding: &PositionEncodingKind, config: Config) -> Self {
-        let model = DocumentModel::full(index.source().to_owned(), 0, encoding.clone(), config);
-        Self {
-            diagnostics: model.diagnostics,
-            has_errors: model.has_errors,
-        }
-    }
-}
 
 pub const fn error_kind_code(kind: ErrorKind) -> &'static str {
     match kind {
@@ -1168,7 +1140,9 @@ mod tests {
     use tower_lsp_server::ls_types::NumberOrString;
 
     use super::*;
+    use crate::config::Config;
     use crate::config::DiagnosticLevel;
+    use crate::document::DocumentModel;
 
     #[test]
     fn duration_edits_only_rewrite_equivalent_music_suffixes() {
@@ -1236,16 +1210,16 @@ mod tests {
 
     #[test]
     fn analysis_honors_optional_diagnostic_levels() {
-        let index = LineIndex::new("X:1\nK:C\n+trill+A\n".to_owned());
+        let source = "X:1\nK:C\n+trill+A\n";
         let encoding = PositionEncodingKind::UTF16;
         let mut config = Config::default();
         config.validation.legacy_decoration = DiagnosticLevel::Off;
-        let disabled = Analysis::new(&index, &encoding, config);
+        let disabled = DocumentModel::full(source.to_owned(), 0, encoding.clone(), config);
         assert!(disabled.diagnostics.iter().all(|diagnostic| diagnostic.code
             != Some(NumberOrString::String("legacy-decoration".to_owned()))));
 
         config.validation.legacy_decoration = DiagnosticLevel::Hint;
-        let enabled = Analysis::new(&index, &encoding, config);
+        let enabled = DocumentModel::full(source.to_owned(), 0, encoding, config);
         assert!(enabled.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == Some(NumberOrString::String("legacy-decoration".to_owned()))
                 && diagnostic.severity == Some(DiagnosticSeverity::HINT)
@@ -1285,9 +1259,13 @@ Some +freetext+ here
     #[test]
     fn bar_duration_diagnostics_skip_only_the_trailing_open_bar() {
         let source = "X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C | CDEFG | CCCCC\n";
-        let index = LineIndex::new(source.to_owned());
-        let analysis = Analysis::new(&index, &PositionEncodingKind::UTF16, Config::default());
-        let diagnostics = analysis
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let diagnostics = model
             .diagnostics
             .iter()
             .filter(|diagnostic| {
@@ -1307,18 +1285,18 @@ Some +freetext+ here
 
     #[test]
     fn closing_the_trailing_bar_activates_its_diagnostic() {
-        let open = LineIndex::new("X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C\n".to_owned());
-        let closed = LineIndex::new("X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C |\n".to_owned());
+        let open = "X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C\n";
+        let closed = "X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C |\n";
         let encoding = PositionEncodingKind::UTF16;
         let code = Some(NumberOrString::String("bar-duration".to_owned()));
         assert!(
-            Analysis::new(&open, &encoding, Config::default())
+            DocumentModel::full(open.to_owned(), 0, encoding.clone(), Config::default())
                 .diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.code != code)
         );
         assert!(
-            Analysis::new(&closed, &encoding, Config::default())
+            DocumentModel::full(closed.to_owned(), 0, encoding, Config::default())
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == code)
@@ -1327,13 +1305,12 @@ Some +freetext+ here
 
     #[test]
     fn bar_duration_level_and_opening_pickup_are_editor_specific() {
-        let index =
-            LineIndex::new("X:1\nT:Cairo Waltz\nM:4/4\nL:1/8\nK:D\nabcd | a2b2c2d|\n".to_owned());
+        let source = "X:1\nT:Cairo Waltz\nM:4/4\nL:1/8\nK:D\nabcd | a2b2c2d|\n";
         let encoding = PositionEncodingKind::UTF16;
         let mut config = Config::default();
         config.validation.bar_duration = DiagnosticLevel::Information;
-        let analysis = Analysis::new(&index, &encoding, config);
-        let diagnostics = analysis
+        let model = DocumentModel::full(source.to_owned(), 0, encoding.clone(), config);
+        let diagnostics = model
             .diagnostics
             .iter()
             .filter(|diagnostic| {
@@ -1353,7 +1330,7 @@ Some +freetext+ here
 
         config.validation.bar_duration = DiagnosticLevel::Off;
         assert!(
-            Analysis::new(&index, &encoding, config)
+            DocumentModel::full(source.to_owned(), 0, encoding, config)
                 .diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.code
@@ -1378,10 +1355,13 @@ Some +freetext+ here
             "| \"Am\"efe \"Dm\"f3 | \"Am\"efe \"Dm\"a3 | \"Am\"efe \"E7\"dcB | \"Am\"c3 \"E7\"c2d \\\n",
             "| \"Am\"efe \"Dm\"f3 | \"Am\"efe \"Dm\"a3 | \"Am\"efe \"E7\"dcB | \"Am\"A3 A2 |]\n",
         );
-        let index = LineIndex::new(source.to_owned());
-        let encoding = PositionEncodingKind::UTF16;
-        let analysis = Analysis::new(&index, &encoding, Config::default());
-        let bar_diagnostics = analysis
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let bar_diagnostics = model
             .diagnostics
             .iter()
             .filter(|diagnostic| {
@@ -1396,10 +1376,15 @@ Some +freetext+ here
 
     #[test]
     fn analysis_preserves_variant_ending_parser_diagnostics() {
-        let index = LineIndex::new("X:1\nK:C\n:| 2 c\n".to_owned());
-        let analysis = Analysis::new(&index, &PositionEncodingKind::UTF16, Config::default());
-        assert_eq!(analysis.diagnostics.len(), 1);
-        let diagnostic = &analysis.diagnostics[0];
+        let source = "X:1\nK:C\n:| 2 c\n";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        assert_eq!(model.diagnostics.len(), 1);
+        let diagnostic = &model.diagnostics[0];
         assert_eq!(diagnostic.range.start.line, 2);
         assert_eq!(diagnostic.range.start.character, 3);
         assert_eq!(diagnostic.range.end.line, 2);
