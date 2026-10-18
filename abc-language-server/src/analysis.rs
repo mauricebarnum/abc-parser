@@ -5,23 +5,14 @@
 
 use std::ops::Range;
 
-use abc_parser::BarDurationOptions;
-use abc_parser::BarDurationPickupPolicy;
 use abc_parser::ErrorKind;
-use abc_parser::IntoOwnedAst;
-use abc_parser::ParserOptions;
-use abc_parser::bar_duration_warnings;
-use abc_parser::parse_with_options;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
 use tower_lsp_server::ls_types::CompletionTextEdit;
 use tower_lsp_server::ls_types::Diagnostic;
-use tower_lsp_server::ls_types::DiagnosticSeverity;
-use tower_lsp_server::ls_types::DiagnosticTag;
 use tower_lsp_server::ls_types::DocumentSymbol;
 use tower_lsp_server::ls_types::FoldingRange;
 use tower_lsp_server::ls_types::FoldingRangeKind;
-use tower_lsp_server::ls_types::NumberOrString;
 use tower_lsp_server::ls_types::PositionEncodingKind;
 use tower_lsp_server::ls_types::Range as LspRange;
 use tower_lsp_server::ls_types::SelectionRange;
@@ -31,8 +22,8 @@ use tower_lsp_server::ls_types::SymbolKind;
 use tower_lsp_server::ls_types::TextEdit;
 
 use crate::config::Config;
-use crate::config::DiagnosticLevel;
 use crate::config::NoteLengthStyle;
+use crate::document::DocumentModel;
 use crate::position::LineIndex;
 
 const FIELD_COMPLETIONS: &[(char, &str)] = &[
@@ -51,143 +42,31 @@ const FIELD_COMPLETIONS: &[(char, &str)] = &[
 ];
 
 /// Immutable analysis of one synchronized document version.
+///
+/// In Track B the block-oriented [`DocumentModel`] owns diagnostic assembly;
+/// this wrapper preserves the old constructor signature for callers (and
+/// golden tests) that still build an analysis from a [`LineIndex`].
 #[derive(Clone, Debug)]
 pub struct Analysis {
-    pub(super) diagnostics: Vec<Diagnostic>,
-    pub(super) has_errors: bool,
+    /// Diagnostics produced by analysing the document.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Whether any error-level diagnostics were emitted.
+    pub has_errors: bool,
 }
 
 impl Analysis {
+    /// Builds an [`Analysis`] from the document text by delegating to
+    /// [`DocumentModel::full`] and discarding the block structure.
     pub fn new(index: &LineIndex, encoding: &PositionEncodingKind, config: Config) -> Self {
-        let report = parse_with_options(
-            index.source(),
-            ParserOptions::new().strict(config.validation.strict),
-        );
-        let has_errors = !report.errors.is_empty();
-        let abc_parser::ParseReport {
-            output,
-            errors,
-            warnings,
-        } = report;
-        let bar_duration_warnings = severity(config.validation.bar_duration).and_then(|level| {
-            output
-                .and_then(|document| document.into_owned(index.source()).ok())
-                .map(|document| {
-                    (
-                        level,
-                        bar_duration_warnings(
-                            &document,
-                            BarDurationOptions::new()
-                                .pickup_policy(BarDurationPickupPolicy::OpeningBar)
-                                .check_trailing_bar(false),
-                        ),
-                    )
-                })
-        });
-        let mut diagnostics = errors
-            .into_iter()
-            .filter_map(|error| {
-                diagnostic(
-                    index,
-                    encoding,
-                    error.span.start..error.span.end,
-                    DiagnosticSeverity::ERROR,
-                    error_kind_code(error.kind),
-                    error.message,
-                    None,
-                )
-            })
-            .collect::<Vec<_>>();
-        diagnostics.extend(warnings.into_iter().filter_map(|warning| {
-            let level = if warning.kind == ErrorKind::MissingReference {
-                config.validation.ambiguous_music
-            } else {
-                DiagnosticLevel::Warning
-            };
-            diagnostic(
-                index,
-                encoding,
-                warning.span.start..warning.span.end,
-                severity(level)?,
-                error_kind_code(warning.kind),
-                warning.message,
-                None,
-            )
-        }));
-        if let Some((level, warnings)) = bar_duration_warnings {
-            diagnostics.extend(warnings.into_iter().filter_map(|warning| {
-                diagnostic(
-                    index,
-                    encoding,
-                    warning.span.start..warning.span.end,
-                    level,
-                    "bar-duration",
-                    lsp_bar_duration_message(warning.message),
-                    None,
-                )
-            }));
-        }
-        if let Some(level) = severity(config.validation.legacy_decoration) {
-            diagnostics.extend(legacy_decorations(index.source()).filter_map(|range| {
-                diagnostic(
-                    index,
-                    encoding,
-                    range,
-                    level,
-                    "legacy-decoration",
-                    "legacy +name+ decoration; prefer !name!".to_owned(),
-                    Some(vec![DiagnosticTag::DEPRECATED]),
-                )
-            }));
-        }
+        let model = DocumentModel::full(index.source().to_owned(), 0, encoding.clone(), config);
         Self {
-            diagnostics,
-            has_errors,
+            diagnostics: model.diagnostics,
+            has_errors: model.has_errors,
         }
     }
 }
 
-fn lsp_bar_duration_message(message: String) -> String {
-    if let Some(prefix) = message.strip_suffix(" beats under the effective meter") {
-        return prefix.to_owned();
-    }
-    if let Some(prefix) = message.strip_suffix(" beat under the effective meter") {
-        return prefix.to_owned();
-    }
-    message
-}
-
-fn diagnostic(
-    index: &LineIndex,
-    encoding: &PositionEncodingKind,
-    range: Range<usize>,
-    severity: DiagnosticSeverity,
-    code: &'static str,
-    message: String,
-    tags: Option<Vec<DiagnosticTag>>,
-) -> Option<Diagnostic> {
-    Some(Diagnostic::new(
-        index.lsp_range(range, encoding)?,
-        Some(severity),
-        Some(NumberOrString::String(code.to_owned())),
-        Some("abc-parser".to_owned()),
-        message,
-        None,
-        tags,
-    ))
-}
-
-const fn severity(level: DiagnosticLevel) -> Option<DiagnosticSeverity> {
-    match level {
-        DiagnosticLevel::Off => None,
-        DiagnosticLevel::Hint => Some(DiagnosticSeverity::HINT),
-        DiagnosticLevel::Information => Some(DiagnosticSeverity::INFORMATION),
-        DiagnosticLevel::Warning => Some(DiagnosticSeverity::WARNING),
-        DiagnosticLevel::Error => Some(DiagnosticSeverity::ERROR),
-    }
-}
-
-const fn error_kind_code(kind: ErrorKind) -> &'static str {
+pub const fn error_kind_code(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::UnclosedDelimiter => "unclosed-delimiter",
         ErrorKind::InvalidField => "invalid-field",
@@ -203,7 +82,7 @@ const fn error_kind_code(kind: ErrorKind) -> &'static str {
     }
 }
 
-fn legacy_decorations(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+pub fn legacy_decorations(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     source.match_indices('+').filter_map(|(start, _)| {
         let tail = &source[start + 1..];
         let length = tail
@@ -700,7 +579,11 @@ fn parse_duration(value: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use tower_lsp_server::ls_types::DiagnosticSeverity;
+    use tower_lsp_server::ls_types::NumberOrString;
+
     use super::*;
+    use crate::config::DiagnosticLevel;
 
     #[test]
     fn duration_spellings_are_semantically_distinct_and_rewritable() {
