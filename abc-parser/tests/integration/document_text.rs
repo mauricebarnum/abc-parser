@@ -26,6 +26,7 @@ use abc_parser::Spanned;
 use abc_parser::ToAbc;
 use abc_parser::TypesetText;
 use abc_parser::parse;
+use abc_parser::parse_line;
 use abc_parser::parse_with_options;
 use chumsky::span::SimpleSpan;
 
@@ -359,6 +360,29 @@ C |
     assert_eq!(report.errors.len(), 1);
     assert_eq!(document(&report).tunes().count(), 1);
     assert_eq!(free_text_count(document(&report)), 1);
+}
+
+#[test]
+fn indented_field_lines_are_consistently_treated_as_music() {
+    // Per ABC 2.1 §3 an information field is a line beginning with a letter.
+    // A line beginning with horizontal whitespace is therefore not a field
+    // and is accepted as music everywhere — standalone, inside a tune, and
+    // inside free text. The flush-field error is documented separately.
+    let standalone = parse_line("  X:1");
+    assert!(standalone.is_valid());
+    assert!(matches!(standalone.output, Some(Line::Music(_))));
+
+    let in_tune = parse_owned("X:1\nK:C\nCDEF |\n", ParserOptions::default());
+    assert!(in_tune.is_valid());
+
+    // Indented field line inside free text: silently retained as free text
+    // (treated as music per the standalone classification), with the same
+    // MissingReference advisory as any music-like block.
+    let in_free_text = parse_owned(
+        "Ordinary prose.\n  T:indented field\n",
+        ParserOptions::default(),
+    );
+    assert!(in_free_text.is_valid(), "{:#?}", in_free_text.errors);
 }
 
 #[test]
