@@ -885,3 +885,36 @@ fn help_describes_the_free_text_flag() {
     assert!(help.contains("warn"), "{help}");
     assert!(help.contains("[default: accept]"), "{help}");
 }
+
+#[test]
+fn warnings_are_reported_in_source_order() {
+    // Tune with a recommended order warning (M: before T: at line 3),
+    // a fixable syntax warning (+crescendo+ at line 5),
+    // and a bar duration warning (overfull bar at line 5).
+    // Notice that a parser warning or recommended order warning occurs earlier in source
+    // than body warnings.
+    let source = concat!(
+        "X:1\n",
+        "M:4/4\n",
+        "T:Test Tune\n",
+        "K:C\n",
+        "+crescendo+ CDEF GABc d |\n",
+    );
+    let output = run_stdin(source, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let order_pos = stderr.find("T: field should appear before M: field");
+    let fixable_pos = stderr.find("deprecated +name+ decoration");
+    let bar_pos = stderr.find("bar duration is 4 1/2 beats");
+    assert!(order_pos.is_some(), "expected order warning: {stderr}");
+    assert!(fixable_pos.is_some(), "expected fixable warning: {stderr}");
+    assert!(bar_pos.is_some(), "expected bar duration warning: {stderr}");
+    assert!(
+        order_pos.unwrap() < fixable_pos.unwrap(),
+        "order warning at line 3 should precede fixable warning at line 5"
+    );
+    assert!(
+        fixable_pos.unwrap() < bar_pos.unwrap(),
+        "fixable warning at start of line 5 should precede bar duration warning at end of bar"
+    );
+}
