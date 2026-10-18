@@ -113,25 +113,26 @@ fn zero_semitones_are_a_byte_preserving_no_op() {
 }
 
 #[test]
-fn output_without_a_source_newline_is_newline_terminated() {
-    let source = "X:1\nK:C\nC |";
-    let unchanged = run_stdin(source, &["--semitones", "0"]);
-    let transposed = run_stdin(source, &["--semitones", "1"]);
-
-    assert!(unchanged.status.success(), "{unchanged:?}");
-    assert_eq!(unchanged.stdout, b"X:1\nK:C\nC |\n");
-    assert!(transposed.status.success(), "{transposed:?}");
-    assert!(transposed.stdout.ends_with(b"\n"), "{transposed:?}");
-}
-
-#[test]
-fn transformed_output_has_exactly_one_final_newline() {
-    for source in ["X:1\nK:C\nC |", "X:1\nK:C\nC |\n"] {
-        let output = run_stdin(source, &["--semitones", "1"]);
-
-        assert!(output.status.success(), "{output:?}");
-        assert!(output.stdout.ends_with(b"\n"), "{output:?}");
-        assert!(!output.stdout.ends_with(b"\n\n"), "{output:?}");
+fn output_guarantees_exactly_one_final_newline() {
+    for (source, had_trailing_newline) in [("X:1\nK:C\nC |", false), ("X:1\nK:C\nC |\n", true)] {
+        for args in [&["--semitones", "0"][..], &["--semitones", "1"][..]] {
+            let output = run_stdin(source, args);
+            assert!(
+                output.status.success(),
+                "source (newline={had_trailing_newline}), {args:?}: {output:?}"
+            );
+            assert!(
+                output.stdout.ends_with(b"\n"),
+                "missing final newline for {args:?}"
+            );
+            assert!(
+                !output.stdout.ends_with(b"\n\n"),
+                "redundant trailing newline for {args:?}"
+            );
+            if args == ["--semitones", "0"] {
+                assert_eq!(output.stdout, b"X:1\nK:C\nC |\n");
+            }
+        }
     }
 }
 
@@ -147,35 +148,41 @@ fn trailing_blank_line_is_accepted() {
 }
 
 #[test]
-fn explicit_note_lengths_reemit_a_zero_transposition() {
-    let source = "X: 1\nL: 1/8\nK: C\nA/\n";
-    let default = run_stdin(source, &["--semitones", "0"]);
+fn transposition_note_length_formatting() {
+    let zero_source = "X: 1\nL: 1/8\nK: C\nA/\n";
+    let default = run_stdin(zero_source, &["--semitones", "0"]);
     assert!(default.status.success(), "{default:?}");
-    assert_eq!(default.stdout, source.as_bytes());
+    assert_eq!(default.stdout, zero_source.as_bytes());
 
-    let explicit = run_stdin(source, &["--semitones", "0", "--explicit-note-lengths"]);
-    assert!(explicit.status.success(), "{explicit:?}");
+    let explicit_zero = run_stdin(
+        zero_source,
+        &["--semitones", "0", "--explicit-note-lengths"],
+    );
+    assert!(explicit_zero.status.success(), "{explicit_zero:?}");
     assert_eq!(
-        String::from_utf8(explicit.stdout).unwrap(),
+        String::from_utf8(explicit_zero.stdout).unwrap(),
         "X:1\nL:1/8\nK:C\nA/2\n"
     );
-}
 
-#[test]
-fn transposition_defaults_to_note_length_shorthand() {
-    let source = "X:1\nM:6/8\nL:1/8\nK:Bmin\nF/E/|D>EF d2d/e/|\n";
-    let shorthand = run_stdin(source, &["--key", "Em"]);
+    let tune_source = "X:1\nM:6/8\nL:1/8\nK:Bmin\nF/E/|D>EF d2d/e/|\n";
+    let shorthand = run_stdin(tune_source, &["--key", "Em"]);
     assert!(shorthand.status.success(), "{shorthand:?}");
-    let shorthand = String::from_utf8(shorthand.stdout).unwrap();
-    assert!(shorthand.contains("B/A/|G>AB g2g/a/|"), "{shorthand}");
+    let shorthand_text = String::from_utf8(shorthand.stdout).unwrap();
+    assert!(
+        shorthand_text.contains("B/A/|G>AB g2g/a/|"),
+        "{shorthand_text}"
+    );
 
-    let explicit = run_stdin(source, &["--key", "Em", "--explicit-note-lengths"]);
+    let explicit = run_stdin(tune_source, &["--key", "Em", "--explicit-note-lengths"]);
     assert!(explicit.status.success(), "{explicit:?}");
-    let explicit = String::from_utf8(explicit.stdout).unwrap();
-    assert!(explicit.contains("B/2A/2|G>AB g2g/2a/2|"), "{explicit}");
+    let explicit_text = String::from_utf8(explicit.stdout).unwrap();
+    assert!(
+        explicit_text.contains("B/2A/2|G>AB g2g/2a/2|"),
+        "{explicit_text}"
+    );
 
-    for output in [shorthand, explicit] {
-        let reparsed = parse_owned(&output);
+    for output in [&shorthand_text, &explicit_text] {
+        let reparsed = parse_owned(output);
         assert!(reparsed.is_valid(), "{:#?}", reparsed.errors);
     }
 }
