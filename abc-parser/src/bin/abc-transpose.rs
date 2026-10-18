@@ -597,7 +597,7 @@ fn offset_accidental(offset: Offset) -> Result<Accidental, String> {
     if offset.is_zero() {
         return Ok(Accidental::Natural);
     }
-    let divisor = greatest_common_divisor(
+    let divisor = Fraction::gcd(
         offset.numerator.unsigned_abs(),
         offset.denominator.cast_unsigned(),
     );
@@ -614,16 +614,6 @@ fn offset_accidental(offset: Offset) -> Result<Accidental, String> {
     } else {
         Accidental::Flat(fraction)
     })
-}
-
-/// Calculates a greatest common divisor for normalizing accidental fractions.
-const fn greatest_common_divisor(mut left: u128, mut right: u128) -> u128 {
-    while right != 0 {
-        let remainder = left % right;
-        left = right;
-        right = remainder;
-    }
-    left
 }
 
 /// Spells an absolute transposed pitch, including an explicit accidental.
