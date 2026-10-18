@@ -38,8 +38,8 @@ use chumsky::input::ValueInput;
 use chumsky::span::Span as ChumskySpan;
 
 mod bar_duration;
-mod combinators;
 mod emit;
+mod parser;
 mod source;
 
 include!(concat!(env!("OUT_DIR"), "/architecture.rs"));
@@ -48,21 +48,21 @@ pub use bar_duration::BarDurationOptions;
 pub use bar_duration::BarDurationPickupPolicy;
 pub use bar_duration::bar_duration_warnings;
 pub use chumsky::span::SimpleSpan;
-pub use combinators::Block;
-pub use combinators::BlocksContext;
-pub use combinators::chord_parser;
-pub use combinators::directive_parser;
-pub use combinators::field_parser;
-pub use combinators::line_parser;
-pub use combinators::music_element_parser;
-pub use combinators::music_line_parser;
-pub use combinators::note_length_parser;
-pub use combinators::parse_blocks;
-pub use combinators::version_marker;
 pub use emit::AbcEmitter;
 pub use emit::EmitOptions;
 pub use emit::NoteLengthStyle;
 pub use emit::ToAbc;
+pub use parser::Block;
+pub use parser::BlocksContext;
+pub use parser::chord_parser;
+pub use parser::directive_parser;
+pub use parser::field_parser;
+pub use parser::line_parser;
+pub use parser::music_element_parser;
+pub use parser::music_line_parser;
+pub use parser::note_length_parser;
+pub use parser::parse_blocks;
+pub use parser::version_marker;
 pub use source::IntoOwnedAst;
 pub use source::PlaceholderResolver;
 pub use source::ResolveError;
@@ -1470,7 +1470,7 @@ where
     <I::Span as ChumskySpan>::Context: PartialEq + fmt::Debug,
     <I::Span as ChumskySpan>::Offset: Ord + fmt::Display,
 {
-    let (result, diagnostics) = combinators::parse_document(input, options);
+    let (result, diagnostics) = parser::parse_document(input, options);
     let (output, faults) = result.into_output_errors();
     let mut errors = faults.iter().map(chumsky_error).collect::<Vec<_>>();
     errors.extend(diagnostics.0);
@@ -1507,7 +1507,7 @@ pub fn parse_line(source: &str) -> ParseReport<Line<SimpleSpan<usize>, String>> 
 pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
     let source = source.trim_end_matches(['\r', '\n']);
     directive_parser()
-        .then_ignore(combinators::trailing_comment())
+        .then_ignore(parser::trailing_comment())
         .parse(source)
         .into_result()
         .map_err(|errors| {
@@ -1536,7 +1536,7 @@ pub fn parse_directive(source: &str) -> Result<Directive, ParseError> {
 pub fn parse_field(source: &str) -> Result<Field, ParseError> {
     let source = source.trim_end_matches(['\r', '\n']);
     field_parser()
-        .then_ignore(combinators::trailing_comment())
+        .then_ignore(parser::trailing_comment())
         .parse(source)
         .into_result()
         .map_err(|errors| {
@@ -1619,7 +1619,7 @@ pub fn parse_music_line(
 ) -> ParseReport<Vec<Spanned<MusicElement<String>, SimpleSpan<usize>>>> {
     let source = source.trim_end_matches(['\r', '\n']);
     let (output, faults) = music_line_parser()
-        .then_ignore(combinators::trailing_comment())
+        .then_ignore(parser::trailing_comment())
         .parse(source)
         .into_output_errors();
     let output = output.map(|items| {
