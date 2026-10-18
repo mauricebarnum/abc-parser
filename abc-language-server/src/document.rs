@@ -22,6 +22,7 @@ use abc_parser::Fraction;
 use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
 use abc_parser::Meter;
+use abc_parser::MusicElement;
 use abc_parser::ParseError;
 use abc_parser::ParseWarning;
 use abc_parser::ParserOptions;
@@ -41,7 +42,6 @@ use tower_lsp_server::ls_types::PositionEncodingKind;
 use tower_lsp_server::ls_types::TextDocumentContentChangeEvent;
 
 use crate::analysis::error_kind_code;
-use crate::analysis::legacy_decorations;
 use crate::config::Config;
 use crate::config::DiagnosticLevel;
 use crate::position::LineIndex;
@@ -210,12 +210,7 @@ impl DocumentModel {
         };
         let report = parse_blocks(&text, options, context);
 
-        let mut blocks = build_region_blocks(
-            report.output.as_deref().unwrap_or_default(),
-            0,
-            &text,
-            config.validation.bar_duration != DiagnosticLevel::Off,
-        );
+        let mut blocks = build_region_blocks(report.output.as_deref().unwrap_or_default(), 0);
         let parse_count = blocks.len() as u32;
 
         let header = blocks
@@ -230,7 +225,7 @@ impl DocumentModel {
         // legacy-decoration).
         populate_block_diagnostics(&mut blocks, &report.errors, &report.warnings, None);
         if config.validation.legacy_decoration != DiagnosticLevel::Off {
-            populate_legacy_decorations(&mut blocks, &text);
+            populate_legacy_decorations(&mut blocks);
         }
 
         // Per-tune bar-duration warnings. The synthetic single-tune document
@@ -353,7 +348,7 @@ impl DocumentModel {
                     record.diagnostics.legacy_decoration_ranges.clear();
                 }
             } else {
-                populate_legacy_decorations(&mut blocks, &self.text);
+                populate_legacy_decorations(&mut blocks);
             }
         }
 
@@ -521,12 +516,7 @@ impl DocumentModel {
         }
 
         // 5. Splice.
-        let mut new_region_blocks = build_region_blocks(
-            &parsed_region,
-            region_start,
-            &text,
-            previous.config.validation.bar_duration != DiagnosticLevel::Off,
-        );
+        let mut new_region_blocks = build_region_blocks(&parsed_region, region_start);
         populate_block_diagnostics_for_region(
             &mut new_region_blocks,
             &report.errors,
@@ -534,7 +524,7 @@ impl DocumentModel {
             context.previous_field_led,
         );
         if previous.config.validation.legacy_decoration != DiagnosticLevel::Off {
-            populate_legacy_decorations(&mut new_region_blocks, &text);
+            populate_legacy_decorations(&mut new_region_blocks);
         }
 
         let mut blocks = previous.blocks.clone();
@@ -882,14 +872,27 @@ fn find_block_for_span(blocks: &[BlockRecord], slice_offset: usize) -> Option<us
     Some(blocks.len() - 1)
 }
 
-/// Scans one block's source slice for legacy `+name+` decoration matches
-/// and returns them in document-absolute byte ranges.
-fn populate_legacy_decorations(blocks: &mut [BlockRecord], source: &str) {
+/// Scans each block's parsed AST for legacy `+name+` decoration delimiters
+/// and populates the block's document-absolute byte ranges.
+fn populate_legacy_decorations(blocks: &mut [BlockRecord]) {
     for record in blocks.iter_mut() {
-        let block_text = &source[record.lines.clone()];
-        record.diagnostics.legacy_decoration_ranges = legacy_decorations(block_text)
-            .map(|range| record.lines.start + range.start..record.lines.start + range.end)
-            .collect();
+        record.diagnostics.legacy_decoration_ranges.clear();
+        for item in &record.parsed.items {
+            if let DocumentItem::Tune(tune) = &item.value {
+                for line in &tune.lines {
+                    if let Line::Music(elements) = &line.value {
+                        for element in elements {
+                            if let MusicElement::Decoration(decoration) = &element.value
+                                && decoration.legacy_delimiter
+                            {
+                                let range = rebase(element.span, record.base);
+                                record.diagnostics.legacy_decoration_ranges.push(range);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1094,31 +1097,19 @@ fn populate_block_diagnostics_for_region(
 }
 
 /// Constructs [`BlockRecord`]s for a freshly parsed region.
-fn build_region_blocks(
-    parsed_region: &[ParsedBlock],
-    region_base: usize,
-    text: &str,
-    needs_diagnostics: bool,
-) -> Vec<BlockRecord> {
+fn build_region_blocks(parsed_region: &[ParsedBlock], region_base: usize) -> Vec<BlockRecord> {
     parsed_region
         .iter()
         .map(|parsed_block| {
             let absolute_start = region_base + parsed_block.span.start;
             let absolute_end = region_base + parsed_block.span.end;
-            let mut record = BlockRecord {
+            BlockRecord {
                 lines: absolute_start..absolute_end,
                 base: region_base.cast_signed(),
                 parsed: parsed_block.clone(),
                 diagnostics: BlockDiagnostics::default(),
                 tune_analysis: None,
-            };
-            if needs_diagnostics {
-                let block_text = &text[record.lines.clone()];
-                record.diagnostics.legacy_decoration_ranges = legacy_decorations(block_text)
-                    .map(|range| record.lines.start + range.start..record.lines.start + range.end)
-                    .collect();
             }
-            record
         })
         .collect()
 }

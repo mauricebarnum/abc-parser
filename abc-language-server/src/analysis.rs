@@ -94,16 +94,6 @@ pub const fn error_kind_code(kind: ErrorKind) -> &'static str {
     }
 }
 
-pub fn legacy_decorations(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
-    source.match_indices('+').filter_map(|(start, _)| {
-        let tail = &source[start + 1..];
-        let length = tail
-            .find('+')
-            .filter(|end| *end > 0 && tail[..*end].chars().all(char::is_alphanumeric))?;
-        Some(start..start + length + 2)
-    })
-}
-
 pub fn hover(index: &LineIndex, offset: usize) -> Option<(Range<usize>, String)> {
     let line = index.line_bounds(offset)?;
     let text = &index.source()[line.clone()];
@@ -740,6 +730,36 @@ mod tests {
             diagnostic.code == Some(NumberOrString::String("legacy-decoration".to_owned()))
                 && diagnostic.severity == Some(DiagnosticSeverity::HINT)
         }));
+    }
+
+    #[test]
+    fn legacy_decorations_ignores_comments_annotations_and_free_text() {
+        let source = "\
+% +comment+ decoration ignored
+X:1
+T:Title
+K:C
+%%begintext
+Some +freetext+ here
+%%endtext
+\"+add9+\" C +trill+ D\n";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let legacy = model
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == Some(NumberOrString::String("legacy-decoration".to_owned()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].range.start.line, 7);
+        assert_eq!(legacy[0].range.start.character, 11);
+        assert_eq!(legacy[0].range.end.character, 18);
     }
 
     #[test]
