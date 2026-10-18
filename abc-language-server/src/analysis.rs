@@ -5,9 +5,11 @@
 
 use std::ops::Range;
 
+use abc_parser::Directive;
 use abc_parser::DocumentItem;
 use abc_parser::EmitOptions;
 use abc_parser::ErrorKind;
+use abc_parser::Field;
 use abc_parser::FieldKind;
 use abc_parser::FieldValue;
 use abc_parser::Line;
@@ -18,6 +20,7 @@ use abc_parser::SourceText;
 use abc_parser::Spanned;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
+use abc_parser::TypesetText;
 use abc_parser::parse_note_length;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
@@ -505,13 +508,26 @@ fn token_range_at(source: &str, offset: usize) -> Option<Range<usize>> {
     (start < end).then_some(start..end)
 }
 
+const TOKEN_COMMENT: u32 = 0;
+const TOKEN_KEYWORD: u32 = 1;
+const TOKEN_NUMBER: u32 = 2;
+const TOKEN_STRING: u32 = 3;
+const TOKEN_ENUM_MEMBER: u32 = 4;
+const TOKEN_OPERATOR: u32 = 5;
+const TOKEN_DECORATOR: u32 = 6;
+const TOKEN_VARIABLE: u32 = 7;
+
+const MODIFIER_DECLARATION: u32 = 1 << 0;
+const MODIFIER_DEPRECATED: u32 = 1 << 1;
+
 pub fn semantic_tokens(
+    blocks: &[BlockRecord],
     index: &LineIndex,
     encoding: &PositionEncodingKind,
     filter: Option<LspRange>,
 ) -> SemanticTokens {
     let filter = filter.and_then(|range| index.byte_range(range, encoding));
-    let mut raw = lexical_tokens(index.source(), index);
+    let mut raw = ast_tokens(blocks, index.source());
     if let Some(filter) = filter {
         raw.retain(|token| token.range.start < filter.end && token.range.end > filter.start);
     }
@@ -555,53 +571,438 @@ struct RawToken {
     modifiers: u32,
 }
 
-fn lexical_tokens(_source: &str, index: &LineIndex) -> Vec<RawToken> {
+fn push_token(tokens: &mut Vec<RawToken>, range: Range<usize>, kind: u32, modifiers: u32) {
+    if range.start < range.end {
+        tokens.push(RawToken {
+            range,
+            kind,
+            modifiers,
+        });
+    }
+}
+
+fn ast_tokens(blocks: &[BlockRecord], source: &str) -> Vec<RawToken> {
     let mut tokens = Vec::new();
-    for (offset, content) in index.line_iter() {
-        if content.starts_with('%') && !content.starts_with("%%") {
-            tokens.push(RawToken {
-                range: offset..offset + content.len(),
-                kind: 0,
-                modifiers: 0,
-            });
-        } else {
-            if content.as_bytes().get(1) == Some(&b':') {
-                tokens.push(RawToken {
-                    range: offset..offset + 1,
-                    kind: 1,
-                    modifiers: 0,
-                });
-            } else if content.starts_with("%%") {
-                let end = content.find(char::is_whitespace).unwrap_or(content.len());
-                tokens.push(RawToken {
-                    range: offset..offset + end,
-                    kind: 1,
-                    modifiers: 0,
-                });
-            }
-            let mut quoted = false;
-            for (position, value) in content.char_indices() {
-                let kind = match value {
-                    '"' => {
-                        quoted = !quoted;
-                        3
+    for record in blocks {
+        for line in &record.parsed.header {
+            collect_line_tokens(line, record.base, source, &mut tokens);
+        }
+        for item in &record.parsed.items {
+            let item_range = rebase(item.span, record.base);
+            match &item.value {
+                DocumentItem::Tune(tune) => {
+                    for line in &tune.lines {
+                        collect_line_tokens(line, record.base, source, &mut tokens);
                     }
-                    _ if quoted => 3,
-                    '0'..='9' => 2,
-                    'A'..='G' | 'a'..='g' if content.as_bytes().get(1) != Some(&b':') => 4,
-                    '|' | ':' | '/' | '<' | '>' | '(' | ')' | '[' | ']' | '^' | '_' | '=' => 5,
-                    '!' | '+' => 6,
-                    _ => continue,
-                };
-                tokens.push(RawToken {
-                    range: offset + position..offset + position + value.len_utf8(),
-                    kind,
-                    modifiers: u32::from(value == '+') << 1,
-                });
+                }
+                DocumentItem::Comment(_) => {
+                    push_token(&mut tokens, item_range, TOKEN_COMMENT, 0);
+                }
+                DocumentItem::Directive(directive) => {
+                    collect_directive_tokens(
+                        directive,
+                        item_range,
+                        record.base,
+                        source,
+                        &mut tokens,
+                    );
+                }
+                DocumentItem::TypesetText(typeset) => {
+                    collect_typeset_tokens(typeset, item_range, source, &mut tokens);
+                }
+                DocumentItem::FreeText(_) | _ => {}
             }
         }
     }
     tokens
+}
+
+fn collect_line_tokens(
+    line: &Spanned<ParsedLine, SimpleSpan<usize>>,
+    base: isize,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    let line_range = rebase(line.span, base);
+    match &line.value {
+        Line::Comment(_) => {
+            push_token(tokens, line_range, TOKEN_COMMENT, 0);
+        }
+        Line::Directive(directive) => {
+            collect_directive_tokens(directive, line_range, base, source, tokens);
+        }
+        Line::DirectiveText(body) => {
+            collect_leading_directive_keyword(line_range.clone(), source, tokens);
+            if let SourceText::Span(body_span) = body {
+                let body_end = rebase(*body_span, base).end;
+                collect_trailing_comment(body_end..line_range.end, source, tokens);
+            }
+        }
+        Line::TypesetText(typeset) => {
+            collect_typeset_tokens(typeset, line_range, source, tokens);
+        }
+        Line::Field(field) => {
+            collect_field_line_tokens(field, line_range, base, source, tokens);
+        }
+        Line::FieldContinuation(body) => {
+            if let Some(slice) = source.get(line_range.clone()) {
+                let trimmed = slice.trim_start_matches([' ', '\t']);
+                let leading = slice.len() - trimmed.len();
+                if trimmed.starts_with("+:") {
+                    let start = line_range.start + leading;
+                    push_token(tokens, start..start + 1, TOKEN_KEYWORD, 0);
+                    push_token(tokens, start + 1..start + 2, TOKEN_OPERATOR, 0);
+                }
+            }
+            if let SourceText::Span(body_span) = body {
+                let body_end = rebase(*body_span, base).end;
+                collect_trailing_comment(body_end..line_range.end, source, tokens);
+            }
+        }
+        Line::Music(elements) => {
+            collect_music_line_tokens(elements, line_range, base, source, tokens);
+        }
+        Line::Blank | Line::DeprecatedHistoryContinuation(_) | _ => {}
+    }
+}
+
+fn collect_directive_tokens(
+    directive: &Directive<SourceText<SimpleSpan<usize>>>,
+    line_range: Range<usize>,
+    base: isize,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    if let SourceText::Span(name_span) = directive.name {
+        let name_end = rebase(name_span, base).end;
+        if let Some(slice) = source.get(line_range.start..name_end) {
+            let trimmed = slice.trim_start_matches([' ', '\t']);
+            let leading = slice.len() - trimmed.len();
+            push_token(
+                tokens,
+                line_range.start + leading..name_end,
+                TOKEN_KEYWORD,
+                0,
+            );
+        }
+    } else {
+        collect_leading_directive_keyword(line_range.clone(), source, tokens);
+    }
+    if let SourceText::Span(body_span) = directive.body {
+        let body_end = rebase(body_span, base).end;
+        collect_trailing_comment(body_end..line_range.end, source, tokens);
+    }
+}
+
+fn collect_leading_directive_keyword(
+    range: Range<usize>,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    let Some(slice) = source.get(range.clone()) else {
+        return;
+    };
+    let trimmed = slice.trim_start_matches([' ', '\t']);
+    if !trimmed.starts_with("%%") {
+        return;
+    }
+    let leading = slice.len() - trimmed.len();
+    let end = trimmed
+        .find(|c: char| c.is_whitespace() || c == '%')
+        .filter(|&idx| idx > 2)
+        .unwrap_or_else(|| trimmed.find(char::is_whitespace).unwrap_or(trimmed.len()));
+    let start = range.start + leading;
+    push_token(tokens, start..start + end, TOKEN_KEYWORD, 0);
+}
+
+fn collect_typeset_tokens(
+    typeset: &TypesetText<SourceText<SimpleSpan<usize>>>,
+    range: Range<usize>,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    match typeset {
+        TypesetText::Text(_) | TypesetText::Centered(_) => {
+            collect_leading_directive_keyword(range, source, tokens);
+        }
+        TypesetText::Block(_) => {
+            let Some(slice) = source.get(range.clone()) else {
+                return;
+            };
+            let first_len = slice.find(['\r', '\n']).unwrap_or(slice.len());
+            collect_leading_directive_keyword(range.start..range.start + first_len, source, tokens);
+            if let Some(last_nl) = slice.rfind(['\r', '\n']) {
+                let last_start = range.start + last_nl + 1;
+                if let Some(last_line) = source.get(last_start..range.end)
+                    && last_line
+                        .trim_start_matches([' ', '\t'])
+                        .starts_with("%%endtext")
+                {
+                    collect_leading_directive_keyword(last_start..range.end, source, tokens);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_trailing_comment(range: Range<usize>, source: &str, tokens: &mut Vec<RawToken>) {
+    let Some(slice) = source.get(range.clone()) else {
+        return;
+    };
+    if let Some(rel) = slice.find('%') {
+        push_token(tokens, range.start + rel..range.end, TOKEN_COMMENT, 0);
+    }
+}
+
+fn find_unescaped_comment(slice: &str) -> Option<usize> {
+    let mut escaped = false;
+    let mut quoted = false;
+    for (idx, ch) in slice.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => quoted = !quoted,
+            '%' if !quoted => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn collect_field_line_tokens(
+    field: &Field<SourceText<SimpleSpan<usize>>>,
+    line_range: Range<usize>,
+    base: isize,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    let Some(slice) = source.get(line_range.clone()) else {
+        return;
+    };
+    let trimmed = slice.trim_start_matches([' ', '\t']);
+    let leading = slice.len() - trimmed.len();
+    let key_start = line_range.start + leading;
+    let key_end = key_start + field.key.len_utf8();
+    if key_end > line_range.end {
+        return;
+    }
+    let modifiers = u32::from(matches!(
+        field.kind,
+        FieldKind::Area | FieldKind::ElementSpacing
+    )) * MODIFIER_DEPRECATED;
+    push_token(tokens, key_start..key_end, TOKEN_KEYWORD, modifiers);
+    let value_start = if source.get(key_end..key_end + 1) == Some(":") {
+        push_token(tokens, key_end..key_end + 1, TOKEN_OPERATOR, 0);
+        key_end + 1
+    } else {
+        key_end
+    };
+    let value_slice = source.get(value_start..line_range.end).unwrap_or("");
+    let value_end = if let Some(comment_rel) = find_unescaped_comment(value_slice) {
+        let comment_start = value_start + comment_rel;
+        push_token(tokens, comment_start..line_range.end, TOKEN_COMMENT, 0);
+        comment_start
+    } else {
+        line_range.end
+    };
+
+    if let FieldValue::Voice(voice) = &field.value
+        && let SourceText::Span(id_span) = voice.id
+    {
+        let id_range = rebase(id_span, base);
+        push_token(
+            tokens,
+            id_range.clone(),
+            TOKEN_VARIABLE,
+            MODIFIER_DECLARATION,
+        );
+        collect_structured_field_value_tokens(
+            id_range.end.min(value_end)..value_end,
+            source,
+            tokens,
+        );
+    } else if matches!(
+        field.kind,
+        FieldKind::Reference
+            | FieldKind::UnitLength
+            | FieldKind::Meter
+            | FieldKind::Tempo
+            | FieldKind::Key
+            | FieldKind::Voice
+            | FieldKind::Parts
+            | FieldKind::UserSymbol
+            | FieldKind::Macro
+    ) {
+        collect_structured_field_value_tokens(value_start..value_end, source, tokens);
+    }
+}
+
+fn collect_structured_field_value_tokens(
+    range: Range<usize>,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    let Some(slice) = source.get(range.clone()) else {
+        return;
+    };
+    let mut chars = slice.char_indices().peekable();
+    while let Some((pos, ch)) = chars.next() {
+        let abs = range.start + pos;
+        match ch {
+            '"' => {
+                let mut end = pos + ch.len_utf8();
+                for (next_pos, next_ch) in chars.by_ref() {
+                    end = next_pos + next_ch.len_utf8();
+                    if next_ch == '"' {
+                        break;
+                    }
+                }
+                push_token(tokens, abs..range.start + end, TOKEN_STRING, 0);
+            }
+            '0'..='9' => {
+                let mut end = pos + ch.len_utf8();
+                while let Some(&(next_pos, '0'..='9')) = chars.peek() {
+                    chars.next();
+                    end = next_pos + 1;
+                }
+                push_token(tokens, abs..range.start + end, TOKEN_NUMBER, 0);
+            }
+            '/' | '=' | '+' | '(' | ')' => {
+                push_token(tokens, abs..abs + ch.len_utf8(), TOKEN_OPERATOR, 0);
+            }
+            _ => {}
+        }
+    }
+}
+
+type SpannedMusicElement = Spanned<MusicElement<SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>;
+
+fn collect_music_line_tokens(
+    elements: &[SpannedMusicElement],
+    line_range: Range<usize>,
+    base: isize,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    for element in elements {
+        let elem_range = rebase(element.span, base);
+        match &element.value {
+            MusicElement::Note(_)
+            | MusicElement::Rest(_)
+            | MusicElement::MultiMeasureRest(_)
+            | MusicElement::Chord(_)
+            | MusicElement::Grace(_) => {
+                collect_music_group_tokens(elem_range, source, tokens);
+            }
+            MusicElement::Decoration(decoration) => {
+                let modifiers = u32::from(decoration.legacy_delimiter) * MODIFIER_DEPRECATED;
+                push_token(tokens, elem_range, TOKEN_DECORATOR, modifiers);
+            }
+            MusicElement::Annotation(_) => {
+                push_token(tokens, elem_range, TOKEN_STRING, 0);
+            }
+            MusicElement::InlineField(field) => {
+                if elem_range.len() >= 2 {
+                    push_token(
+                        tokens,
+                        elem_range.start..elem_range.start + 1,
+                        TOKEN_OPERATOR,
+                        0,
+                    );
+                    collect_field_line_tokens(
+                        field,
+                        elem_range.start + 1..elem_range.end - 1,
+                        base,
+                        source,
+                        tokens,
+                    );
+                    push_token(
+                        tokens,
+                        elem_range.end - 1..elem_range.end,
+                        TOKEN_OPERATOR,
+                        0,
+                    );
+                }
+            }
+            MusicElement::Bar(_)
+            | MusicElement::Slur(_)
+            | MusicElement::Tie(_)
+            | MusicElement::BrokenRhythm(_)
+            | MusicElement::Overlay(_)
+            | MusicElement::LineBreak(_) => {
+                push_token(tokens, elem_range, TOKEN_OPERATOR, 0);
+            }
+            MusicElement::Ending(_) | MusicElement::Tuplet(_) => {
+                collect_operator_and_number_tokens(elem_range, source, tokens);
+            }
+            MusicElement::Extension(_) => {
+                collect_lexical_fallback_tokens(elem_range, source, tokens);
+            }
+            MusicElement::BeamBreak(_) | MusicElement::BeamContinuation(_) | _ => {}
+        }
+    }
+    let music_end = elements
+        .last()
+        .map_or(line_range.start, |element| rebase(element.span, base).end);
+    collect_trailing_comment(music_end..line_range.end, source, tokens);
+}
+
+fn collect_music_group_tokens(range: Range<usize>, source: &str, tokens: &mut Vec<RawToken>) {
+    let Some(slice) = source.get(range.clone()) else {
+        return;
+    };
+    for (pos, ch) in slice.char_indices() {
+        let kind = match ch {
+            'A'..='G' | 'a'..='g' | 'z' | 'x' | 'Z' | 'X' => TOKEN_ENUM_MEMBER,
+            '0'..='9' => TOKEN_NUMBER,
+            '[' | ']' | '{' | '}' | '^' | '_' | '=' | '/' | '<' | '>' => TOKEN_OPERATOR,
+            _ => continue,
+        };
+        let abs = range.start + pos;
+        push_token(tokens, abs..abs + ch.len_utf8(), kind, 0);
+    }
+}
+
+fn collect_operator_and_number_tokens(
+    range: Range<usize>,
+    source: &str,
+    tokens: &mut Vec<RawToken>,
+) {
+    let Some(slice) = source.get(range.clone()) else {
+        return;
+    };
+    for (pos, ch) in slice.char_indices() {
+        let kind = match ch {
+            '0'..='9' => TOKEN_NUMBER,
+            '[' | '(' | ':' | ',' | '-' => TOKEN_OPERATOR,
+            _ => continue,
+        };
+        let abs = range.start + pos;
+        push_token(tokens, abs..abs + ch.len_utf8(), kind, 0);
+    }
+}
+
+fn collect_lexical_fallback_tokens(range: Range<usize>, source: &str, tokens: &mut Vec<RawToken>) {
+    let Some(slice) = source.get(range.clone()) else {
+        return;
+    };
+    for (pos, ch) in slice.char_indices() {
+        let kind = match ch {
+            '"' => TOKEN_STRING,
+            '0'..='9' => TOKEN_NUMBER,
+            'A'..='G' | 'a'..='g' => TOKEN_ENUM_MEMBER,
+            '|' | ':' | '/' | '<' | '>' | '(' | ')' | '[' | ']' | '^' | '_' | '=' => TOKEN_OPERATOR,
+            '!' | '+' => TOKEN_DECORATOR,
+            _ => continue,
+        };
+        let abs = range.start + pos;
+        let modifiers = u32::from(ch == '+') * MODIFIER_DEPRECATED;
+        push_token(tokens, abs..abs + ch.len_utf8(), kind, modifiers);
+    }
 }
 
 pub fn duration_edits(
@@ -1186,5 +1587,87 @@ a: second free-text line
         assert_eq!(hover(&model.blocks, &model.index, free_offset), None);
         let free2_offset = source.find("a: second").expect("a: second");
         assert_eq!(hover(&model.blocks, &model.index, free2_offset), None);
+    }
+
+    #[test]
+    fn semantic_tokens_emits_from_parsed_ast_spans() {
+        let source = "\
+%%begintext
+A B C | 1:2 \"quoted\" x: not a field
+é: multi-byte prefix
+%%endtext
+
+é: top-level free text | A B C
+
+X:1
+T:A | B \"Title\" é:1
+V:melody name=\"Flute\"
+K:C
+\"Am7\" !fermata! +trill+ C2 | % comment A B C
+";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let result = semantic_tokens(&model.blocks, &model.index, &model.encoding, None);
+
+        // Reconstruct (line, start_char, length, token_type, modifiers)
+        let mut decoded = Vec::new();
+        let mut line = 0_u32;
+        let mut start = 0_u32;
+        for token in &result.data {
+            if token.delta_line > 0 {
+                line += token.delta_line;
+                start = token.delta_start;
+            } else {
+                start += token.delta_start;
+            }
+            decoded.push((
+                line,
+                start,
+                token.length,
+                token.token_type,
+                token.token_modifiers_bitset,
+            ));
+        }
+
+        // Lines 1, 2 (inside %%begintext) and line 5 (top-level free text) must have no tokens
+        assert!(decoded.iter().all(|(l, ..)| *l != 1 && *l != 2 && *l != 5));
+
+        assert_eq!(
+            decoded,
+            vec![
+                // Line 0: %%begintext
+                (0, 0, 11, TOKEN_KEYWORD, 0),
+                // Line 3: %%endtext
+                (3, 0, 9, TOKEN_KEYWORD, 0),
+                // Line 7: X:1
+                (7, 0, 1, TOKEN_KEYWORD, 0),
+                (7, 1, 1, TOKEN_OPERATOR, 0),
+                (7, 2, 1, TOKEN_NUMBER, 0),
+                // Line 8: T:A | B "Title" é:1 (textual field: only T and :)
+                (8, 0, 1, TOKEN_KEYWORD, 0),
+                (8, 1, 1, TOKEN_OPERATOR, 0),
+                // Line 9: V:melody name="Flute"
+                (9, 0, 1, TOKEN_KEYWORD, 0),
+                (9, 1, 1, TOKEN_OPERATOR, 0),
+                (9, 2, 6, TOKEN_VARIABLE, MODIFIER_DECLARATION),
+                (9, 13, 1, TOKEN_OPERATOR, 0),
+                (9, 14, 7, TOKEN_STRING, 0),
+                // Line 10: K:C
+                (10, 0, 1, TOKEN_KEYWORD, 0),
+                (10, 1, 1, TOKEN_OPERATOR, 0),
+                // Line 11: "Am7" !fermata! +trill+ C2 | % comment A B C
+                (11, 0, 5, TOKEN_STRING, 0),
+                (11, 6, 9, TOKEN_DECORATOR, 0),
+                (11, 16, 7, TOKEN_DECORATOR, MODIFIER_DEPRECATED),
+                (11, 24, 1, TOKEN_ENUM_MEMBER, 0),
+                (11, 25, 1, TOKEN_NUMBER, 0),
+                (11, 27, 1, TOKEN_OPERATOR, 0),
+                (11, 29, 15, TOKEN_COMMENT, 0),
+            ]
+        );
     }
 }

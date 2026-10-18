@@ -686,7 +686,8 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         Ok(Some(
-            analysis::semantic_tokens(document.index(), &encoding, None).into(),
+            analysis::semantic_tokens(&document.model.blocks, document.index(), &encoding, None)
+                .into(),
         ))
     }
 
@@ -698,7 +699,13 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         Ok(Some(
-            analysis::semantic_tokens(document.index(), &encoding, Some(params.range)).into(),
+            analysis::semantic_tokens(
+                &document.model.blocks,
+                document.index(),
+                &encoding,
+                Some(params.range),
+            )
+            .into(),
         ))
     }
 
