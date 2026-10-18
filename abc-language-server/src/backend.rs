@@ -599,7 +599,8 @@ impl LanguageServer for Backend {
         let Some((document, encoding)) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        let symbols = analysis::document_symbols(document.index(), &encoding);
+        let symbols =
+            analysis::document_symbols(&document.model.blocks, document.index(), &encoding);
         if self.state.read().await.supports_hierarchical_symbols {
             return Ok(Some(DocumentSymbolResponse::Nested(symbols)));
         }
