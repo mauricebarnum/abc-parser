@@ -322,7 +322,13 @@ impl Backend {
         let scope = range
             .and_then(|range| document.index().byte_range(range, &encoding))
             .unwrap_or_else(|| 0..document.index().source().len());
-        let mut edits = analysis::duration_edits(document.index(), &encoding, style, scope);
+        let mut edits = analysis::duration_edits(
+            &document.model.blocks,
+            document.index(),
+            &encoding,
+            style,
+            scope,
+        );
         if range.is_none() {
             edits.extend(whitespace_edits(document.index(), &encoding, options));
         }
@@ -728,7 +734,13 @@ impl LanguageServer for Backend {
         ]
         .into_iter()
         .filter_map(|(title, kind, style)| {
-            let edits = analysis::duration_edits(document.index(), &encoding, style, scope.clone());
+            let edits = analysis::duration_edits(
+                &document.model.blocks,
+                document.index(),
+                &encoding,
+                style,
+                scope.clone(),
+            );
             (!edits.is_empty()).then(|| {
                 let mut changes = HashMap::new();
                 changes.insert(uri.clone(), edits);
