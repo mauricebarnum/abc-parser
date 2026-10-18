@@ -757,7 +757,7 @@ fn build_diagnostic(
     ))
 }
 
-const fn rebase(span: SimpleSpan<usize>, base: isize) -> Range<usize> {
+pub(crate) const fn rebase(span: SimpleSpan<usize>, base: isize) -> Range<usize> {
     let s = span.start.cast_signed() + base;
     let e = span.end.cast_signed() + base;
     let start = if s > 0 { s.cast_unsigned() } else { 0 };

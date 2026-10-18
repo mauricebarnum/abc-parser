@@ -56,6 +56,7 @@ pub use combinators::field_parser;
 pub use combinators::line_parser;
 pub use combinators::music_element_parser;
 pub use combinators::music_line_parser;
+pub use combinators::note_length_parser;
 pub use combinators::parse_blocks;
 pub use combinators::version_marker;
 pub use emit::AbcEmitter;
@@ -1570,6 +1571,43 @@ pub fn parse_chord(source: &str) -> Result<Chord, ParseError> {
                 &errors,
                 ErrorKind::InvalidMusic,
                 "invalid chord",
+                source.len(),
+            )
+        })
+}
+
+/// Parses an ABC note-length suffix into its rational value.
+///
+/// An empty string evaluates to the default multiplier `1/1`.
+///
+/// # Examples
+///
+/// ```
+/// use abc_parser::NoteLength;
+/// use abc_parser::parse_note_length;
+///
+/// assert_eq!(parse_note_length("").unwrap(), NoteLength { numerator: 1, denominator: 1 });
+/// assert_eq!(parse_note_length("/2").unwrap(), NoteLength { numerator: 1, denominator: 2 });
+/// assert_eq!(parse_note_length("/").unwrap(), NoteLength { numerator: 1, denominator: 2 });
+/// assert_eq!(parse_note_length("//").unwrap(), NoteLength { numerator: 1, denominator: 4 });
+/// assert_eq!(parse_note_length("3/").unwrap(), NoteLength { numerator: 3, denominator: 2 });
+/// assert_eq!(parse_note_length("3/2").unwrap(), NoteLength { numerator: 3, denominator: 2 });
+/// ```
+///
+/// # Errors
+///
+/// Returns an error when the string is not a valid note-length suffix or has
+/// an overflowing denominator.
+pub fn parse_note_length(source: &str) -> Result<NoteLength, ParseError> {
+    note_length_parser()
+        .then_ignore(chumsky::primitive::end())
+        .parse(source)
+        .into_result()
+        .map_err(|errors| {
+            first_parser_error(
+                &errors,
+                ErrorKind::InvalidMusic,
+                "invalid note length",
                 source.len(),
             )
         })

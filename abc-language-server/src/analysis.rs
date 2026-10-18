@@ -5,7 +5,17 @@
 
 use std::ops::Range;
 
+use abc_parser::DocumentItem;
+use abc_parser::EmitOptions;
 use abc_parser::ErrorKind;
+use abc_parser::Line;
+use abc_parser::MusicElement;
+use abc_parser::NoteLengthStyle as AbcNoteLengthStyle;
+use abc_parser::SimpleSpan;
+use abc_parser::SourceText;
+use abc_parser::Spanned;
+use abc_parser::ToAbc;
+use abc_parser::parse_note_length;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
 use tower_lsp_server::ls_types::CompletionTextEdit;
@@ -23,7 +33,9 @@ use tower_lsp_server::ls_types::TextEdit;
 
 use crate::config::Config;
 use crate::config::NoteLengthStyle;
+use crate::document::BlockRecord;
 use crate::document::DocumentModel;
+use crate::document::rebase;
 use crate::position::LineIndex;
 
 const FIELD_COMPLETIONS: &[(char, &str)] = &[
@@ -115,20 +127,25 @@ pub fn hover(index: &LineIndex, offset: usize) -> Option<(Range<usize>, String)>
     match character {
         'A'..='G' | 'a'..='g' => {
             let suffix = duration_suffix(&text[start + character.len_utf8()..]);
-            let detail = suffix.and_then(parse_duration).map_or_else(
-                || "unit note length".to_owned(),
-                |(numerator, denominator)| {
-                    let equivalent = if numerator == 1 && denominator.is_power_of_two() {
+            let detail = suffix
+                .and_then(|value| parse_note_length(value).ok())
+                .map_or_else(
+                    || "unit note length".to_owned(),
+                    |length| {
+                        let equivalent =
+                            if length.numerator == 1 && length.denominator.is_power_of_two() {
+                                let shorthand = "/".repeat(length.denominator.ilog2() as usize);
+                                let explicit = length.denominator;
+                                format!("; shorthand `{shorthand}` = explicit `/{explicit}`")
+                            } else {
+                                String::new()
+                            };
                         format!(
-                            "; shorthand `{}` = explicit `/{denominator}`",
-                            "/".repeat(denominator.ilog2() as usize)
+                            "duration multiplier {}/{}{equivalent}",
+                            length.numerator, length.denominator
                         )
-                    } else {
-                        String::new()
-                    };
-                    format!("duration multiplier {numerator}/{denominator}{equivalent}")
-                },
-            );
+                    },
+                );
             Some((
                 absolute..absolute + character.len_utf8(),
                 format!("ABC note `{character}` — {detail}"),
@@ -479,26 +496,30 @@ fn lexical_tokens(_source: &str, index: &LineIndex) -> Vec<RawToken> {
 }
 
 pub fn duration_edits(
+    blocks: &[BlockRecord],
     index: &LineIndex,
     encoding: &PositionEncodingKind,
     style: NoteLengthStyle,
     scope: Range<usize>,
 ) -> Vec<TextEdit> {
-    if style == NoteLengthStyle::Preserve {
-        return Vec::new();
-    }
-    note_duration_ranges(index)
+    let emit_style = match style {
+        NoteLengthStyle::Shorthand => AbcNoteLengthStyle::Shorthand,
+        NoteLengthStyle::Explicit => AbcNoteLengthStyle::ExplicitDenominator,
+        NoteLengthStyle::Preserve => return Vec::new(),
+    };
+    let options = EmitOptions::new().with_note_length_style(emit_style);
+    note_duration_ranges(blocks, index.source())
+        .into_iter()
         .filter(|(range, _)| range.start >= scope.start && range.end <= scope.end)
         .filter_map(|(range, suffix)| {
-            let (numerator, denominator) = parse_duration(suffix)?;
-            if numerator != 1 || denominator <= 1 || !denominator.is_power_of_two() {
+            let length = parse_note_length(suffix).ok()?;
+            if length.numerator != 1
+                || length.denominator <= 1
+                || !length.denominator.is_power_of_two()
+            {
                 return None;
             }
-            let replacement = match style {
-                NoteLengthStyle::Shorthand => "/".repeat(denominator.ilog2() as usize),
-                NoteLengthStyle::Explicit => format!("/{denominator}"),
-                NoteLengthStyle::Preserve => return None,
-            };
+            let replacement = length.to_abc_with_options(options);
             (replacement != suffix).then(|| {
                 TextEdit::new(
                     index
@@ -511,38 +532,117 @@ pub fn duration_edits(
         .collect()
 }
 
-fn note_duration_ranges(index: &LineIndex) -> impl Iterator<Item = (Range<usize>, &str)> + '_ {
-    index.line_iter().flat_map(|(line_start, content)| {
-        if content.starts_with('%') || content.as_bytes().get(1) == Some(&b':') {
-            return Vec::new();
-        }
-        let mut found = Vec::new();
-        let bytes = content.as_bytes();
-        let mut cursor = 0;
-        while cursor < bytes.len() {
-            if matches!(bytes[cursor], b'A'..=b'G' | b'a'..=b'g' | b'z' | b'x') {
-                cursor += 1;
-                while cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b',') {
-                    cursor += 1;
+fn note_duration_ranges<'a>(
+    blocks: &'a [BlockRecord],
+    source: &'a str,
+) -> Vec<(Range<usize>, &'a str)> {
+    let mut found = Vec::new();
+    for record in blocks {
+        for item in &record.parsed.items {
+            if let DocumentItem::Tune(tune) = &item.value {
+                for line in &tune.lines {
+                    if let Line::Music(elements) = &line.value {
+                        for element in elements {
+                            collect_element_duration(element, record.base, source, &mut found);
+                        }
+                    }
                 }
-                let start = cursor;
-                while cursor < bytes.len()
-                    && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
-                {
-                    cursor += 1;
-                }
-                if cursor > start {
-                    found.push((
-                        line_start + start..line_start + cursor,
-                        &content[start..cursor],
-                    ));
-                }
-            } else {
-                cursor += 1;
             }
         }
-        found
-    })
+    }
+    found
+}
+
+fn collect_element_duration<'a>(
+    element: &Spanned<MusicElement<SourceText<SimpleSpan<usize>>>, SimpleSpan<usize>>,
+    base: isize,
+    source: &'a str,
+    found: &mut Vec<(Range<usize>, &'a str)>,
+) {
+    let elem_range = rebase(element.span, base);
+    if elem_range.end > source.len() || elem_range.start >= elem_range.end {
+        return;
+    }
+    let elem_text = &source[elem_range.clone()];
+    match &element.value {
+        MusicElement::Note(_) => {
+            if let Some(pitch_idx) = elem_text.find(|c: char| matches!(c, 'A'..='G' | 'a'..='g')) {
+                let after_pitch = &elem_text[pitch_idx + 1..];
+                let oct_len = after_pitch
+                    .find(|c: char| c != '\'' && c != ',')
+                    .unwrap_or(after_pitch.len());
+                let suffix_offset = pitch_idx + 1 + oct_len;
+                if suffix_offset < elem_text.len() {
+                    found.push((
+                        elem_range.start + suffix_offset..elem_range.end,
+                        &elem_text[suffix_offset..],
+                    ));
+                }
+            }
+        }
+        MusicElement::Rest(_) => {
+            if elem_text.len() > 1 {
+                found.push((elem_range.start + 1..elem_range.end, &elem_text[1..]));
+            }
+        }
+        MusicElement::Chord(_) => {
+            collect_chord_durations(&elem_range, elem_text, found);
+        }
+        _ => {}
+    }
+}
+
+fn collect_chord_durations<'a>(
+    elem_range: &Range<usize>,
+    elem_text: &'a str,
+    found: &mut Vec<(Range<usize>, &'a str)>,
+) {
+    let Some(close_bracket) = elem_text.rfind(']') else {
+        return;
+    };
+    if close_bracket + 1 < elem_text.len() {
+        found.push((
+            elem_range.start + close_bracket + 1..elem_range.end,
+            &elem_text[close_bracket + 1..],
+        ));
+    }
+    let inside = &elem_text[1..close_bracket];
+    let bytes = inside.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if matches!(bytes[cursor], b'A'..=b'G' | b'a'..=b'g') {
+            cursor += 1;
+            while cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b',') {
+                cursor += 1;
+            }
+            let dur_start = cursor;
+            while cursor < bytes.len() && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
+            {
+                cursor += 1;
+            }
+            if cursor > dur_start {
+                found.push((
+                    elem_range.start + 1 + dur_start..elem_range.start + 1 + cursor,
+                    &inside[dur_start..cursor],
+                ));
+            }
+        } else if matches!(bytes[cursor], b'z' | b'x') {
+            cursor += 1;
+            let dur_start = cursor;
+            while cursor < bytes.len() && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'/')
+            {
+                cursor += 1;
+            }
+            if cursor > dur_start {
+                found.push((
+                    elem_range.start + 1 + dur_start..elem_range.start + 1 + cursor,
+                    &inside[dur_start..cursor],
+                ));
+            }
+        } else {
+            cursor += 1;
+        }
+    }
 }
 
 fn duration_suffix(text: &str) -> Option<&str> {
@@ -550,31 +650,6 @@ fn duration_suffix(text: &str) -> Option<&str> {
         .find(|value: char| !value.is_ascii_digit() && value != '/')
         .unwrap_or(text.len());
     (end > 0).then_some(&text[..end])
-}
-
-fn parse_duration(value: &str) -> Option<(u32, u32)> {
-    if value.is_empty() {
-        return Some((1, 1));
-    }
-    if value.bytes().all(|byte| byte == b'/') {
-        return Some((1, 2_u32.checked_pow(u32::try_from(value.len()).ok()?)?));
-    }
-    if let Some((numerator, denominator)) = value.split_once('/') {
-        let numerator = if numerator.is_empty() {
-            1
-        } else {
-            numerator.parse().ok()?
-        };
-        let denominator = if denominator.is_empty() {
-            2
-        } else if denominator.bytes().all(|byte| byte == b'/') {
-            2_u32.checked_pow(u32::try_from(denominator.len() + 1).ok()?)?
-        } else {
-            denominator.parse().ok()?
-        };
-        return Some((numerator, denominator));
-    }
-    Some((value.parse().ok()?, 1))
 }
 
 #[cfg(test)]
@@ -586,24 +661,20 @@ mod tests {
     use crate::config::DiagnosticLevel;
 
     #[test]
-    fn duration_spellings_are_semantically_distinct_and_rewritable() {
-        assert_eq!(parse_duration("/2"), Some((1, 2)));
-        assert_eq!(parse_duration("/"), Some((1, 2)));
-        assert_eq!(parse_duration("//"), Some((1, 4)));
-        assert_eq!(parse_duration("/4"), Some((1, 4)));
-        assert_eq!(parse_duration("3/"), Some((3, 2)));
-        assert_eq!(parse_duration("3//"), Some((3, 4)));
-    }
-
-    #[test]
     fn duration_edits_only_rewrite_equivalent_music_suffixes() {
-        let index = LineIndex::new("X:1\nT:A/2 stays text\nK:C\nA/2 B/ C// D/4 E3/\n".to_owned());
-        let encoding = PositionEncodingKind::UTF16;
+        let source = "X:1\nT:A/2 stays text\nK:C\nA/2 B/ C// D/4 E3/\n";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
         let shorthand = duration_edits(
-            &index,
-            &encoding,
+            &model.blocks,
+            &model.index,
+            &model.encoding,
             NoteLengthStyle::Shorthand,
-            0..index.source().len(),
+            0..model.index.source().len(),
         );
         assert_eq!(
             shorthand
@@ -613,10 +684,11 @@ mod tests {
             ["/", "//"]
         );
         let explicit = duration_edits(
-            &index,
-            &encoding,
+            &model.blocks,
+            &model.index,
+            &model.encoding,
             NoteLengthStyle::Explicit,
-            0..index.source().len(),
+            0..model.index.source().len(),
         );
         assert_eq!(
             explicit
@@ -624,6 +696,31 @@ mod tests {
                 .map(|edit| edit.new_text.as_str())
                 .collect::<Vec<_>>(),
             ["/2", "/4"]
+        );
+    }
+
+    #[test]
+    fn duration_edits_does_not_corrupt_non_music_elements() {
+        let source = "%%begintext\nThis is section A/2 of the book.\n%%endtext\n\nX:1\nT:Title A/2\nK:C\n\"Am7\" \"C/2\" [V:1 name=\"A/2\"] !accent! +D.C.+ A/2 [CEG]/2 [C/2E/2] |\n";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let shorthand = duration_edits(
+            &model.blocks,
+            &model.index,
+            &model.encoding,
+            NoteLengthStyle::Shorthand,
+            0..model.index.source().len(),
+        );
+        assert_eq!(
+            shorthand
+                .iter()
+                .map(|edit| edit.new_text.as_str())
+                .collect::<Vec<_>>(),
+            ["/", "/", "/", "/"]
         );
     }
 
