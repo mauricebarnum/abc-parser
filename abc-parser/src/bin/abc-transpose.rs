@@ -20,6 +20,7 @@
 //! accidental propagation in the destination. Chord symbols are transposed
 //! to match the destination key or interval.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -32,6 +33,7 @@ use abc_parser::AnnotationPlacement;
 use abc_parser::BarLine;
 use abc_parser::ChordMember;
 use abc_parser::DiagnosticRenderer;
+use abc_parser::Document;
 use abc_parser::EmitOptions;
 use abc_parser::Field;
 use abc_parser::FieldValue;
@@ -213,16 +215,24 @@ impl MeasureAccidentals {
     }
 }
 
-/// Mutable musical state while one tune is traversed in source order.
-struct TranspositionState {
-    interval: i16,
-    pitch_interval: i16,
-    spelling: SpellingPreference,
+#[derive(Clone, Copy)]
+struct VoiceState {
     source_signature: [Offset; 7],
     source_measure_accidentals: MeasureAccidentals,
     destination_signature: [Offset; 7],
     destination_measure_accidentals: MeasureAccidentals,
     prefer_flats: bool,
+}
+
+/// Mutable musical state while one tune is traversed in source order.
+struct TranspositionState {
+    interval: i16,
+    pitch_interval: i16,
+    spelling: SpellingPreference,
+    defaults: VoiceState,
+    current_voice: String,
+    voices: BTreeMap<String, VoiceState>,
+    body_started: bool,
     first_key_pending: bool,
     destination: Option<KeySignature<String>>,
 }
@@ -241,52 +251,96 @@ impl TranspositionState {
             .and_then(|octave_interval| interval.checked_add(octave_interval))
             .ok_or_else(|| "combined transposition interval is out of range".to_owned())?;
         let source_signature = signature_offsets(source_key)?;
+        let (destination_signature, prefer_flats) = if let Some(dest) = &destination {
+            let prefer_flats = spelling
+                .forced_flats()
+                .unwrap_or_else(|| key_prefers_flats(dest));
+            (signature_offsets(dest)?, prefer_flats)
+        } else {
+            let mut initial_dest = source_key.clone();
+            let prefer_flats = transpose_key_tonic(&mut initial_dest, interval, spelling)?;
+            normalize_key_mode(&mut initial_dest);
+            (signature_offsets(&initial_dest)?, prefer_flats)
+        };
+        let defaults = VoiceState {
+            source_signature,
+            source_measure_accidentals: MeasureAccidentals::default(),
+            destination_signature,
+            destination_measure_accidentals: MeasureAccidentals::default(),
+            prefer_flats,
+        };
         Ok(Self {
             interval,
             pitch_interval,
             spelling,
-            source_signature,
-            source_measure_accidentals: MeasureAccidentals::default(),
-            destination_signature: source_signature,
-            destination_measure_accidentals: MeasureAccidentals::default(),
-            prefer_flats: spelling.forced_flats().unwrap_or_else(|| {
-                destination
-                    .as_ref()
-                    .map_or_else(|| key_prefers_flats(source_key), key_prefers_flats)
-            }),
+            defaults,
+            current_voice: String::new(),
+            voices: BTreeMap::new(),
+            body_started: false,
             first_key_pending: true,
             destination,
         })
     }
 
+    fn active_voice_mut(&mut self) -> &mut VoiceState {
+        let defaults = self.defaults;
+        self.voices
+            .entry(self.current_voice.clone())
+            .or_insert(defaults)
+    }
+
+    fn active_prefer_flats(&self) -> bool {
+        self.voices
+            .get(&self.current_voice)
+            .map_or(self.defaults.prefer_flats, |voice| voice.prefer_flats)
+    }
+
+    fn switch_voice(&mut self, id: &str) {
+        self.current_voice.clear();
+        self.current_voice.push_str(id);
+        let defaults = self.defaults;
+        self.voices
+            .entry(self.current_voice.clone())
+            .or_insert(defaults);
+    }
+
+    fn clear_active_measure_accidentals(&mut self) {
+        let voice = self.active_voice_mut();
+        voice.source_measure_accidentals.clear();
+        voice.destination_measure_accidentals.clear();
+    }
+
     /// Resolves and then replaces one pitch, updating source accidental state.
     fn transpose_pitch(&mut self, pitch: &mut Pitch) -> Result<(), String> {
+        let pitch_interval = self.pitch_interval;
+        let voice = self.active_voice_mut();
         let source = *pitch;
         let offset = match source.accidental {
             Some(accidental) => {
                 let offset = accidental_offset(accidental);
-                self.source_measure_accidentals.set(source.class, offset);
+                voice.source_measure_accidentals.set(source.class, offset);
                 offset
             }
-            None => self
+            None => voice
                 .source_measure_accidentals
                 .get(source.class)
-                .unwrap_or_else(|| self.source_signature[class_index(source.class)]),
+                .unwrap_or_else(|| voice.source_signature[class_index(source.class)]),
         };
         let mut destination =
-            spell_absolute_pitch(source, offset, self.pitch_interval, self.prefer_flats)?;
+            spell_absolute_pitch(source, offset, pitch_interval, voice.prefer_flats)?;
         let destination_offset = destination
             .accidental
             .map(accidental_offset)
             .expect("spell_absolute_pitch always emits an accidental");
-        let active_offset = self
+        let active_offset = voice
             .destination_measure_accidentals
             .get(destination.class)
-            .unwrap_or_else(|| self.destination_signature[class_index(destination.class)]);
+            .unwrap_or_else(|| voice.destination_signature[class_index(destination.class)]);
         if destination_offset == active_offset {
             destination.accidental = None;
         } else {
-            self.destination_measure_accidentals
+            voice
+                .destination_measure_accidentals
                 .set(destination.class, destination_offset);
         }
         *pitch = destination;
@@ -295,26 +349,44 @@ impl TranspositionState {
 
     /// Applies a source key change and transposes its emitted key field.
     fn transpose_key(&mut self, key: &mut KeySignature<String>) -> Result<(), String> {
-        self.source_signature = signature_offsets(key)?;
-        self.source_measure_accidentals.clear();
-        self.destination_measure_accidentals.clear();
-
-        if self.first_key_pending {
+        let source_signature = signature_offsets(key)?;
+        let (destination_signature, prefer_flats) = if self.first_key_pending {
             self.first_key_pending = false;
             if let Some(destination) = self.destination.take() {
-                self.prefer_flats = self
+                let prefer_flats = self
                     .spelling
                     .forced_flats()
                     .unwrap_or_else(|| key_prefers_flats(&destination));
                 *key = destination;
                 normalize_key_mode(key);
-                self.destination_signature = signature_offsets(key).unwrap_or([Offset::ZERO; 7]);
-                return Ok(());
+                (signature_offsets(key)?, prefer_flats)
+            } else {
+                let prefer_flats = transpose_key_tonic(key, self.interval, self.spelling)?;
+                normalize_key_mode(key);
+                (signature_offsets(key)?, prefer_flats)
             }
+        } else {
+            let prefer_flats = transpose_key_tonic(key, self.interval, self.spelling)?;
+            normalize_key_mode(key);
+            (signature_offsets(key)?, prefer_flats)
+        };
+
+        let next_state = VoiceState {
+            source_signature,
+            source_measure_accidentals: MeasureAccidentals::default(),
+            destination_signature,
+            destination_measure_accidentals: MeasureAccidentals::default(),
+            prefer_flats,
+        };
+        if self.body_started {
+            *self.active_voice_mut() = next_state;
+        } else {
+            self.defaults = next_state;
+            for voice in self.voices.values_mut() {
+                *voice = next_state;
+            }
+            self.body_started = true;
         }
-        self.prefer_flats = transpose_key_tonic(key, self.interval, self.spelling)?;
-        normalize_key_mode(key);
-        self.destination_signature = signature_offsets(key)?;
         Ok(())
     }
 }
@@ -371,9 +443,12 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     let mut document = parsed_document
         .into_owned(source.as_str())
         .map_err(|error| format!("could not resolve parsed source text: {error}"))?;
-    for tune in document.tunes_mut() {
-        transpose_tune(tune, &request, arguments.spelling, arguments.octave)?;
-    }
+    transpose_document(
+        &mut document,
+        &request,
+        arguments.spelling,
+        arguments.octave,
+    )?;
     let note_length_style = if arguments.explicit_note_lengths {
         NoteLengthStyle::ExplicitDenominator
     } else {
@@ -434,6 +509,7 @@ fn parse_key(value: &str) -> Result<KeySignature<String>, String> {
     if key.tonic.is_none() {
         return Err("destination key must have a pitched tonic".into());
     }
+    signature_offsets(&key)?;
     Ok(key)
 }
 
@@ -466,9 +542,52 @@ fn write_output(mut source: String, path: Option<&PathBuf>) -> Result<(), String
     }
 }
 
+/// Transposes file-header keys and all tunes in a document.
+fn transpose_document<S>(
+    document: &mut Document<S, String>,
+    request: &Request,
+    spelling: SpellingPreference,
+    octave: i16,
+) -> Result<(), String> {
+    let mut header_key = None;
+    for line in &mut document.header {
+        if let Line::Field(Field {
+            value: FieldValue::Key(key),
+            ..
+        }) = &mut line.value
+        {
+            let key_clone = key.clone();
+            let tonic = key_clone
+                .tonic
+                .ok_or_else(|| "cannot transpose a key without a pitched tonic".to_owned())?;
+            let (interval, destination) = match request {
+                Request::Semitones(interval) => (*interval, None),
+                Request::Key(destination) => {
+                    let destination_tonic = destination
+                        .tonic
+                        .expect("parse_key rejects destination keys without a tonic");
+                    (
+                        signed_tonic_interval(tonic, destination_tonic),
+                        Some(destination.clone()),
+                    )
+                }
+            };
+            let mut header_state =
+                TranspositionState::new(interval, &key_clone, destination, spelling, octave)?;
+            header_state.transpose_key(key)?;
+            header_key = Some(key_clone);
+        }
+    }
+    for tune in document.tunes_mut() {
+        transpose_tune(tune, header_key.as_ref(), request, spelling, octave)?;
+    }
+    Ok(())
+}
+
 /// Transposes one tune using its first structured key field as the source key.
 fn transpose_tune<S>(
     tune: &mut Tune<S, String>,
+    header_key: Option<&KeySignature<String>>,
     request: &Request,
     spelling: SpellingPreference,
     octave: i16,
@@ -483,6 +602,7 @@ fn transpose_tune<S>(
             }) => Some(key),
             _ => None,
         })
+        .or(header_key)
         .ok_or_else(|| "a tune has no K: field".to_owned())?;
     let source_tonic = source_key
         .tonic
@@ -514,6 +634,7 @@ fn transpose_line<S>(
     match line {
         Line::Field(field) => transpose_field(field, state),
         Line::Music(elements) => {
+            state.body_started = true;
             for element in elements {
                 transpose_music_element(&mut element.value, state)?;
             }
@@ -523,13 +644,15 @@ fn transpose_line<S>(
     }
 }
 
-/// Applies a key change while leaving unrelated information fields untouched.
+/// Applies a key or voice change while leaving unrelated information fields untouched.
 fn transpose_field(
     field: &mut Field<String>,
     state: &mut TranspositionState,
 ) -> Result<(), String> {
-    if let FieldValue::Key(key) = &mut field.value {
-        state.transpose_key(key)?;
+    match &mut field.value {
+        FieldValue::Key(key) => state.transpose_key(key)?,
+        FieldValue::Voice(voice) => state.switch_voice(&voice.id),
+        _ => {}
     }
     Ok(())
 }
@@ -563,14 +686,13 @@ fn transpose_music_element(
                 annotation.text = transpose_chord_annotation(
                     &annotation.text,
                     state.interval,
-                    state.prefer_flats,
+                    state.active_prefer_flats(),
                 );
             }
             Ok(())
         }
         MusicElement::Bar(BarLine { .. }) => {
-            state.source_measure_accidentals.clear();
-            state.destination_measure_accidentals.clear();
+            state.clear_active_measure_accidentals();
             Ok(())
         }
         _ => Ok(()),
@@ -1429,7 +1551,7 @@ mod tests {
     use super::SpellingPreference;
     use super::parse_key;
     use super::parse_steps;
-    use super::transpose_tune;
+    use super::transpose_document;
 
     #[test]
     fn measure_accidental_slots_cover_every_pitch_class() {
@@ -1471,7 +1593,7 @@ mod tests {
         transpose_with_options(source, request, spelling, 0)
     }
 
-    /// Parses and transposes the only tune using all pitch options.
+    /// Parses and transposes the document using all pitch options.
     fn transpose_with_options(
         source: &str,
         request: &Request,
@@ -1479,12 +1601,7 @@ mod tests {
         octave: i16,
     ) -> String {
         let mut document = parse(source).output.unwrap().into_owned(source).unwrap();
-        {
-            let mut tunes = document.tunes_mut();
-            let tune = tunes.next().unwrap();
-            assert!(tunes.next().is_none());
-            transpose_tune(tune, request, spelling, octave).unwrap();
-        }
+        transpose_document(&mut document, request, spelling, octave).unwrap();
         document.to_abc()
     }
 
@@ -1590,10 +1707,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_unconventional_destination_spelling_is_preserved() {
-        let output = transpose("X:1\nK:C\nC |\n", &Request::Key(parse_key("D#").unwrap()));
-        assert!(output.contains("K:D#"), "{output}");
-        assert!(output.contains("^D |"), "{output}");
+    fn unconventional_destination_key_is_rejected() {
+        assert!(parse_key("D#").is_err());
+        assert!(parse_key("G#").is_err());
+        assert!(parse_key("Fb").is_err());
     }
 
     #[test]
@@ -1814,5 +1931,45 @@ mod tests {
     fn unicode_accidentals_in_chord_symbols() {
         let output = transpose("X:1\nK:C\n\"C♯\"C \"B♭m\"A |\n", &Request::Semitones(2));
         assert!(output.contains("\"D♯\"D \"Cm\"B |"), "{output}");
+    }
+
+    #[test]
+    fn multi_voice_accidentals_and_keys_are_scoped_per_voice() {
+        let output = transpose(
+            "X:1\nK:C\nV:1\n^C\nV:2\nC |\nV:1\nC |\n",
+            &Request::Semitones(1),
+        );
+        assert!(output.contains("V:1\n=D\nV:2\nD |\nV:1\nD |"), "{output}");
+
+        let key_output = transpose(
+            "X:1\nK:G\nV:1\nK:F\nF |\nV:2\nF |\n",
+            &Request::Semitones(1),
+        );
+        assert!(
+            key_output.contains("V:1\nK:F#\nF |\nV:2\nG |"),
+            "{key_output}"
+        );
+    }
+
+    #[test]
+    fn file_header_key_is_transposed_and_inherited_by_tunes() {
+        let mut document = parse("M:4/4\n\nX:1\nF |\n")
+            .output
+            .unwrap()
+            .into_owned("M:4/4\n\nX:1\nF |\n")
+            .unwrap();
+        document.header.push(abc_parser::Spanned {
+            value: abc_parser::Line::Field(abc_parser::parse_field("K:G").unwrap()),
+            span: (0..0).into(),
+        });
+        transpose_document(
+            &mut document,
+            &Request::Semitones(2),
+            SpellingPreference::Auto,
+            0,
+        )
+        .unwrap();
+        let output = document.to_abc();
+        assert!(output.contains("M:4/4\nK:A\n\nX:1\nG |"), "{output}");
     }
 }
