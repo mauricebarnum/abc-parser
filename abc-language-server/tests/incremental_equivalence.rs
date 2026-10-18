@@ -28,8 +28,6 @@ use abc_language_server::config::Config;
 use abc_language_server::document::BlockRecord;
 use abc_language_server::document::DocumentModel;
 use abc_language_server::document::EditError;
-use tower_lsp_server::ls_types::Diagnostic;
-use tower_lsp_server::ls_types::DiagnosticSeverity;
 use tower_lsp_server::ls_types::NumberOrString;
 use tower_lsp_server::ls_types::PositionEncodingKind;
 use tower_lsp_server::ls_types::TextDocumentContentChangeEvent;
@@ -484,28 +482,6 @@ impl Xorshift64 {
     const fn bool(&mut self) -> bool {
         (self.next() & 1) == 0
     }
-}
-
-const fn severity_label(diagnostic: &Diagnostic) -> &'static str {
-    match diagnostic.severity {
-        Some(DiagnosticSeverity::ERROR) => "ERROR",
-        Some(DiagnosticSeverity::WARNING) => "WARNING",
-        Some(DiagnosticSeverity::INFORMATION) => "INFORMATION",
-        Some(DiagnosticSeverity::HINT) => "HINT",
-        _ => "NONE",
-    }
-}
-
-#[allow(dead_code)]
-fn code_label(diagnostic: &Diagnostic) -> String {
-    diagnostic
-        .code
-        .as_ref()
-        .and_then(|code| match code {
-            NumberOrString::String(text) => Some(text.clone()),
-            NumberOrString::Number(_) => None,
-        })
-        .unwrap_or_default()
 }
 
 /// Runs every corpus entry against every seed in `SEEDS`. The set is
