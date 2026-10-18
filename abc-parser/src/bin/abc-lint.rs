@@ -127,7 +127,6 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     let parsed = parse_with_options(source.as_str(), ParserOptions::new().strict(true));
     let mut owned_document = parsed
         .output
-        .clone()
         .map(|document| document.into_owned(source.as_str()))
         .transpose()
         .map_err(|error| format!("could not resolve parsed source text: {error}"))?;
@@ -157,14 +156,16 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     } else {
         Vec::new()
     };
-    for warning in parsed
+    let mut all_warnings = parsed
         .warnings
         .iter()
         .chain(&order_warnings)
         .chain(&fixable_warnings)
         .chain(&bar_duration_warnings)
         .chain(&free_text_warnings)
-    {
+        .collect::<Vec<_>>();
+    all_warnings.sort_by_key(|warning| (warning.span.start, warning.span.end));
+    for warning in all_warnings {
         eprintln!(
             "abc-lint: warning: {input_name}:{}",
             diagnostic_renderer.render_warning(warning)
@@ -978,7 +979,7 @@ fn validate_fixed_output(source: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::deprecated_tempo_bpm;
 
     #[test]
     fn deprecated_tempo_digits_are_checked_only_while_fixing() {
