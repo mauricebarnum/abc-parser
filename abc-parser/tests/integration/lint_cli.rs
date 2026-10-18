@@ -741,33 +741,68 @@ fn an_unrepresentable_deprecated_tempo_fails_only_when_fixing() {
 }
 
 #[test]
-fn free_text_warn_emits_and_fails_when_free_text_is_present() {
-    let source = concat!(
-        "X:1\n",
-        "T:First\n",
-        "K:C\n",
-        "CDEF |\n",
-        "\n",
-        "This is unintended prose.\n",
-        "\n",
-        "X:2\n",
-        "T:Second\n",
-        "K:G\n",
-        "GABc |\n",
-    );
-    let output = run_stdin(source, &["--free-text", "warn"]);
-    assert!(!output.status.success(), "{output:?}");
-    let warnings = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        warnings.contains("free text block is not part of any tune"),
-        "{warnings}"
-    );
-    assert!(warnings.contains("This is unintended prose."), "{warnings}");
-    assert!(
-        warnings.contains("--free-text warn forbids them"),
-        "{warnings}"
-    );
-    assert!(warnings.contains("1 free text block;"), "{warnings}");
+fn free_text_warn_rejects_free_text_blocks() {
+    let cases = [
+        (
+            concat!(
+                "X:1\n",
+                "T:First\n",
+                "K:C\n",
+                "CDEF |\n",
+                "\n",
+                "This is unintended prose.\n",
+                "\n",
+                "X:2\n",
+                "T:Second\n",
+                "K:G\n",
+                "GABc |\n",
+            ),
+            1,
+            &["This is unintended prose."][..],
+            "1 free text block;",
+        ),
+        (
+            concat!(
+                "X:1\n",
+                "T:First\n",
+                "K:C\n",
+                "CDEF |\n",
+                "\n",
+                "First stray prose.\n",
+                "\n",
+                "X:2\n",
+                "T:Second\n",
+                "K:G\n",
+                "GABc |\n",
+                "\n",
+                "Second stray prose.\n",
+            ),
+            2,
+            &["First stray prose.", "Second stray prose."][..],
+            "2 free text blocks;",
+        ),
+    ];
+
+    for (source, expected_count, prose_snippets, summary) in cases {
+        let output = run_stdin(source, &["--free-text", "warn"]);
+        assert!(!output.status.success(), "{output:?}");
+        let warnings = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            warnings
+                .matches("free text block is not part of any tune")
+                .count(),
+            expected_count,
+            "{warnings}"
+        );
+        for snippet in prose_snippets {
+            assert!(warnings.contains(snippet), "missing {snippet}: {warnings}");
+        }
+        assert!(
+            warnings.contains("--free-text warn forbids them"),
+            "{warnings}"
+        );
+        assert!(warnings.contains(summary), "missing {summary}: {warnings}");
+    }
 }
 
 #[test]
@@ -793,7 +828,7 @@ fn free_text_warn_succeeds_when_no_free_text_is_present() {
 }
 
 #[test]
-fn free_text_accept_default_does_not_warn_or_fail() {
+fn free_text_accept_policy_does_not_warn_or_fail() {
     let source = concat!(
         "X:1\n",
         "T:First\n",
@@ -807,69 +842,15 @@ fn free_text_accept_default_does_not_warn_or_fail() {
         "K:G\n",
         "GABc |\n",
     );
-    let output = run_stdin(source, &[]);
-    assert!(output.status.success(), "{output:?}");
-    let warnings = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        !warnings.contains("free text block is not part of any tune"),
-        "{warnings}"
-    );
-}
-
-#[test]
-fn free_text_accept_explicit_does_not_warn_or_fail() {
-    let source = concat!(
-        "X:1\n",
-        "T:First\n",
-        "K:C\n",
-        "CDEF |\n",
-        "\n",
-        "This is unintended prose.\n",
-        "\n",
-        "X:2\n",
-        "T:Second\n",
-        "K:G\n",
-        "GABc |\n",
-    );
-    let output = run_stdin(source, &["--free-text", "accept"]);
-    assert!(output.status.success(), "{output:?}");
-    let warnings = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        !warnings.contains("free text block is not part of any tune"),
-        "{warnings}"
-    );
-}
-
-#[test]
-fn free_text_warn_emits_one_warning_per_block() {
-    let source = concat!(
-        "X:1\n",
-        "T:First\n",
-        "K:C\n",
-        "CDEF |\n",
-        "\n",
-        "First stray prose.\n",
-        "\n",
-        "X:2\n",
-        "T:Second\n",
-        "K:G\n",
-        "GABc |\n",
-        "\n",
-        "Second stray prose.\n",
-    );
-    let output = run_stdin(source, &["--free-text", "warn"]);
-    assert!(!output.status.success(), "{output:?}");
-    let warnings = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(
-        warnings
-            .matches("free text block is not part of any tune")
-            .count(),
-        2,
-        "{warnings}"
-    );
-    assert!(warnings.contains("First stray prose."), "{warnings}");
-    assert!(warnings.contains("Second stray prose."), "{warnings}");
-    assert!(warnings.contains("2 free text blocks;"), "{warnings}");
+    for arguments in [&[][..], &["--free-text", "accept"][..]] {
+        let output = run_stdin(source, arguments);
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        let warnings = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !warnings.contains("free text block is not part of any tune"),
+            "{arguments:?}: {warnings}"
+        );
+    }
 }
 
 #[test]
