@@ -574,15 +574,17 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         Ok(
-            analysis::hover(document.index(), offset).and_then(|(range, value)| {
-                Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value,
-                    }),
-                    range: Some(document.index().lsp_range(range, &encoding)?),
-                })
-            }),
+            analysis::hover(&document.model.blocks, document.index(), offset).and_then(
+                |(range, value)| {
+                    Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value,
+                        }),
+                        range: Some(document.index().lsp_range(range, &encoding)?),
+                    })
+                },
+            ),
         )
     }
 
