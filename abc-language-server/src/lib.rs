@@ -18,6 +18,5 @@ mod analysis;
 mod backend;
 mod position;
 
-pub use analysis::Analysis;
 pub use backend::Backend;
 pub use position::LineIndex;

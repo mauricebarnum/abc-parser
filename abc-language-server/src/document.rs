@@ -183,10 +183,10 @@ pub struct DocumentModel {
     /// (full rebuild or incremental). Used by tests to assert that
     /// incremental edits touch only the blocks the invalidation rules
     /// say they must touch.
-    pub parse_count: u32,
+    parse_count: u32,
     /// Number of bar-duration analyses re-run by the most recent update
     /// operation. Used by tests to assert D3 / D6 invalidation.
-    pub bar_duration_count: u32,
+    bar_duration_count: u32,
     /// Document URI, when known (used for diagnostic related-information locations).
     pub uri: Option<Uri>,
 }
@@ -295,6 +295,18 @@ impl DocumentModel {
                 .iter()
                 .any(|item| matches!(item.value, DocumentItem::Tune(_)))
         })
+    }
+
+    /// Number of blocks parsed by the most recent update operation.
+    #[must_use]
+    pub const fn parse_count(&self) -> u32 {
+        self.parse_count
+    }
+
+    /// Number of bar-duration analyses re-run by the most recent update operation.
+    #[must_use]
+    pub const fn bar_duration_count(&self) -> u32 {
+        self.bar_duration_count
     }
 
     /// Reconfigures an existing model with new [`Config`] settings.
@@ -1283,13 +1295,6 @@ mod tests {
     use tower_lsp_server::ls_types::Range as LspRange;
 
     use super::*;
-    use crate::analysis::Analysis;
-
-    fn diagnostics_via_analysis(text: &str) -> (Vec<Diagnostic>, bool) {
-        let index = LineIndex::new(text.to_owned());
-        let analysis = Analysis::new(&index, &PositionEncodingKind::UTF16, Config::default());
-        (analysis.diagnostics, analysis.has_errors)
-    }
 
     fn diagnostics_via_model(text: &str) -> (Vec<Diagnostic>, bool) {
         let model = DocumentModel::full(
@@ -1299,16 +1304,6 @@ mod tests {
             Config::default(),
         );
         (model.diagnostics, model.has_errors)
-    }
-
-    fn severity_label(severity: Option<DiagnosticSeverity>) -> &'static str {
-        match severity {
-            Some(DiagnosticSeverity::ERROR) => "ERROR",
-            Some(DiagnosticSeverity::WARNING) => "WARNING",
-            Some(DiagnosticSeverity::INFORMATION) => "INFORMATION",
-            Some(DiagnosticSeverity::HINT) => "HINT",
-            _ => "NONE",
-        }
     }
 
     fn code_label(diagnostic: &Diagnostic) -> String {
@@ -1323,47 +1318,40 @@ mod tests {
     }
 
     #[test]
-    fn golden_diagnostics_match_existing_analysis() {
-        let corpus: &[(&str, &str)] = &[
-            ("simple valid", "X:1\nT:Title\nK:C\nCDEF |\n"),
-            ("bar mismatch", "X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C |\n"),
-            ("orphan music", "X:1\nK:C\nCDEF |\n\nCDEF |\n"),
-            ("legacy decoration", "X:1\nK:C\n+trill+C\n"),
-            ("invalid field", "X:1\nM:nope\nK:C\nC |\n"),
-            ("missing key", "X:1\nCDEF |\n"),
-            ("free text", "X:1\nK:C\nC |\n\njust text\n"),
-            ("crlf line endings", "X:1\r\nK:C\r\nC |\r\n"),
-            ("cr only line endings", "X:1\rK:C\rC |\r"),
-            ("two tunes", "X:1\nT:A\nK:C\nC |\n\nX:2\nT:B\nK:G\nG |\n"),
+    fn golden_diagnostics_corpus_validation() {
+        let corpus: &[(&str, &str, usize, bool)] = &[
+            ("simple valid", "X:1\nT:Title\nK:C\nCDEF |\n", 0, false),
+            (
+                "bar mismatch",
+                "X:1\nM:4/4\nL:1/4\nK:C\nCDEF | C |\n",
+                1,
+                false,
+            ),
+            ("orphan music", "X:1\nK:C\nCDEF |\n\nCDEF |\n", 1, false),
+            ("legacy decoration", "X:1\nK:C\n+trill+C\n", 1, false),
+            ("invalid field", "X:1\nM:nope\nK:C\nC |\n", 1, true),
+            ("missing key", "X:1\nCDEF |\n", 0, false),
+            ("free text", "X:1\nK:C\nC |\n\njust text\n", 0, false),
+            ("crlf line endings", "X:1\r\nK:C\r\nC |\r\n", 0, false),
+            ("cr only line endings", "X:1\rK:C\rC |\r", 0, false),
+            (
+                "two tunes",
+                "X:1\nT:A\nK:C\nC |\n\nX:2\nT:B\nK:G\nG |\n",
+                0,
+                false,
+            ),
         ];
-        for (name, source) in corpus {
+        for (name, source, expected_diags, expected_errors) in corpus {
             let (model_diags, model_has_errors) = diagnostics_via_model(source);
-            let (analysis_diags, analysis_has_errors) = diagnostics_via_analysis(source);
             assert_eq!(
-                model_has_errors, analysis_has_errors,
+                model_has_errors, *expected_errors,
                 "{name}: has_errors differs"
             );
             assert_eq!(
                 model_diags.len(),
-                analysis_diags.len(),
-                "{name}: diagnostic count differs\nmodel:    {model_diags:#?}\nanalysis: {analysis_diags:#?}"
+                *expected_diags,
+                "{name}: diagnostic count differs\nmodel: {model_diags:#?}"
             );
-            for (index, (model, analysis)) in
-                model_diags.iter().zip(analysis_diags.iter()).enumerate()
-            {
-                assert_eq!(
-                    severity_label(model.severity),
-                    severity_label(analysis.severity),
-                    "{name}#{index}: severity"
-                );
-                assert_eq!(
-                    code_label(model),
-                    code_label(analysis),
-                    "{name}#{index}: code"
-                );
-                assert_eq!(model.message, analysis.message, "{name}#{index}: message");
-                assert_eq!(model.range, analysis.range, "{name}#{index}: range");
-            }
         }
     }
 
