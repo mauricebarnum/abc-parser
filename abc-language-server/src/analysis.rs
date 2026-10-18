@@ -97,57 +97,95 @@ pub const fn error_kind_code(kind: ErrorKind) -> &'static str {
     }
 }
 
-pub fn hover(index: &LineIndex, offset: usize) -> Option<(Range<usize>, String)> {
-    let line = index.line_bounds(offset)?;
-    let text = &index.source()[line.clone()];
-    if text.as_bytes().get(1) == Some(&b':') {
-        let key = text.chars().next()?;
-        let explanation = FIELD_COMPLETIONS
-            .iter()
-            .find_map(|(candidate, description)| (*candidate == key).then_some(*description))
-            .unwrap_or("ABC information field");
-        return Some((
-            line.start..line.start + 1,
-            format!("**{key}:** — {explanation}"),
-        ));
+type ParsedLine = Line<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>;
+
+fn find_line_at_offset(
+    blocks: &[BlockRecord],
+    offset: usize,
+) -> Option<(&ParsedLine, Range<usize>)> {
+    let block = blocks
+        .iter()
+        .find(|b| b.lines.start <= offset && offset <= b.lines.end)?;
+    for spanned in &block.parsed.header {
+        let span = rebase(spanned.span, block.base);
+        if span.start <= offset && offset <= span.end {
+            return Some((&spanned.value, span));
+        }
     }
-    let relative = offset.saturating_sub(line.start).min(text.len());
-    let (start, character) = text
-        .char_indices()
-        .take_while(|(position, _)| *position <= relative)
-        .last()?;
-    let absolute = line.start + start;
-    match character {
-        'A'..='G' | 'a'..='g' => {
-            let suffix = duration_suffix(&text[start + character.len_utf8()..]);
-            let detail = suffix
-                .and_then(|value| parse_note_length(value).ok())
-                .map_or_else(
-                    || "unit note length".to_owned(),
-                    |length| {
-                        let equivalent =
-                            if length.numerator == 1 && length.denominator.is_power_of_two() {
-                                let shorthand = "/".repeat(length.denominator.ilog2() as usize);
-                                let explicit = length.denominator;
-                                format!("; shorthand `{shorthand}` = explicit `/{explicit}`")
-                            } else {
-                                String::new()
-                            };
-                        format!(
-                            "duration multiplier {}/{}{equivalent}",
-                            length.numerator, length.denominator
-                        )
-                    },
-                );
+    for item in &block.parsed.items {
+        if let DocumentItem::Tune(tune) = &item.value {
+            for spanned in &tune.lines {
+                let span = rebase(spanned.span, block.base);
+                if span.start <= offset && offset <= span.end {
+                    return Some((&spanned.value, span));
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn hover(
+    blocks: &[BlockRecord],
+    index: &LineIndex,
+    offset: usize,
+) -> Option<(Range<usize>, String)> {
+    let (line_value, line) = find_line_at_offset(blocks, offset)?;
+    match line_value {
+        Line::Field(field) => {
+            let key = field.key;
+            let explanation = FIELD_COMPLETIONS
+                .iter()
+                .find_map(|(candidate, description)| (*candidate == key).then_some(*description))
+                .unwrap_or("ABC information field");
             Some((
-                absolute..absolute + character.len_utf8(),
-                format!("ABC note `{character}` — {detail}"),
+                line.start..line.start + key.len_utf8(),
+                format!("**{key}:** — {explanation}"),
             ))
         }
-        'z' => Some((absolute..absolute + 1, "Visible rest".to_owned())),
-        'x' => Some((absolute..absolute + 1, "Invisible spacer rest".to_owned())),
-        '|' | ':' => Some((absolute..absolute + 1, "Bar or repeat delimiter".to_owned())),
-        _ => None,
+        Line::Music(_) => {
+            let text = &index.source()[line.clone()];
+            let relative = offset.saturating_sub(line.start).min(text.len());
+            let (start, character) = text
+                .char_indices()
+                .take_while(|(position, _)| *position <= relative)
+                .last()?;
+            let absolute = line.start + start;
+            match character {
+                'A'..='G' | 'a'..='g' => {
+                    let suffix = duration_suffix(&text[start + character.len_utf8()..]);
+                    let detail = suffix
+                        .and_then(|value| parse_note_length(value).ok())
+                        .map_or_else(
+                            || "unit note length".to_owned(),
+                            |length| {
+                                let equivalent = if length.numerator == 1
+                                    && length.denominator.is_power_of_two()
+                                {
+                                    let shorthand = "/".repeat(length.denominator.ilog2() as usize);
+                                    let explicit = length.denominator;
+                                    format!("; shorthand `{shorthand}` = explicit `/{explicit}`")
+                                } else {
+                                    String::new()
+                                };
+                                format!(
+                                    "duration multiplier {}/{}{equivalent}",
+                                    length.numerator, length.denominator
+                                )
+                            },
+                        );
+                    Some((
+                        absolute..absolute + character.len_utf8(),
+                        format!("ABC note `{character}` — {detail}"),
+                    ))
+                }
+                'z' => Some((absolute..absolute + 1, "Visible rest".to_owned())),
+                'x' => Some((absolute..absolute + 1, "Invisible spacer rest".to_owned())),
+                '|' | ':' => Some((absolute..absolute + 1, "Bar or repeat delimiter".to_owned())),
+                _ => None,
+            }
+        }
+        Line::Comment(_) | _ => None,
     }
 }
 
@@ -1056,5 +1094,64 @@ GABc |
                 "C", "G", "D", "A", "F", "Bb", "Eb", "Am", "Em", "Bm", "F#m", "Dm", "Gm", "Cm",
             ]
         );
+    }
+
+    #[test]
+    fn hover_dispatches_on_parsed_line_variant() {
+        let source = "\
+X:1
+T:Sample
+K:C
+% T:commented out
+%%begintext
+1: first item
+a: hello
+%%endtext
+:: C2 D |
+
+1: top-level free text
+a: second free-text line
+";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+
+        // Genuine field line: X:1
+        let x_offset = source.find("X:1").expect("X:1");
+        let (x_range, x_hover) = hover(&model.blocks, &model.index, x_offset).expect("field hover");
+        assert_eq!(x_range, x_offset..x_offset + 1);
+        assert_eq!(x_hover, "**X:** — Tune reference number");
+
+        // Comment line inside tune
+        let comment_offset = source.find("% T:commented").expect("comment");
+        assert_eq!(hover(&model.blocks, &model.index, comment_offset), None);
+
+        // Tune-local %%begintext lines with ':' at byte 1
+        let item_offset = source.find("1: first item").expect("1: first item");
+        assert_eq!(hover(&model.blocks, &model.index, item_offset), None);
+        let hello_offset = source.find("a: hello").expect("a: hello");
+        assert_eq!(hover(&model.blocks, &model.index, hello_offset), None);
+
+        // Music line starting with '::': repeat delimiter and subsequent notes
+        let repeat_offset = source.find(":: C2").expect(":: C2");
+        let (bar_range, bar_hover) =
+            hover(&model.blocks, &model.index, repeat_offset).expect("bar hover");
+        assert_eq!(bar_range, repeat_offset..repeat_offset + 1);
+        assert_eq!(bar_hover, "Bar or repeat delimiter");
+
+        let note_offset = repeat_offset + 3; // 'C' in ":: C2"
+        let (note_range, note_hover) =
+            hover(&model.blocks, &model.index, note_offset).expect("note hover");
+        assert_eq!(note_range, note_offset..note_offset + 1);
+        assert_eq!(note_hover, "ABC note `C` — duration multiplier 2/1");
+
+        // Top-level free text block with ':' at byte 1
+        let free_offset = source.find("1: top-level").expect("1: top-level");
+        assert_eq!(hover(&model.blocks, &model.index, free_offset), None);
+        let free2_offset = source.find("a: second").expect("a: second");
+        assert_eq!(hover(&model.blocks, &model.index, free2_offset), None);
     }
 }
