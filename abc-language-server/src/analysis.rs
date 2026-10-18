@@ -8,6 +8,8 @@ use std::ops::Range;
 use abc_parser::DocumentItem;
 use abc_parser::EmitOptions;
 use abc_parser::ErrorKind;
+use abc_parser::FieldKind;
+use abc_parser::FieldValue;
 use abc_parser::Line;
 use abc_parser::MusicElement;
 use abc_parser::NoteLengthStyle as AbcNoteLengthStyle;
@@ -15,6 +17,7 @@ use abc_parser::SimpleSpan;
 use abc_parser::SourceText;
 use abc_parser::Spanned;
 use abc_parser::ToAbc;
+use abc_parser::Tune;
 use abc_parser::parse_note_length;
 use tower_lsp_server::ls_types::CompletionItem;
 use tower_lsp_server::ls_types::CompletionItemKind;
@@ -215,85 +218,163 @@ fn simple_completions(values: &[&str]) -> Vec<CompletionItem> {
         .collect()
 }
 
-pub fn document_symbols(index: &LineIndex, encoding: &PositionEncodingKind) -> Vec<DocumentSymbol> {
+pub fn document_symbols(
+    blocks: &[BlockRecord],
+    index: &LineIndex,
+    encoding: &PositionEncodingKind,
+) -> Vec<DocumentSymbol> {
     let source = index.source();
-    let mut starts = index
-        .line_iter()
-        .filter(|(_, line)| line.starts_with("X:"))
-        .collect::<Vec<_>>();
-    if starts.is_empty() {
-        return Vec::new();
+    let mut symbols = Vec::new();
+    for record in blocks {
+        for item in &record.parsed.items {
+            if let DocumentItem::Tune(tune) = &item.value
+                && let Some(symbol) =
+                    tune_symbol(tune, item.span, record.base, source, index, encoding)
+            {
+                symbols.push(symbol);
+            }
+        }
     }
-    starts.push((source.len(), ""));
-    let line_set: std::collections::HashSet<usize> =
-        starts.iter().map(|(start, _)| *start).collect();
-    starts
-        .windows(2)
-        .filter_map(|window| {
-            let (start, reference_line) = window[0];
-            let end = window[1].0;
-            let body = &source[start..end];
-            let title = index
-                .line_iter()
-                .filter_map(|(line_start, line)| {
-                    if line_start < start || line_start >= end {
-                        return None;
-                    }
-                    if line_set.contains(&line_start) {
-                        return None;
-                    }
-                    line.strip_prefix("T:").map(str::trim)
-                })
-                .find(|title| !title.is_empty())
-                .map(str::to_owned);
-            let reference = reference_line.trim_start_matches("X:").trim();
-            let name = title.unwrap_or_else(|| format!("Tune {reference}"));
-            let range = index.lsp_range(start..end, encoding)?;
-            let selection_range = index.lsp_range(start..start + reference_line.len(), encoding)?;
-            #[allow(deprecated)]
-            Some(DocumentSymbol {
-                name,
-                detail: Some(format!("X:{reference}")),
-                kind: SymbolKind::MODULE,
-                tags: None,
-                deprecated: None,
-                range,
-                selection_range,
-                children: voice_symbols(index, encoding, start, body),
-            })
-        })
-        .collect()
+    symbols
+}
+
+fn tune_symbol(
+    tune: &Tune<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>,
+    tune_span: SimpleSpan<usize>,
+    base: isize,
+    source: &str,
+    index: &LineIndex,
+    encoding: &PositionEncodingKind,
+) -> Option<DocumentSymbol> {
+    let range = index.lsp_range(rebase(tune_span, base), encoding)?;
+    let reference_field = tune.lines.iter().find_map(|line| match &line.value {
+        Line::Field(field) if field.kind == FieldKind::Reference => {
+            let text = match &field.value {
+                FieldValue::Reference(number) => number.to_string(),
+                FieldValue::Unparsed(raw) | FieldValue::Text(raw) => {
+                    resolve_text(raw, base, source)
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .to_owned()
+                }
+                _ => String::new(),
+            };
+            Some((rebase(line.span, base), text))
+        }
+        _ => None,
+    });
+    let title_field = tune.lines.iter().find_map(|line| match &line.value {
+        Line::Field(field) if field.kind == FieldKind::Title => {
+            let text = match &field.value {
+                FieldValue::Text(raw) | FieldValue::Unparsed(raw) => {
+                    resolve_text(raw, base, source).map(str::trim)
+                }
+                _ => None,
+            }?;
+            (!text.is_empty()).then(|| (rebase(line.span, base), text.to_owned()))
+        }
+        _ => None,
+    });
+    let name = if let Some((_, title)) = &title_field {
+        title.clone()
+    } else if let Some((_, reference)) = &reference_field
+        && !reference.is_empty()
+    {
+        format!("Tune {reference}")
+    } else {
+        "Tune".to_owned()
+    };
+    let detail = reference_field
+        .as_ref()
+        .map(|(_, reference)| format!("X:{reference}"));
+    let selection_span = reference_field
+        .map(|(span, _)| span)
+        .or_else(|| title_field.map(|(span, _)| span))
+        .or_else(|| tune.lines.first().map(|line| rebase(line.span, base)));
+    let selection_range = match selection_span {
+        Some(span) => index.lsp_range(span, encoding)?,
+        None => range,
+    };
+    #[allow(deprecated)]
+    Some(DocumentSymbol {
+        name,
+        detail,
+        kind: SymbolKind::MODULE,
+        tags: None,
+        deprecated: None,
+        range,
+        selection_range,
+        children: voice_symbols(tune, base, source, index, encoding),
+    })
 }
 
 fn voice_symbols(
+    tune: &Tune<SimpleSpan<usize>, SourceText<SimpleSpan<usize>>>,
+    base: isize,
+    source: &str,
     index: &LineIndex,
     encoding: &PositionEncodingKind,
-    base: usize,
-    body: &str,
 ) -> Option<Vec<DocumentSymbol>> {
-    let end = base + body.len();
-    let voices = index
-        .line_iter()
-        .filter_map(|(start, line)| {
-            if start < base || start >= end {
+    let voices = tune
+        .lines
+        .iter()
+        .filter_map(|line| {
+            let Line::Field(field) = &line.value else {
+                return None;
+            };
+            if field.kind != FieldKind::Voice {
                 return None;
             }
-            let id = line.strip_prefix("V:")?.split_whitespace().next()?;
-            let range = index.lsp_range(start..start + line.len(), encoding)?;
+            let line_range = rebase(line.span, base);
+            let range = index.lsp_range(line_range, encoding)?;
+            let (name, selection_range) = match &field.value {
+                FieldValue::Voice(voice) => match &voice.id {
+                    SourceText::Span(id_span) => {
+                        let id_range = rebase(*id_span, base);
+                        let id = source.get(id_range.clone())?.to_owned();
+                        let sel = index.lsp_range(id_range, encoding)?;
+                        (id, sel)
+                    }
+                    SourceText::Synthesized(id) => (id.clone(), range),
+                },
+                FieldValue::Unparsed(SourceText::Span(val_span)) => {
+                    let val_range = rebase(*val_span, base);
+                    let val_text = source.get(val_range.clone())?;
+                    let trimmed = val_text.trim_start();
+                    let leading = val_text.len() - trimmed.len();
+                    let id = trimmed.split_whitespace().next()?;
+                    let id_start = val_range.start + leading;
+                    let id_range = id_start..id_start + id.len();
+                    let sel = index.lsp_range(id_range, encoding)?;
+                    (id.to_owned(), sel)
+                }
+                _ => return None,
+            };
             #[allow(deprecated)]
             Some(DocumentSymbol {
-                name: id.to_owned(),
+                name,
                 detail: Some("Voice".to_owned()),
                 kind: SymbolKind::VARIABLE,
                 tags: None,
                 deprecated: None,
                 range,
-                selection_range: index.lsp_range(start + 2..start + 2 + id.len(), encoding)?,
+                selection_range,
                 children: None,
             })
         })
         .collect::<Vec<_>>();
     (!voices.is_empty()).then_some(voices)
+}
+
+fn resolve_text<'a>(
+    text: &'a SourceText<SimpleSpan<usize>>,
+    base: isize,
+    source: &'a str,
+) -> Option<&'a str> {
+    match text {
+        SourceText::Span(span) => source.get(rebase(*span, base)),
+        SourceText::Synthesized(value) => Some(value.as_str()),
+    }
 }
 
 pub fn folding_ranges(index: &LineIndex) -> Vec<FoldingRange> {
@@ -863,13 +944,17 @@ Some +freetext+ here
 
     #[test]
     fn symbols_and_folds_describe_tunes_voices_and_text_blocks() {
-        let index = LineIndex::new(
-            "%%begintext\nnotes\n%%endtext\nX:7\nT:Example\nV:top\nK:C\nC\n".to_owned(),
+        let source = "%%begintext\nnotes\n%%endtext\n\nX:7\nT:Example\nV:top\nK:C\nC\n";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
         );
-        let symbols = document_symbols(&index, &PositionEncodingKind::UTF16);
+        let symbols = document_symbols(&model.blocks, &model.index, &model.encoding);
         assert_eq!(symbols[0].name, "Example");
         assert_eq!(symbols[0].children.as_ref().map(Vec::len), Some(1));
-        let folds = folding_ranges(&index);
+        let folds = folding_ranges(&model.index);
         assert!(
             folds
                 .iter()
@@ -880,6 +965,53 @@ Some +freetext+ here
                 .iter()
                 .any(|fold| fold.collapsed_text.as_deref() == Some("tune"))
         );
+    }
+
+    #[test]
+    fn document_symbols_excludes_inter_tune_text_and_includes_headerless_tunes() {
+        let source = "\
+X:1
+T:First Tune
+K:C
+CDEF |
+
+Some free text between tunes.
+
+%%begintext
+Typeset text block between tunes.
+X:888
+V:fake
+%%endtext
+
+T:Headerless Tune
+V:melody
+K:G
+GABc |
+";
+        let model = DocumentModel::full(
+            source.to_owned(),
+            0,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+        );
+        let symbols = document_symbols(&model.blocks, &model.index, &model.encoding);
+        assert_eq!(symbols.len(), 2);
+
+        assert_eq!(symbols[0].name, "First Tune");
+        assert_eq!(symbols[0].detail.as_deref(), Some("X:1"));
+        assert_eq!(symbols[0].range.start.line, 0);
+        assert_eq!(symbols[0].range.end.line, 3);
+        assert_eq!(symbols[0].range.end.character, 6);
+        assert!(symbols[0].children.is_none());
+
+        assert_eq!(symbols[1].name, "Headerless Tune");
+        assert_eq!(symbols[1].detail, None);
+        assert_eq!(symbols[1].range.start.line, 13);
+        assert_eq!(symbols[1].range.end.line, 16);
+        assert_eq!(symbols[1].range.end.character, 6);
+        let voices = symbols[1].children.as_ref().expect("voice children");
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].name, "melody");
     }
 
     #[test]
