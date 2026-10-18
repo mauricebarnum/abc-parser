@@ -30,9 +30,9 @@ resulted in working code that I didn't like.
 
 The minimum supported Rust version is 1.95.
 
-`cargo doc --no-deps --open` renders the architecture diagrams as inline SVG.
-The generated documentation does not need network access or JavaScript to
-display them.
+`cargo doc --no-deps --all-features --open` (or `--features doc-mermaid`)
+renders architecture diagrams in the browser using [aquamarine](https://crates.io/crates/aquamarine).
+
 
 Run the complete test suite with:
 
