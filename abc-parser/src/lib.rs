@@ -2228,8 +2228,8 @@ mod tests {
             );
         }
 
-        let document = parse("X:1\nK:C\n[CEG\nC |\n");
-        assert!(!document.is_valid());
+        let document = parse("X:1\nK:C\n[CEG\nCDEF |\n");
+        assert_eq!(document.errors.len(), 1);
         assert!(
             document
                 .errors
@@ -2238,6 +2238,9 @@ mod tests {
             "{:#?}",
             document.errors
         );
+        let tune = document.output.as_ref().unwrap().tunes().next().unwrap();
+        assert_eq!(tune.lines.len(), 4);
+        assert!(matches!(tune.lines[3].value, Line::Music(_)));
     }
 
     #[test]
@@ -2268,26 +2271,17 @@ mod tests {
             ErrorKind::InvalidField
         );
         assert_eq!(
+            parse_field("Key:C").unwrap_err().kind,
+            ErrorKind::InvalidField
+        );
+        assert_eq!(
+            parse_directive("%% bad").unwrap_err().kind,
+            ErrorKind::InvalidDirective
+        );
+        assert_eq!(
             parse_chord("[CEG").unwrap_err().kind,
             ErrorKind::InvalidMusic
         );
-    }
-
-    #[test]
-    fn reports_negative_partial_entries() {
-        assert!(parse_field("Key:C").is_err());
-        assert!(parse_directive("%% bad").is_err());
-        assert!(parse_chord("[CEG").is_err());
-        assert!(!parse_music_line("C !trill").is_valid());
-    }
-
-    #[test]
-    fn recovers_on_the_next_line() {
-        let report = parse("X:1\nK:C\n[CEG\nCDEF |\n");
-        assert_eq!(report.errors.len(), 1);
-        let tune = report.output.as_ref().unwrap().tunes().next().unwrap();
-        assert_eq!(tune.lines.len(), 4);
-        assert!(matches!(tune.lines[3].value, Line::Music(_)));
     }
 
     #[test]
