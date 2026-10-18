@@ -83,8 +83,14 @@ struct DocumentState {
 }
 
 impl DocumentState {
-    fn new(text: String, version: i32, encoding: &PositionEncodingKind, config: Config) -> Self {
-        let model = DocumentModel::full(text, version, encoding.clone(), config);
+    fn new(
+        text: String,
+        version: i32,
+        encoding: &PositionEncodingKind,
+        config: Config,
+        uri: Option<Uri>,
+    ) -> Self {
+        let model = DocumentModel::full_with_uri(text, version, encoding.clone(), config, uri);
         Self {
             version,
             model,
@@ -121,9 +127,10 @@ async fn analyze_document(
     version: i32,
     encoding: PositionEncodingKind,
     config: Config,
+    uri: Option<Uri>,
 ) -> Arc<DocumentState> {
     tokio::task::spawn_blocking(move || {
-        Arc::new(DocumentState::new(text, version, &encoding, config))
+        Arc::new(DocumentState::new(text, version, &encoding, config, uri))
     })
     .await
     .expect("ABC analysis task should not panic")
@@ -457,7 +464,14 @@ impl LanguageServer for Backend {
         let item = params.text_document;
         let config = self.config_for_uri(&item.uri).await;
         let encoding = self.state.read().await.encoding.clone();
-        let document = analyze_document(item.text, item.version, encoding, config).await;
+        let document = analyze_document(
+            item.text,
+            item.version,
+            encoding,
+            config,
+            Some(item.uri.clone()),
+        )
+        .await;
         {
             let mut state = self.state.write().await;
             state
@@ -498,7 +512,7 @@ impl LanguageServer for Backend {
                 let Some(new_text) = full_replacement_text(&params.content_changes) else {
                     return;
                 };
-                analyze_document(new_text, version, encoding, config).await
+                analyze_document(new_text, version, encoding, config, Some(uri.clone())).await
             }
             Some(previous_model) => {
                 analyze_incremental(
@@ -844,11 +858,18 @@ async fn analyze_incremental(
                 version,
                 &encoding,
                 config,
+                previous.uri.clone(),
             ));
         };
         let next = DocumentModel::apply_changes(&previous, &changes, new_text.clone());
         let Ok(mut model) = next else {
-            return Arc::new(DocumentState::new(new_text, version, &encoding, config));
+            return Arc::new(DocumentState::new(
+                new_text,
+                version,
+                &encoding,
+                config,
+                previous.uri.clone(),
+            ));
         };
         model.version = version;
         Arc::new(DocumentState::from_model(model, &encoding))
