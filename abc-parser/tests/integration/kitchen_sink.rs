@@ -102,22 +102,6 @@ fn canonicalize_decorations(document: &mut OwnedDocument<SimpleSpan<usize>>) {
 }
 
 #[test]
-fn parses_kitchen_sink_with_spans() {
-    let report = parse_owned(KITCHEN_SINK);
-    assert!(report.errors.is_empty(), "{:#?}", report.errors);
-    let document = report.output.as_ref().unwrap();
-    assert_eq!(document.tunes().count(), 2);
-    for line in document
-        .header
-        .iter()
-        .chain(document.tunes().flat_map(|tune| &tune.lines))
-    {
-        assert!(line.span.end <= KITCHEN_SINK.len());
-        assert!(line.span.start <= line.span.end);
-    }
-}
-
-#[test]
 fn mutations_report_bounded_faults_and_keep_later_tunes() {
     for needle in ["[CEG]4", "{GAG}", "!trill!", "K:G mixolydian"] {
         let start = KITCHEN_SINK.find(needle).unwrap();
@@ -153,6 +137,14 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
         .into_owned(KITCHEN_SINK)
         .unwrap();
     assert_eq!(string_owned.tunes().count(), 2);
+    for line in string_owned
+        .header
+        .iter()
+        .chain(string_owned.tunes().flat_map(|tune| &tune.lines))
+    {
+        assert!(line.span.end <= KITCHEN_SINK.len());
+        assert!(line.span.start <= line.span.end);
+    }
 
     let characters: Vec<char> = KITCHEN_SINK.chars().collect();
     let character_result = parse(characters.as_slice());
@@ -168,6 +160,14 @@ fn chumsky_document_parser_accepts_string_and_character_inputs() {
         .into_owned(characters.as_slice())
         .unwrap();
     assert_eq!(character_owned.tunes().count(), 2);
+    for line in character_owned
+        .header
+        .iter()
+        .chain(character_owned.tunes().flat_map(|tune| &tune.lines))
+    {
+        assert!(line.span.end <= characters.len());
+        assert!(line.span.start <= line.span.end);
+    }
 }
 
 #[test]
