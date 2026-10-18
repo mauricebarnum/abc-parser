@@ -728,27 +728,28 @@ fn whitespace_edits(
     let source = index.source();
     let mut edits = Vec::new();
     if options.trim_trailing_whitespace == Some(true) {
-        let mut base = 0;
-        for line in source.split_inclusive('\n') {
-            let content = line.trim_end_matches(['\r', '\n']);
+        for (line_start, content) in index.line_iter() {
             let trimmed = content.trim_end_matches([' ', '\t']);
             if trimmed.len() < content.len() {
                 edits.push(TextEdit::new(
                     index
-                        .lsp_range(base + trimmed.len()..base + content.len(), encoding)
+                        .lsp_range(
+                            line_start + trimmed.len()..line_start + content.len(),
+                            encoding,
+                        )
                         .expect("ASCII whitespace is on character boundaries"),
                     String::new(),
                 ));
             }
-            base += line.len();
         }
     }
-    if options.insert_final_newline == Some(true) && !source.ends_with('\n') {
+    if options.insert_final_newline == Some(true) && !source.ends_with(['\n', '\r']) {
+        let newline = detected_line_ending(source);
         edits.push(TextEdit::new(
             index
                 .lsp_range(source.len()..source.len(), encoding)
                 .expect("end of source is a character boundary"),
-            "\n".to_owned(),
+            newline.to_owned(),
         ));
     }
     if options.trim_final_newlines == Some(true) {
@@ -783,6 +784,21 @@ fn whitespace_edits(
         }
     }
     edits
+}
+
+fn detected_line_ending(source: &str) -> &'static str {
+    let bytes = source.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\r' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                return "\r\n";
+            }
+            return "\r";
+        } else if bytes[i] == b'\n' {
+            return "\n";
+        }
+    }
+    "\n"
 }
 
 #[cfg(test)]
@@ -885,5 +901,26 @@ mod tests {
         assert_eq!(edits[0].range.start, Position::new(1, 0));
         assert_eq!(edits[0].range.end, Position::new(2, 0));
         assert_eq!(edits[0].new_text, "");
+    }
+
+    #[test]
+    fn insert_final_newline_respects_existing_line_endings() {
+        let options = FormattingOptions {
+            insert_final_newline: Some(true),
+            ..FormattingOptions::default()
+        };
+        for terminator in ["\n", "\r\n", "\r"] {
+            let existing = LineIndex::new(format!("X:1{terminator}K:C{terminator}"));
+            let edits = whitespace_edits(&existing, &PositionEncodingKind::UTF16, &options);
+            assert!(
+                edits.is_empty(),
+                "document already ending in {terminator:?} must not receive another newline"
+            );
+
+            let missing = LineIndex::new(format!("X:1{terminator}K:C"));
+            let edits = whitespace_edits(&missing, &PositionEncodingKind::UTF16, &options);
+            assert_eq!(edits.len(), 1, "missing final newline for {terminator:?}");
+            assert_eq!(edits[0].new_text, terminator);
+        }
     }
 }
