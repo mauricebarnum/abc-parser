@@ -37,8 +37,9 @@ and character inputs, physical-line recovery, and kitchen-sink parsing.
 
 The pre-commit configuration runs nightly rustfmt, strict Clippy with
 `CARGO_BUILD_WARNINGS=deny`, Nextest, and doctests. CI runs strict Clippy, builds
-all targets, and runs the Cargo test suite. The warnings-as-errors rustdoc
-command succeeds when run manually but is not part of either automated check.
+all targets, runs unit and integration tests via Nextest, and runs doctests via
+`cargo test --doc --all-features`. The warnings-as-errors rustdoc command succeeds
+when run manually but is not part of either automated check.
 
 ## Remaining validation gaps
 
@@ -49,8 +50,6 @@ behavior:
 1. Add `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` to both
    pre-commit and CI so broken links and other rustdoc warnings fail automated
    checks.
-2. Align CI with the repository's documented local checks by adding nightly
-   rustfmt, installing and running Nextest for unit and integration tests, and
-   retaining an explicit `cargo test --doc --all-features` step for doctests.
+2. Align CI with local checks by adding nightly rustfmt check step.
 3. Keep the span-unit, recovery-boundary, and ownership-conversion tests as
    contract tests when parser inputs or AST text storage gain new variants.
