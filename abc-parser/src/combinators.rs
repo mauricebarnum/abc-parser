@@ -306,7 +306,7 @@ where
 }
 
 /// Parses an optional ABC note-length suffix and computes its rational value.
-fn note_length<'src, I>() -> impl Parser<'src, I, NoteLength, Extra<'src, I>> + Clone
+pub fn note_length_parser<'src, I>() -> impl Parser<'src, I, NoteLength, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
@@ -428,7 +428,7 @@ where
         .or_not()
         .then(pitch_letter())
         .then(octave_modifier())
-        .then(note_length())
+        .then(note_length_parser())
         .map(|(((accidental, letter), octave_modifier), length)| Note {
             pitch: Pitch {
                 class: letter.class,
@@ -451,7 +451,7 @@ where
         just('z').to(RestKind::Visible),
         just('x').to(RestKind::Invisible),
     ))
-    .then(note_length())
+    .then(note_length_parser())
     .map(|(kind, length)| Rest { kind, length })
     .labelled("rest")
     .as_context()
@@ -1155,7 +1155,7 @@ where
         .at_least(1)
         .collect::<Vec<_>>()
         .delimited_by(just('['), just(']'))
-        .then(note_length())
+        .then(note_length_parser())
         .map(|(members, length)| Chord { members, length })
         .labelled("chord")
         .as_context()
