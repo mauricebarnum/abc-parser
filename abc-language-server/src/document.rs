@@ -35,11 +35,14 @@ use abc_parser::bar_duration_warnings;
 use abc_parser::parse_blocks;
 use abc_parser::version_marker;
 use tower_lsp_server::ls_types::Diagnostic;
+use tower_lsp_server::ls_types::DiagnosticRelatedInformation;
 use tower_lsp_server::ls_types::DiagnosticSeverity;
 use tower_lsp_server::ls_types::DiagnosticTag;
+use tower_lsp_server::ls_types::Location;
 use tower_lsp_server::ls_types::NumberOrString;
 use tower_lsp_server::ls_types::PositionEncodingKind;
 use tower_lsp_server::ls_types::TextDocumentContentChangeEvent;
+use tower_lsp_server::ls_types::Uri;
 
 use crate::analysis::error_kind_code;
 use crate::config::Config;
@@ -184,6 +187,8 @@ pub struct DocumentModel {
     /// Number of bar-duration analyses re-run by the most recent update
     /// operation. Used by tests to assert D3 / D6 invalidation.
     pub bar_duration_count: u32,
+    /// Document URI, when known (used for diagnostic related-information locations).
+    pub uri: Option<Uri>,
 }
 
 impl DocumentModel {
@@ -198,6 +203,18 @@ impl DocumentModel {
         version: i32,
         encoding: PositionEncodingKind,
         config: Config,
+    ) -> Self {
+        Self::full_with_uri(text, version, encoding, config, None)
+    }
+
+    /// Rebuilds the model from `text` with an associated document URI, parsing
+    /// the entire document in one [`abc_parser::parse_blocks`] call.
+    pub fn full_with_uri(
+        text: String,
+        version: i32,
+        encoding: PositionEncodingKind,
+        config: Config,
+        uri: Option<Uri>,
     ) -> Self {
         let index = LineIndex::new(text.clone());
         let first_line = first_line(&text);
@@ -250,7 +267,7 @@ impl DocumentModel {
         let has_errors = blocks
             .iter()
             .any(|record| !record.diagnostics.errors.is_empty());
-        let diagnostics = assemble_diagnostics(&blocks, &index, &encoding, config);
+        let diagnostics = assemble_diagnostics(&blocks, &index, &encoding, config, uri.as_ref());
 
         Self {
             version,
@@ -265,6 +282,7 @@ impl DocumentModel {
             has_errors,
             parse_count,
             bar_duration_count,
+            uri,
         }
     }
 
@@ -291,11 +309,12 @@ impl DocumentModel {
     #[must_use]
     pub fn reconfigure(&self, config: Config) -> Self {
         if self.config.validation.strict != config.validation.strict {
-            return Self::full(
+            return Self::full_with_uri(
                 self.text.clone(),
                 self.version,
                 self.encoding.clone(),
                 config,
+                self.uri.clone(),
             );
         }
 
@@ -352,7 +371,13 @@ impl DocumentModel {
             }
         }
 
-        let diagnostics = assemble_diagnostics(&blocks, &self.index, &self.encoding, config);
+        let diagnostics = assemble_diagnostics(
+            &blocks,
+            &self.index,
+            &self.encoding,
+            config,
+            self.uri.as_ref(),
+        );
         let has_errors = blocks
             .iter()
             .any(|record| !record.diagnostics.errors.is_empty());
@@ -370,6 +395,7 @@ impl DocumentModel {
             has_errors,
             parse_count: 0,
             bar_duration_count,
+            uri: self.uri.clone(),
         }
     }
 
@@ -580,8 +606,13 @@ impl DocumentModel {
         let has_errors = blocks
             .iter()
             .any(|record| !record.diagnostics.errors.is_empty());
-        let diagnostics =
-            assemble_diagnostics(&blocks, &index, &previous.encoding, previous.config);
+        let diagnostics = assemble_diagnostics(
+            &blocks,
+            &index,
+            &previous.encoding,
+            previous.config,
+            previous.uri.as_ref(),
+        );
 
         Ok(Self {
             version: previous.version,
@@ -596,6 +627,7 @@ impl DocumentModel {
             has_errors,
             parse_count,
             bar_duration_count,
+            uri: previous.uri.clone(),
         })
     }
 }
@@ -728,23 +760,22 @@ const fn severity(level: DiagnosticLevel) -> Option<DiagnosticSeverity> {
 }
 
 fn build_diagnostic(
-    index: &LineIndex,
-    encoding: &PositionEncodingKind,
-    range: Range<usize>,
+    range: tower_lsp_server::ls_types::Range,
     severity: DiagnosticSeverity,
     code: &'static str,
     message: String,
+    related_information: Option<Vec<DiagnosticRelatedInformation>>,
     tags: Option<Vec<DiagnosticTag>>,
-) -> Option<Diagnostic> {
-    Some(Diagnostic::new(
-        index.lsp_range(range, encoding)?,
+) -> Diagnostic {
+    Diagnostic::new(
+        range,
         Some(severity),
         Some(NumberOrString::String(code.to_owned())),
         Some("abc-parser".to_owned()),
         message,
-        None,
+        related_information,
         tags,
-    ))
+    )
 }
 
 pub(crate) const fn rebase(span: SimpleSpan<usize>, base: isize) -> Range<usize> {
@@ -1114,6 +1145,33 @@ fn build_region_blocks(parsed_region: &[ParsedBlock], region_base: usize) -> Vec
         .collect()
 }
 
+fn warning_related_info(
+    warning: &TypedWarning,
+    index: &LineIndex,
+    encoding: &PositionEncodingKind,
+    uri: Option<&Uri>,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    if warning.related.is_empty() {
+        return None;
+    }
+    let target_uri = match uri {
+        Some(u) => Cow::Borrowed(u),
+        None => Cow::Owned("file:///".parse::<Uri>().expect("valid fallback URI")),
+    };
+    let items: Vec<DiagnosticRelatedInformation> = warning
+        .related
+        .iter()
+        .filter_map(|related| {
+            let range = index.lsp_range(related.span.clone(), encoding)?;
+            Some(DiagnosticRelatedInformation {
+                location: Location::new(target_uri.as_ref().clone(), range),
+                message: related.message.clone(),
+            })
+        })
+        .collect();
+    (!items.is_empty()).then_some(items)
+}
+
 /// Assembles the publishable diagnostics list from the per-block typed
 /// diagnostics, preserving the ordering `Analysis::new` produced today:
 /// parser errors, parser warnings, bar-duration warnings, legacy
@@ -1124,22 +1182,23 @@ fn assemble_diagnostics(
     index: &LineIndex,
     encoding: &PositionEncodingKind,
     config: Config,
+    uri: Option<&Uri>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     // Parser errors in source order.
     for record in blocks {
         for error in &record.diagnostics.errors {
-            if let Some(diagnostic) = build_diagnostic(
-                index,
-                encoding,
-                error.span.clone(),
+            let Some(range) = index.lsp_range(error.span.clone(), encoding) else {
+                continue;
+            };
+            diagnostics.push(build_diagnostic(
+                range,
                 DiagnosticSeverity::ERROR,
                 error.code,
                 error.message.clone(),
                 None,
-            ) {
-                diagnostics.push(diagnostic);
-            }
+                None,
+            ));
         }
     }
     // Parser warnings in source order.
@@ -1153,17 +1212,18 @@ fn assemble_diagnostics(
             let Some(severity) = severity(level) else {
                 continue;
             };
-            if let Some(diagnostic) = build_diagnostic(
-                index,
-                encoding,
-                warning.span.clone(),
+            let Some(range) = index.lsp_range(warning.span.clone(), encoding) else {
+                continue;
+            };
+            let related_information = warning_related_info(warning, index, encoding, uri);
+            diagnostics.push(build_diagnostic(
+                range,
                 severity,
                 warning.code,
                 warning.message.clone(),
+                related_information,
                 None,
-            ) {
-                diagnostics.push(diagnostic);
-            }
+            ));
         }
     }
     // Bar-duration warnings in tune (block) order.
@@ -1172,17 +1232,17 @@ fn assemble_diagnostics(
             if let Some(analysis) = &record.tune_analysis {
                 for warning in &analysis.warnings {
                     let span = rebase(warning.span, record.base);
-                    if let Some(diagnostic) = build_diagnostic(
-                        index,
-                        encoding,
-                        span,
+                    let Some(range) = index.lsp_range(span, encoding) else {
+                        continue;
+                    };
+                    diagnostics.push(build_diagnostic(
+                        range,
                         level,
                         "bar-duration",
                         bar_duration_message(warning.message.clone()),
                         None,
-                    ) {
-                        diagnostics.push(diagnostic);
-                    }
+                        None,
+                    ));
                 }
             }
         }
@@ -1191,17 +1251,17 @@ fn assemble_diagnostics(
     if let Some(level) = severity(config.validation.legacy_decoration) {
         for record in blocks {
             for range in &record.diagnostics.legacy_decoration_ranges {
-                if let Some(diagnostic) = build_diagnostic(
-                    index,
-                    encoding,
-                    range.clone(),
+                let Some(range) = index.lsp_range(range.clone(), encoding) else {
+                    continue;
+                };
+                diagnostics.push(build_diagnostic(
+                    range,
                     level,
                     "legacy-decoration",
                     "legacy +name+ decoration; prefer !name!".to_owned(),
+                    None,
                     Some(vec![DiagnosticTag::DEPRECATED]),
-                ) {
-                    diagnostics.push(diagnostic);
-                }
+                ));
             }
         }
     }
@@ -1907,5 +1967,59 @@ mod tests {
                     && d.code == Some(NumberOrString::String("bar-duration".to_owned()))),
             "reconfigured diagnostics must reflect Warning severity"
         );
+    }
+
+    #[test]
+    fn warning_related_information_populated_with_uri() {
+        let uri: Uri = "file:///test.abc".parse().expect("valid URI");
+        let source = "X:1\nT:A\nK:C\nCDEF |\n\nCDEF |\n";
+        let model = DocumentModel::full_with_uri(
+            source.to_owned(),
+            1,
+            PositionEncodingKind::UTF16,
+            Config::default(),
+            Some(uri.clone()),
+        );
+
+        let warning_diag = model
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(NumberOrString::String("missing-reference".to_owned())))
+            .expect("missing-reference diagnostic must exist");
+
+        let related_info = warning_diag
+            .related_information
+            .as_ref()
+            .expect("related_information must be populated");
+        assert_eq!(related_info.len(), 1);
+        assert_eq!(related_info[0].location.uri, uri);
+        assert_eq!(related_info[0].message, "preceding information field block");
+        assert_eq!(related_info[0].location.range.start.line, 0);
+
+        // Incremental edit within the second block should preserve related_information and uri.
+        let edit = TextDocumentContentChangeEvent {
+            range: Some(tower_lsp_server::ls_types::Range::new(
+                tower_lsp_server::ls_types::Position::new(5, 0),
+                tower_lsp_server::ls_types::Position::new(5, 0),
+            )),
+            range_length: None,
+            text: "G ".to_owned(),
+        };
+        let updated_text = "X:1\nT:A\nK:C\nCDEF |\n\nG CDEF |\n".to_owned();
+        let updated =
+            DocumentModel::apply_changes(&model, std::slice::from_ref(&edit), updated_text)
+                .expect("incremental update succeeds");
+
+        let updated_warning = updated
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(NumberOrString::String("missing-reference".to_owned())))
+            .expect("missing-reference diagnostic must exist after incremental edit");
+        let updated_related = updated_warning
+            .related_information
+            .as_ref()
+            .expect("related_information must still be populated");
+        assert_eq!(updated_related[0].location.uri, uri);
+        assert_eq!(updated_related[0].location.range.start.line, 0);
     }
 }
