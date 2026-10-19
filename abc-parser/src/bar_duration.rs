@@ -51,7 +51,8 @@ pub enum BarDurationPickupPolicy {
     /// Do not infer pickup bars.
     #[default]
     None,
-    /// Allow an underfull first bar in each voice and metered section.
+    /// Allow an underfull first bar in each voice and metered section,
+    /// pairing complementary underfull bars at section boundaries.
     OpeningBar,
     /// Pair complementary underfull bars only at section boundaries.
     FirstAndLast,
@@ -258,6 +259,7 @@ struct BarDuration {
     expected: Duration,
     beat_denominator: u128,
     position: usize,
+    opening: bool,
     span: SimpleSpan<usize>,
 }
 
@@ -611,16 +613,17 @@ fn process_completed_bar(
             .expect("a determinate expected duration has an effective meter")
             .beat_denominator,
         position,
+        opening: opening_bar,
         span,
     };
-    if duration.is_shorter_than(expected) {
-        if options.pickup_policy == BarDurationPickupPolicy::OpeningBar && opening_bar {
-            return;
-        }
-        if options.pickup_policy == BarDurationPickupPolicy::FirstAndLast {
-            voice.incomplete_bars.push(bar);
-            return;
-        }
+    if duration.is_shorter_than(expected)
+        && matches!(
+            options.pickup_policy,
+            BarDurationPickupPolicy::OpeningBar | BarDurationPickupPolicy::FirstAndLast
+        )
+    {
+        voice.incomplete_bars.push(bar);
+        return;
     }
     warnings.push(bar_duration_warning(&bar));
 }
@@ -650,10 +653,7 @@ fn apply_bar_line_boundary(
 
 fn has_complementary_boundary_pair(voice: &VoiceTiming) -> bool {
     voice.incomplete_bars.len() >= 2
-        && voice
-            .incomplete_bars
-            .first()
-            .is_some_and(|bar| bar.position == 0)
+        && voice.incomplete_bars.first().is_some_and(|bar| bar.opening)
         && voice
             .incomplete_bars
             .last()
@@ -681,12 +681,12 @@ fn finish_pickup_section(
     if bars.is_empty() {
         return;
     }
-    // ABC 2.1 does not define pickup inference. Lint accepts only a
-    // complementary pair at the boundaries of one metered section.
-    debug_assert_eq!(pickup_policy, BarDurationPickupPolicy::FirstAndLast);
-
+    // ABC 2.1 does not define pickup inference. FirstAndLast accepts only a
+    // complementary pair at the boundaries of one metered section. OpeningBar
+    // additionally accepts an underfull opening bar without a complementary
+    // closing bar.
     let boundary_pair = bars.len() >= 2
-        && bars.first().is_some_and(|bar| bar.position == 0)
+        && bars.first().is_some_and(|bar| bar.opening)
         && bars
             .last()
             .is_some_and(|bar| bar.position + 1 == completed_bars)
@@ -695,7 +695,22 @@ fn finish_pickup_section(
             bars.last().expect("a boundary pair has a last bar"),
         );
     for (index, bar) in bars.iter().enumerate() {
-        if !boundary_pair || (index != 0 && index + 1 != bars.len()) {
+        let is_opening = bar.opening;
+        let is_closing = index + 1 == bars.len() && bar.position + 1 == completed_bars;
+        let is_boundary = (index == 0 && is_opening) || is_closing;
+
+        let should_warn = match pickup_policy {
+            BarDurationPickupPolicy::FirstAndLast => !boundary_pair || !is_boundary,
+            BarDurationPickupPolicy::OpeningBar => {
+                if boundary_pair {
+                    !is_boundary
+                } else {
+                    !is_opening
+                }
+            }
+            BarDurationPickupPolicy::None => true,
+        };
+        if should_warn {
             warnings.push(bar_duration_warning(bar));
         }
     }
@@ -870,5 +885,28 @@ mod tests {
             .pickup_policy(BarDurationPickupPolicy::OpeningBar)
             .check_trailing_bar(false);
         assert_eq!(warnings(source, options), []);
+    }
+
+    #[test]
+    fn opening_pickup_pairs_with_complementary_closing_bar_at_section_boundaries() {
+        let source = "X:1\nM:6/8\nL:1/8\nK:Am\na | e2a c2a | cde A2 |]\na | f2a fga | A3 A2 |]\n";
+        let options = BarDurationOptions::new()
+            .pickup_policy(BarDurationPickupPolicy::OpeningBar)
+            .check_trailing_bar(false);
+        assert_eq!(warnings(source, options), []);
+    }
+
+    #[test]
+    fn noncomplementary_closing_bar_warns_under_opening_bar_policy() {
+        let source = "X:1\nM:6/8\nL:1/8\nK:Am\na | e2a c2a | cde A |]\n";
+        let options = BarDurationOptions::new()
+            .pickup_policy(BarDurationPickupPolicy::OpeningBar)
+            .check_trailing_bar(false);
+        let found = warnings(source, options);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].message,
+            "bar duration is 4 beats, expected 6 beats under the effective meter"
+        );
     }
 }

@@ -841,6 +841,39 @@ mod tests {
     }
 
     #[test]
+    fn section_pickups_with_complementary_closing_bars_have_no_diagnostics() {
+        let source = concat!(
+            "X:1\n",
+            "T:Abbotts Bromley Horn Dance (Am)\n",
+            "M:6/8\n",
+            "K:Am\n",
+            "a \\\n",
+            "| \"Am\"e2a c2a | \"Am\"e2a A2c | \"Dm\"Bcd \"Am\"cde | \"E7\"dcB \"Am\"c2a \\\n",
+            "| \"Am\"e2a c2a | \"Am\"e2a A2c | \"Dm\"Bcd \"Am\"cde | \"E7\"dcB \"Am\"A2 |]\n",
+            "a \\\n",
+            "| \"Dm\"f2a fga | \"Dm\"d2f def | \"G\"Bcd cBA | \"G\"GAB \"C\"E2c' \\\n",
+            "| \"Am\"a2c' abc' | \"Dm\"f2a fga | \"Em\"gfe dcB | \"Am\"A3 A2 |]\n",
+            "d \\\n",
+            "| \"Am\"efe \"Dm\"f3 | \"Am\"efe \"Dm\"a3 | \"Am\"efe \"E7\"dcB | \"Am\"c3 \"E7\"c2d \\\n",
+            "| \"Am\"efe \"Dm\"f3 | \"Am\"efe \"Dm\"a3 | \"Am\"efe \"E7\"dcB | \"Am\"A3 A2 |]\n",
+        );
+        let index = LineIndex::new(source.to_owned());
+        let encoding = PositionEncodingKind::UTF16;
+        let analysis = Analysis::new(&index, &encoding, Config::default());
+        let bar_diagnostics = analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == Some(NumberOrString::String("bar-duration".to_owned()))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            bar_diagnostics.is_empty(),
+            "expected no bar-duration diagnostics, got: {bar_diagnostics:#?}"
+        );
+    }
+
+    #[test]
     fn analysis_preserves_variant_ending_parser_diagnostics() {
         let index = LineIndex::new("X:1\nK:C\n:| 2 c\n".to_owned());
         let analysis = Analysis::new(&index, &PositionEncodingKind::UTF16, Config::default());
