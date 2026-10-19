@@ -193,9 +193,35 @@ fn octave_accepts_positive_and_negative_values() {
     let downward = run(&["--semitones", "0", "--octave", "-1"]);
     assert!(upward.status.success(), "{upward:?}");
     assert!(downward.status.success(), "{downward:?}");
-    assert_ne!(upward.stdout, KITCHEN_SINK.as_bytes());
-    assert_ne!(downward.stdout, KITCHEN_SINK.as_bytes());
-    assert_ne!(upward.stdout, downward.stdout);
+
+    let up_source = String::from_utf8(upward.stdout).unwrap();
+    let down_source = String::from_utf8(downward.stdout).unwrap();
+    let up_reparsed = parse_owned(&up_source);
+    assert!(up_reparsed.is_valid(), "{:#?}", up_reparsed.errors);
+    let down_reparsed = parse_owned(&down_source);
+    assert!(down_reparsed.is_valid(), "{:#?}", down_reparsed.errors);
+
+    let compact_up = run_stdin(
+        "X:1\nK:C\nC [EG] {B} |\n",
+        &["--semitones", "0", "--octave", "1"],
+    );
+    assert!(compact_up.status.success());
+    let compact_up_text = String::from_utf8(compact_up.stdout).unwrap();
+    assert!(
+        compact_up_text.contains("c [eg] {b} |"),
+        "{compact_up_text}"
+    );
+
+    let compact_down = run_stdin(
+        "X:1\nK:C\nC [EG] {B} |\n",
+        &["--semitones", "0", "--octave", "-1"],
+    );
+    assert!(compact_down.status.success());
+    let compact_down_text = String::from_utf8(compact_down.stdout).unwrap();
+    assert!(
+        compact_down_text.contains("C, [E,G,] {B,} |"),
+        "{compact_down_text}"
+    );
 }
 
 #[test]

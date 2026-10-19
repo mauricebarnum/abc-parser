@@ -1127,8 +1127,11 @@ mod tests {
         let _ = next_publish(client).await;
     }
 
-    #[tokio::test]
-    async fn ranged_did_change_publishes_full_sync_baseline_diagnostics() {
+    async fn open_test_document(
+        uri: &str,
+        text: &str,
+        version: i64,
+    ) -> (LspService<Backend>, tower_lsp_server::ClientSocket) {
         let (mut service, mut client) = LspService::new(Backend::new);
         let initialize = Request::build("initialize")
             .params(json!({
@@ -1150,10 +1153,10 @@ mod tests {
         let open = Request::build("textDocument/didOpen")
             .params(json!({
                 "textDocument": {
-                    "uri": "file:///tmp/incremental.abc",
+                    "uri": uri,
                     "languageId": "abc",
-                    "version": 1,
-                    "text": "X:1\nK:C\nCDEF |\n"
+                    "version": version,
+                    "text": text,
                 }
             }))
             .finish();
@@ -1165,6 +1168,13 @@ mod tests {
             .await
             .expect("open handled");
         drain_initial_diagnostics(&mut client).await;
+        (service, client)
+    }
+
+    #[tokio::test]
+    async fn ranged_did_change_publishes_full_sync_baseline_diagnostics() {
+        let (mut service, mut client) =
+            open_test_document("file:///tmp/incremental.abc", "X:1\nK:C\nCDEF |\n", 1).await;
 
         // Replace "CDEF" with "CDEF GABc" via a ranged edit. The resulting
         // text is exactly what a full-sync baseline would produce.
@@ -1235,42 +1245,8 @@ mod tests {
 
     #[tokio::test]
     async fn did_change_ignores_regressed_versions() {
-        let (mut service, mut client) = LspService::new(Backend::new);
-        let _ = service
-            .ready()
-            .await
-            .expect("service ready")
-            .call(
-                Request::build("initialize")
-                    .params(json!({
-                        "capabilities": {
-                            "general": { "positionEncodings": ["utf-16"] }
-                        }
-                    }))
-                    .id(1)
-                    .finish(),
-            )
-            .await
-            .expect("initialize handled");
-        let _ = service
-            .ready()
-            .await
-            .expect("service ready")
-            .call(
-                Request::build("textDocument/didOpen")
-                    .params(json!({
-                        "textDocument": {
-                            "uri": "file:///tmp/regressed.abc",
-                            "languageId": "abc",
-                            "version": 5,
-                            "text": "X:1\nK:C\nC |\n"
-                        }
-                    }))
-                    .finish(),
-            )
-            .await
-            .expect("open handled");
-        drain_initial_diagnostics(&mut client).await;
+        let (mut service, mut client) =
+            open_test_document("file:///tmp/regressed.abc", "X:1\nK:C\nC |\n", 5).await;
 
         // Send a change with a regressed (older) version; it must be ignored.
         let _ = service
@@ -1309,44 +1285,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn did_change_applies_multiple_ranged_edits_in_order() {
-        let (mut service, mut client) = LspService::new(Backend::new);
-        let _ = service
-            .ready()
-            .await
-            .expect("service ready")
-            .call(
-                Request::build("initialize")
-                    .params(json!({
-                        "capabilities": {
-                            "general": { "positionEncodings": ["utf-16"] }
-                        }
-                    }))
-                    .id(1)
-                    .finish(),
-            )
-            .await
-            .expect("initialize handled");
-        let _ = service
-            .ready()
-            .await
-            .expect("service ready")
-            .call(
-                Request::build("textDocument/didOpen")
-                    .params(json!({
-                        "textDocument": {
-                            "uri": "file:///tmp/multi.abc",
-                            "languageId": "abc",
-                            "version": 1,
-                            "text": "X:1\nK:C\nABCD |\n"
-                        }
-                    }))
-                    .finish(),
-            )
-            .await
-            .expect("open handled");
-        drain_initial_diagnostics(&mut client).await;
+        let (mut service, mut client) =
+            open_test_document("file:///tmp/multi.abc", "X:1\nK:C\nABCD |\n", 1).await;
 
         // Two edits: insert " | " before the bar, and append "GABc" after.
         let _ = service
@@ -1527,44 +1468,9 @@ mod tests {
 
     #[tokio::test]
     async fn publish_ignores_stale_versions() {
-        let (mut service, mut client) = LspService::new(Backend::new);
-        let initialize = Request::build("initialize")
-            .params(json!({
-                "capabilities": {
-                    "general": { "positionEncodings": ["utf-16"] }
-                }
-            }))
-            .id(1)
-            .finish();
-        service
-            .ready()
-            .await
-            .expect("service ready")
-            .call(initialize)
-            .await
-            .expect("initialize handled")
-            .expect("initialize response");
-
         let uri = "file:///tmp/stale.abc";
         let source = "X:1\nK:C\nCDEF |\n";
-        let open = Request::build("textDocument/didOpen")
-            .params(json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": "abc",
-                    "version": 1,
-                    "text": source
-                }
-            }))
-            .finish();
-        service
-            .ready()
-            .await
-            .expect("service ready")
-            .call(open)
-            .await
-            .expect("open handled");
-        drain_initial_diagnostics(&mut client).await;
+        let (mut service, mut client) = open_test_document(uri, source, 1).await;
 
         let backend = service.inner();
         let uri_parsed: Uri = uri.parse().unwrap();

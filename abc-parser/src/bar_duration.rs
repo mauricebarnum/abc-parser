@@ -783,7 +783,10 @@ mod tests {
             .check_trailing_bar(false);
         let found = warnings(source, options);
         assert_eq!(found.len(), 1);
-        assert!(found[0].message.starts_with("bar duration is 1 beat"));
+        assert_eq!(
+            found[0].message,
+            "bar duration is 1 beat, expected 4 beats under the effective meter"
+        );
     }
 
     #[test]
@@ -799,7 +802,10 @@ mod tests {
         let options = BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::OpeningBar);
         let found = warnings(source, options);
         assert_eq!(found.len(), 1);
-        assert!(found[0].message.starts_with("bar duration is 5 beats"));
+        assert_eq!(
+            found[0].message,
+            "bar duration is 5 beats, expected 4 beats under the effective meter"
+        );
     }
 
     #[test]
@@ -835,6 +841,14 @@ mod tests {
             BarDurationOptions::new().pickup_policy(BarDurationPickupPolicy::FirstAndLast);
         let found = warnings(source, options);
         assert_eq!(found.len(), 2);
+        assert_eq!(
+            found[0].message,
+            "bar duration is 1 beat, expected 6 beats under the effective meter"
+        );
+        assert_eq!(
+            found[1].message,
+            "bar duration is 3 beats, expected 6 beats under the effective meter"
+        );
     }
 
     #[test]
