@@ -57,7 +57,8 @@ remain useful while editing.
 
 `barDuration` checks closed, non-empty bars against their effective meter. It
 allows an underfull opening bar in each voice and metered section as a possible
-pickup, and does not diagnose the trailing open bar while it is being edited.
+pickup, pairs complementary underfull bars at section boundaries, and does not
+diagnose the trailing open bar while it is being edited.
 
 `format.noteLength` accepts:
 
