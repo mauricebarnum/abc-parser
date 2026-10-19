@@ -532,5 +532,6 @@ fn file_header_comments_and_tune_past_offset_200_retains_bar_duration_warnings()
         "expected bar-duration warning on tune 2"
     );
     let bar_diag = bar_diag.unwrap();
-    assert!(bar_diag.range.start.line > 5);
+    assert_eq!(bar_diag.range.start.line, 18);
+    assert_eq!(bar_diag.message, "bar duration is 3 beats, expected 4");
 }
