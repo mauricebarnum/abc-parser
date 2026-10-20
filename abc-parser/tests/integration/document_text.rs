@@ -445,27 +445,17 @@ fn tune_only_fields_disambiguate_an_initial_block_without_x() {
 }
 
 #[test]
-fn strict_mode_accepts_x_out_of_order_with_a_warning() {
-    let out_of_order = parse_owned(
-        "T:Reference follows title\nX:7\nK:C\n",
-        ParserOptions::new().strict(true),
-    );
-    assert!(out_of_order.is_valid(), "{:#?}", out_of_order.errors);
-    assert_eq!(out_of_order.warnings.len(), 1);
-    assert_eq!(document(&out_of_order).tunes().count(), 1);
-}
-
-#[test]
 fn strict_mode_warns_about_tune_header_field_order() {
     let source = "% leading comment\nT:Title first\nX:7\nK:C\nM:4/4\nC |\n";
     let report = parse_owned(source, ParserOptions::new().strict(true));
 
     assert!(report.is_valid(), "{:#?}", report.errors);
     assert_eq!(report.warnings.len(), 2, "{:#?}", report.warnings);
-    assert!(report.warnings.iter().all(|warning| {
-        warning.kind == ErrorKind::InvalidFieldOrder
-            && (warning.message.contains("X: reference") || warning.message.contains("K: key"))
-    }));
+    assert_eq!(report.warnings[0].kind, ErrorKind::InvalidFieldOrder);
+    assert!(report.warnings[0].message.contains("X: reference"));
+    assert_eq!(report.warnings[1].kind, ErrorKind::InvalidFieldOrder);
+    assert!(report.warnings[1].message.contains("K: key"));
+    assert_eq!(document(&report).tunes().count(), 1);
 
     let permissive = parse_owned(source, ParserOptions::default());
     assert!(permissive.warnings.is_empty(), "{:#?}", permissive.warnings);

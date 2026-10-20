@@ -1809,9 +1809,38 @@ mod tests {
             parse_directive("%%textual value").unwrap().kind,
             DirectiveKind::Other
         );
-        assert!(parse_field("V:1 name=\"Soprano\" snm=\"S\" clef=treble").is_ok());
+        let voice_field = parse_field("V:1 name=\"Soprano\" snm=\"S\" clef=treble").unwrap();
+        assert_eq!(voice_field.key, 'V');
+        assert!(matches!(
+            voice_field.value,
+            FieldValue::Voice(ref voice)
+                if voice.id == "1"
+                    && voice.properties.len() == 3
+                    && voice.properties[0].name.as_deref() == Some("name")
+                    && voice.properties[0].value == "Soprano"
+                    && voice.properties[1].name.as_deref() == Some("snm")
+                    && voice.properties[1].value == "S"
+                    && voice.properties[2].name.as_deref() == Some("clef")
+                    && voice.properties[2].value == "treble"
+        ));
         assert_eq!(parse_chord("[CEG]4").unwrap().length.numerator, 4);
-        assert!(parse_music_line("|: CDEF [CEG]2 :|").is_valid());
+        let music = parse_music_line("|: CDEF [CEG]2 :|");
+        assert!(music.is_valid());
+        let elements = music.output.unwrap();
+        assert!(matches!(
+            elements.first().map(|e| &e.value),
+            Some(MusicElement::Bar(BarLine {
+                kind: BarKind::RepeatStart,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            elements.last().map(|e| &e.value),
+            Some(MusicElement::Bar(BarLine {
+                kind: BarKind::RepeatEnd,
+                ..
+            }))
+        ));
     }
 
     #[test]
