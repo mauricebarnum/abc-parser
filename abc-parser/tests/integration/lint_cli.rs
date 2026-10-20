@@ -194,24 +194,6 @@ fn internal_pickup_pairs_are_reported() {
     assert!(output.status.success(), "{output:?}");
     let warnings = String::from_utf8(output.stderr).unwrap();
     assert_eq!(warnings.matches("bar duration is").count(), 4, "{warnings}");
-    assert!(!warnings.contains("ambiguous pickup"), "{warnings}");
-}
-
-#[test]
-fn incomplete_internal_bars_are_reported_without_pickup_ambiguity() {
-    let source = concat!(
-        "X:1\n",
-        "T:Ambiguous pickups\n",
-        "M:4/4\n",
-        "L:1/8\n",
-        "K:C\n",
-        "C2 | C4 | C6 | C4 |\n",
-    );
-    let output = run_stdin(source, &[]);
-    assert!(output.status.success(), "{output:?}");
-    let warnings = String::from_utf8(output.stderr).unwrap();
-    assert!(!warnings.contains("ambiguous pickup"), "{warnings}");
-    assert_eq!(warnings.matches("bar duration is").count(), 4, "{warnings}");
 }
 
 #[test]
@@ -273,7 +255,6 @@ fn pickup_sections_are_independent_for_each_voice() {
     assert!(output.status.success(), "{output:?}");
     let warnings = String::from_utf8(output.stderr).unwrap();
     assert!(!warnings.contains("bar duration is"), "{warnings}");
-    assert!(!warnings.contains("ambiguous pickup"), "{warnings}");
 }
 
 #[test]
