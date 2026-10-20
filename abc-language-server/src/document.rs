@@ -1384,8 +1384,20 @@ mod tests {
             PositionEncodingKind::UTF16,
             Config::default(),
         );
-        assert!(model.header.meter.is_some());
-        assert!(model.header.unit_length.is_some());
+        assert_eq!(
+            model.header.meter,
+            Some(abc_parser::Meter::Simple(abc_parser::Fraction {
+                numerator: 4,
+                denominator: 4,
+            }))
+        );
+        assert_eq!(
+            model.header.unit_length,
+            Some(abc_parser::Fraction {
+                numerator: 1,
+                denominator: 8,
+            })
+        );
         assert!(model.blocks.iter().any(|record| {
             record
                 .parsed
@@ -1509,7 +1521,6 @@ mod tests {
             "single-block edit re-parsed {} blocks, expected <= 2 (touched + cascade)",
             model.parse_count
         );
-        let _ = target_block;
     }
 
     #[test]
@@ -1636,51 +1647,51 @@ mod tests {
     }
 
     #[test]
-    fn apply_changes_empty_changes_requests_full_rebuild() {
-        let source = "X:1\nK:C\nCDEF |\n";
-        let model = DocumentModel::full(
-            source.to_owned(),
-            0,
-            PositionEncodingKind::UTF16,
-            Config::default(),
-        );
-        let result = DocumentModel::apply_changes(&model, &[], source.to_owned());
-        assert_eq!(result.err(), Some(EditError::FullRebuildRequired));
-    }
+    fn apply_changes_fallback_triggers() {
+        let cases: &[(&str, &str, Vec<TextDocumentContentChangeEvent>, &str)] = &[
+            (
+                "empty changes",
+                "X:1\nK:C\nCDEF |\n",
+                vec![],
+                "X:1\nK:C\nCDEF |\n",
+            ),
+            (
+                "range none full sync",
+                "X:1\nK:C\nCDEF |\n",
+                vec![encode_change(None, "X:2\nK:D\nG |\n")],
+                "X:2\nK:D\nG |\n",
+            ),
+            (
+                "line one version marker edit",
+                "X:1\nK:C\nCDEF |\n",
+                vec![change_at_line(0, 0, "%abc-2.1\n")],
+                "%abc-2.1\nX:1\nK:C\nCDEF |\n",
+            ),
+            (
+                "cr-only line one edit",
+                "%abc-2.1\r\rX:1\rK:C\rCDEF |\r",
+                vec![encode_change(
+                    Some(LspRange::new(Position::new(0, 0), Position::new(0, 8))),
+                    "%abc-2.0",
+                )],
+                "%abc-2.0\r\rX:1\rK:C\rCDEF |\r",
+            ),
+        ];
 
-    #[test]
-    fn apply_changes_range_none_requests_full_rebuild() {
-        let source = "X:1\nK:C\nCDEF |\n";
-        let model = DocumentModel::full(
-            source.to_owned(),
-            0,
-            PositionEncodingKind::UTF16,
-            Config::default(),
-        );
-        let result = DocumentModel::apply_changes(
-            &model,
-            &[encode_change(None, "X:2\nK:D\nG |\n")],
-            "X:2\nK:D\nG |\n".to_owned(),
-        );
-        assert_eq!(result.err(), Some(EditError::FullRebuildRequired));
-    }
-
-    #[test]
-    fn apply_changes_line_one_edit_requests_full_rebuild() {
-        let source = "X:1\nK:C\nCDEF |\n";
-        let model = DocumentModel::full(
-            source.to_owned(),
-            0,
-            PositionEncodingKind::UTF16,
-            Config::default(),
-        );
-        // Touch the version marker on line 1 (insert "%abc-2.1" at byte 0).
-        let result = DocumentModel::apply_changes(
-            &model,
-            &[change_at_line(0, 0, "%abc-2.1\n")],
-            "%abc-2.1\nX:1\nK:C\nCDEF |\n".to_owned(),
-        );
-        assert_eq!(result.err(), Some(EditError::FullRebuildRequired));
+        for (name, source, changes, new_text) in cases {
+            let model = DocumentModel::full(
+                (*source).to_owned(),
+                0,
+                PositionEncodingKind::UTF16,
+                Config::default(),
+            );
+            let result = DocumentModel::apply_changes(&model, changes, (*new_text).to_owned());
+            assert_eq!(
+                result.err(),
+                Some(EditError::FullRebuildRequired),
+                "case '{name}' must request full rebuild"
+            );
+        }
     }
 
     #[test]
@@ -1729,24 +1740,6 @@ mod tests {
     }
 
     #[test]
-    fn cr_only_document_line_one_edit_requests_full_rebuild() {
-        let source = "%abc-2.1\r\rX:1\rK:C\rCDEF |\r";
-        let model = DocumentModel::full(
-            source.to_owned(),
-            0,
-            PositionEncodingKind::UTF16,
-            Config::default(),
-        );
-        let edit = encode_change(
-            Some(LspRange::new(Position::new(0, 0), Position::new(0, 8))),
-            "%abc-2.0",
-        );
-        let new_source = "%abc-2.0\r\rX:1\rK:C\rCDEF |\r".to_owned();
-        let result = DocumentModel::apply_changes(&model, std::slice::from_ref(&edit), new_source);
-        assert_eq!(result.err(), Some(EditError::FullRebuildRequired));
-    }
-
-    #[test]
     fn apply_changes_bar_duration_invalidates_when_header_changes() {
         let source = "M:4/4\nL:1/8\n\nX:1\nK:C\nCDEF |\n\nX:2\nK:C\nCDEF |\n";
         let model = DocumentModel::full(
@@ -1775,6 +1768,8 @@ mod tests {
 
     #[test]
     fn reconfigure_severity_levels_match_cold_open_and_do_not_reparse() {
+        type ConfigSetter = fn(&mut Config, DiagnosticLevel);
+
         let source = "X:1\nT:Sample\nM:4/4\nL:1/4\nK:C\nCDEF |\nC D E |\n~C |\n\nC D E |\n";
         let levels = [
             DiagnosticLevel::Off,
@@ -1791,52 +1786,30 @@ mod tests {
             Config::default(),
         );
 
-        for level in levels {
-            let mut config = Config::default();
-            config.validation.bar_duration = level;
-            let cold =
-                DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
-            let reconfigured = baseline_model.reconfigure(config);
-            assert_eq!(
-                reconfigured.parse_count, 0,
-                "severity changes must not reparse"
-            );
-            assert_eq!(
-                reconfigured.diagnostics, cold.diagnostics,
-                "diagnostics must match cold open for bar_duration={level:?}"
-            );
-        }
+        let fields: &[(&str, ConfigSetter)] = &[
+            ("bar_duration", |c, l| c.validation.bar_duration = l),
+            ("legacy_decoration", |c, l| {
+                c.validation.legacy_decoration = l;
+            }),
+            ("ambiguous_music", |c, l| c.validation.ambiguous_music = l),
+        ];
 
-        for level in levels {
-            let mut config = Config::default();
-            config.validation.legacy_decoration = level;
-            let cold =
-                DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
-            let reconfigured = baseline_model.reconfigure(config);
-            assert_eq!(
-                reconfigured.parse_count, 0,
-                "severity changes must not reparse"
-            );
-            assert_eq!(
-                reconfigured.diagnostics, cold.diagnostics,
-                "diagnostics must match cold open for legacy_decoration={level:?}"
-            );
-        }
-
-        for level in levels {
-            let mut config = Config::default();
-            config.validation.ambiguous_music = level;
-            let cold =
-                DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
-            let reconfigured = baseline_model.reconfigure(config);
-            assert_eq!(
-                reconfigured.parse_count, 0,
-                "severity changes must not reparse"
-            );
-            assert_eq!(
-                reconfigured.diagnostics, cold.diagnostics,
-                "diagnostics must match cold open for ambiguous_music={level:?}"
-            );
+        for (field_name, set_level) in fields {
+            for level in levels {
+                let mut config = Config::default();
+                set_level(&mut config, level);
+                let cold =
+                    DocumentModel::full(source.to_owned(), 1, PositionEncodingKind::UTF16, config);
+                let reconfigured = baseline_model.reconfigure(config);
+                assert_eq!(
+                    reconfigured.parse_count, 0,
+                    "severity changes must not reparse for {field_name}={level:?}"
+                );
+                assert_eq!(
+                    reconfigured.diagnostics, cold.diagnostics,
+                    "diagnostics must match cold open for {field_name}={level:?}"
+                );
+            }
         }
     }
 
