@@ -355,16 +355,13 @@ fn every_kind_of_fixer_change_has_a_default_diagnostic() {
         "{warnings}"
     );
 
-    let noncanonical = run_stdin("X: 1\nT: Spacing\nK: C\nCDEF |\n", &[]);
-    assert!(noncanonical.status.success(), "{noncanonical:?}");
-    let warnings = String::from_utf8(noncanonical.stderr).unwrap();
-    assert!(warnings.contains("<stdin>:1:3:"), "{warnings}");
+    let valid_alternate_forms = run_stdin("X: 1\nT: Spacing\nK: C\n!coda!CDEF |\n", &[]);
     assert!(
-        warnings.contains(
-            "document is not in canonical form; first difference: --fix expects '1', found ' '"
-        ),
-        "{warnings}"
+        valid_alternate_forms.status.success(),
+        "{valid_alternate_forms:?}"
     );
+    let warnings = String::from_utf8(valid_alternate_forms.stderr).unwrap();
+    assert!(warnings.is_empty(), "{warnings}");
 
     let shorthand = run_stdin("X:1\nT:Shorthand\nK:C\nC :|2 D |\n", &[]);
     assert!(shorthand.status.success(), "{shorthand:?}");
