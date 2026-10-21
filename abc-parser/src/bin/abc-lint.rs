@@ -137,7 +137,7 @@ fn run(arguments: &Arguments) -> Result<(), String> {
         .unwrap_or_default();
     let fixable_warnings = owned_document
         .as_ref()
-        .map(|document| fixable_syntax_warnings(document, source.as_str()))
+        .map(fixable_syntax_warnings)
         .unwrap_or_default();
     let bar_duration_warnings = owned_document
         .as_ref()
@@ -228,10 +228,10 @@ where
         .collect()
 }
 
-/// Reports every deterministic source change performed by the fixer.
+/// Reports deterministic source changes performed by the fixer for deprecated
+/// syntax, missing or empty references, and redundant definitions.
 fn fixable_syntax_warnings(
     document: &Document<SimpleSpan<usize>, String>,
-    source: &str,
 ) -> Vec<ParseWarning<SimpleSpan<usize>>> {
     let mut warnings = Vec::new();
     collect_line_fix_warnings(&document.header, document.header.len(), &mut warnings);
@@ -292,60 +292,7 @@ fn fixable_syntax_warnings(
             }
         }
     }
-
-    let mut canonical = document.to_abc();
-    if !canonical.ends_with('\n') {
-        canonical.push('\n');
-    }
-    if let Some(warning) = canonical_form_warning(source, &canonical) {
-        warnings.push(warning);
-    }
     warnings
-}
-
-/// Locates and describes the first character changed by canonical emission.
-fn canonical_form_warning(
-    source: &str,
-    canonical: &str,
-) -> Option<ParseWarning<SimpleSpan<usize>>> {
-    let mut source_characters = source.char_indices();
-    let mut canonical_characters = canonical.char_indices();
-    loop {
-        match (source_characters.next(), canonical_characters.next()) {
-            (Some((_, found)), Some((_, expected))) if found == expected => {}
-            (Some((start, found)), Some((_, expected))) => {
-                return Some(ParseWarning {
-                    kind: ErrorKind::FixableSyntax,
-                    message: format!(
-                        "document is not in canonical form; first difference: --fix expects {expected:?}, found {found:?}"
-                    ),
-                    span: (start..start + found.len_utf8()).into(),
-                    related: Vec::new(),
-                });
-            }
-            (Some((start, found)), None) => {
-                return Some(ParseWarning {
-                    kind: ErrorKind::FixableSyntax,
-                    message: format!(
-                        "document is not in canonical form; first difference: --fix expects end of input, found {found:?}"
-                    ),
-                    span: (start..start + found.len_utf8()).into(),
-                    related: Vec::new(),
-                });
-            }
-            (None, Some((_, expected))) => {
-                return Some(ParseWarning {
-                    kind: ErrorKind::FixableSyntax,
-                    message: format!(
-                        "document is not in canonical form; first difference: --fix expects {expected:?}, found end of input"
-                    ),
-                    span: (source.len()..source.len()).into(),
-                    related: Vec::new(),
-                });
-            }
-            (None, None) => return None,
-        }
-    }
 }
 
 /// Reports continuations that reordering will reunite with their field.
