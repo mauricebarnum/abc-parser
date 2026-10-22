@@ -19,3 +19,4 @@ mod document_text;
 mod kitchen_sink;
 mod lint_cli;
 mod transpose_cli;
+mod version_cli;

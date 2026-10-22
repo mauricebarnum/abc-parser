@@ -77,6 +77,12 @@ struct Arguments {
     /// if any are present. Free text is allowed by ABC 2.1 §2.2.3.
     #[arg(long, value_enum, default_value_t = FreeTextMode::Accept)]
     free_text: FreeTextMode,
+    /// Print version information (combine with --verbose for detailed build info).
+    #[arg(short = 'V', long)]
+    version: bool,
+    /// Emit verbose output (shows detailed build info when combined with --version).
+    #[arg(short = 'v', long)]
+    verbose: bool,
 }
 
 /// Active unit-note-length state while traversing one tune.
@@ -111,6 +117,9 @@ impl Default for UnitLengthState {
 
 /// Parses arguments, validates the input, and optionally writes fixed ABC.
 fn main() -> ExitCode {
+    if let Some(exit_code) = abc_parser::build_info::check_version_and_exit("abc-lint") {
+        return exit_code;
+    }
     match run(&Arguments::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {

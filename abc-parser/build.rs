@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Generates the documented architecture module from its Markdown source.
+//! Generates the documented architecture module and version metadata.
 
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
+
+#[path = "../build_support/version.rs"]
+mod version;
 
 fn main() -> io::Result<()> {
     const ARCHITECTURE_PATH: &str = "docs/architecture.md";
@@ -36,5 +40,12 @@ fn main() -> io::Result<()> {
     generated.push_str("pub mod architecture {}\n");
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
 
-    fs::write(output.join("architecture.rs"), generated)
+    fs::write(output.join("architecture.rs"), generated)?;
+
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().unwrap_or_else(|| Path::new(".."));
+    version::generate_version_info(workspace_root);
+
+    Ok(())
 }

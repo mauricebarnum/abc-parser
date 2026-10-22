@@ -133,6 +133,12 @@ struct Arguments {
     /// Write output to this file instead of standard output.
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
+    /// Print version information (combine with --verbose for detailed build info).
+    #[arg(short = 'V', long)]
+    version: bool,
+    /// Emit verbose output (shows detailed build info when combined with --version).
+    #[arg(short = 'v', long)]
+    verbose: bool,
 }
 
 impl Arguments {
@@ -393,6 +399,9 @@ impl TranspositionState {
 
 /// Parses arguments, transforms the input, and writes the resulting ABC.
 fn main() -> ExitCode {
+    if let Some(exit_code) = abc_parser::build_info::check_version_and_exit("abc-transpose") {
+        return exit_code;
+    }
     match run(&Arguments::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
