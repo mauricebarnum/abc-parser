@@ -36,6 +36,7 @@ use chumsky::span::Span as ChumskySpan;
 
 mod ast;
 mod bar_duration;
+pub mod build_info;
 mod diagnostics;
 mod emit;
 mod parser;
