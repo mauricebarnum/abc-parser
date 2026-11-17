@@ -264,27 +264,35 @@ canonicalize optional spacing, quote choices, shorthand decorations, and
 similar presentation details. Text inserted programmatically into a quoted AST
 position must not contain an unescaped quote delimiter.
 
-## Transposition command flow
+## Workspace commands and downstream tools
 
-The `abc-transpose` binary parses a complete document with [`parse`] and prints
-warnings before deciding whether to continue. Parser errors reject the input;
-the command does not transpose a recovered document that contains errors. A
-zero-semitone request with no octave displacement or emission override writes
-the original bytes, adding a final newline only when one is absent.
+`abc-parser` serves as the core parsing, AST, and music-theory library for the
+entire Cargo workspace. Several specialized companion tools consume its AST:
 
-All other requests convert the parsed tree to an [`OwnedDocument`] and traverse
-each tune independently. A tune requires a structured `K:` field with a pitched
-tonic. The command maintains source and destination key signatures plus
-per-measure accidental state while it transposes notes, chord members, grace
-notes, key changes, and inline key fields. Bar lines reset measure accidentals.
-A destination-key request derives a separate interval for each tune; a signed
-interval applies the same chromatic displacement to every tune. The independent
-octave option changes written pitches without changing key signatures.
+### Shared music-theory foundation
 
-After transformation, [`ToAbc`] emits the complete document, including retained
-file-level text and directives. `--explicit-note-lengths` selects explicit
-power-of-two denominators; the default uses ABC shorthand. `--prefer-flats`
-selects automatic, flat-oriented, or sharp-oriented enharmonic spelling.
+`abc-parser` exposes shared music-theory modules promoted from downstream tools:
+- [`pitch`]: Rational semitone [`Offset`], [`MeasureAccidentals`], pitch class
+  arithmetic, and accidental propagation tracking.
+- [`key`]: Circle-of-fifths key signature fifths, mode normalization, and
+  interval calculation.
+- [`chord`]: Structured chord-symbol root, accidental, quality, and slash-bass
+  parsing.
+
+### Companion workspace tools
+
+- **`abc-transpose`**: Parses a complete document with [`parse`], calculates
+  source and destination key signatures, and traverses each tune independently
+  to transpose notes, chords, grace notes, and key changes while preserving
+  source text and directives.
+- **`abc-lint`**: Validates ABC documents, detecting deprecated constructs,
+  non-recommended header ordering, and formatting issues with optional
+  deterministic canonical fixes (`--fix`).
+- **`abc-musicxml`**: Lowers ABC tunes into standards-compliant W3C `MusicXML` 4.0
+  scores (`<score-partwise>`) and multi-tune opus collections (`opus.xml`), with
+  optional source provenance comments at line and element granularity.
+- **`abc-language-server`**: Implements Language Server Protocol 3.18 to provide
+  real-time editor diagnostics, completions, symbols, folding, and semantic tokens.
 
 ## AST overview
 

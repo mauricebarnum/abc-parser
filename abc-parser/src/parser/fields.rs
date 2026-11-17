@@ -27,6 +27,7 @@ use chumsky::prelude::one_of;
 use chumsky::recovery::via_parser;
 
 use super::Extra;
+use super::music::pitch_parser;
 use super::primitives::fraction;
 use super::primitives::horizontal_space;
 use super::primitives::inline_field_text;
@@ -115,9 +116,15 @@ where
             name: Some(name),
             value,
         });
+    let natural_accidental = just('=')
+        .rewind()
+        .ignore_then(pitch_parser())
+        .to_span()
+        .map(SourceText::Span);
     choice((
         named,
-        token_text().map(|value| FieldParameter { name: None, value }),
+        choice((natural_accidental, token_text()))
+            .map(|value| FieldParameter { name: None, value }),
     ))
     .labelled("field parameter")
 }

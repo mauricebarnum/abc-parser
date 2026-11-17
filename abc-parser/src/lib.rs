@@ -866,6 +866,13 @@ mod tests {
                 ..
             })
         ));
+        let k_nat_octaves = parse_field("K:D =c =c' =C,").unwrap().value;
+        let FieldValue::Key(k_nat_octaves) = k_nat_octaves else {
+            panic!("expected K: field");
+        };
+        let offsets = signature_offsets(&k_nat_octaves).unwrap();
+        assert_eq!(offsets[class_index(PitchClass::C)], Offset::ZERO);
+        assert_eq!(offsets[class_index(PitchClass::F)], Offset::integer(1));
 
         assert!(parse_field("L:not-a-length").is_err());
         let report = parse_line("L:  not-a-length  ");
@@ -991,6 +998,38 @@ mod tests {
         assert_eq!(
             parse_chord("[CEG").unwrap_err().kind,
             ErrorKind::InvalidMusic
+        );
+    }
+
+    #[test]
+    fn parses_plain_and_dotted_slurs() {
+        assert_eq!(
+            parse_single_music_element("("),
+            MusicElement::Slur(Slur {
+                opening: true,
+                dotted: false,
+            })
+        );
+        assert_eq!(
+            parse_single_music_element(")"),
+            MusicElement::Slur(Slur {
+                opening: false,
+                dotted: false,
+            })
+        );
+        assert_eq!(
+            parse_single_music_element(".("),
+            MusicElement::Slur(Slur {
+                opening: true,
+                dotted: true,
+            })
+        );
+        assert_eq!(
+            parse_single_music_element(".)"),
+            MusicElement::Slur(Slur {
+                opening: false,
+                dotted: true,
+            })
         );
     }
 
