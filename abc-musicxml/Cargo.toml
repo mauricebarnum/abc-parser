@@ -1,0 +1,23 @@
+[package]
+name = "abc-musicxml"
+version = "0.1.0"
+publish = false
+description = "Converts ABC 2.1 music notation to MusicXML 4.0 with optional source provenance annotations"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+
+[lib]
+name = "abc_musicxml"
+path = "src/lib.rs"
+
+[dependencies]
+abc-parser = { path = "../abc-parser", version = "0.1.0" }
+zip = { version = "9.5.1", default-features = false, features = ["deflate"], optional = true }
+
+[lints]
+workspace = true
+
+[features]
+default = ["mxl"]
+mxl = ["dep:zip"]

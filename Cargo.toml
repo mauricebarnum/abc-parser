@@ -2,6 +2,7 @@
 members = [
     "abc-language-server",
     "abc-lint",
+    "abc-musicxml",
     "abc-parser",
     "abc-transpose",
 ]

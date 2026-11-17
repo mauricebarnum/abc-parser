@@ -55,8 +55,10 @@ deny = []
 # `cargo update` cannot converge them. Remove the entry (and keep the check
 # failing meanwhile) once upstream releases make the version obsolete.
 skip = [
-    # dashmap 6.x (tower-lsp-server) requires 0.14; chumsky 0.13 requires 0.15.
+    # dashmap 6.x (tower-lsp-server) requires 0.14; chumsky 0.14 requires 0.16;
+    # indexmap 2.14 (zip 9.6) requires 0.17.
     "hashbrown@0.14.5",
+    "hashbrown@0.16.1",
     # tracing-attributes 0.1 and aquamarine 0.6 require syn 2; clap, serde,
     # futures, and tokio derive macros use syn 3.
     "syn@2.0.119",
