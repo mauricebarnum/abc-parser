@@ -15,6 +15,10 @@
 //! Build and version metadata reporting.
 
 use std::env;
+use std::fs;
+use std::io;
+use std::io::Read as _;
+use std::path::Path;
 use std::process::ExitCode;
 
 /// Version and compilation metadata collected at build time.
@@ -40,25 +44,35 @@ pub struct BuildInfo {
     pub profile: &'static str,
 }
 
-/// Active build metadata for this crate.
-pub const BUILD_INFO: BuildInfo = BuildInfo {
-    version: env!("ABC_VERSION_STRING"),
-    base_version: env!("ABC_VERSION_BASE"),
-    commit_hash: env!("ABC_GIT_COMMIT_HASH"),
-    commit_date: env!("ABC_GIT_COMMIT_DATE"),
-    build_date: env!("ABC_BUILD_DATE"),
-    rustc_version: env!("ABC_BUILD_RUSTC"),
-    host: env!("ABC_BUILD_HOST"),
-    target: env!("ABC_BUILD_TARGET"),
-    profile: env!("ABC_BUILD_PROFILE"),
-};
+/// Captures compile-time build and version metadata from the invoking crate's
+/// `build.rs` environment variables.
+#[macro_export]
+macro_rules! build_info_from_env {
+    () => {
+        $crate::build_info::BuildInfo {
+            version: env!("ABC_VERSION_STRING"),
+            base_version: env!("ABC_VERSION_BASE"),
+            commit_hash: env!("ABC_GIT_COMMIT_HASH"),
+            commit_date: env!("ABC_GIT_COMMIT_DATE"),
+            build_date: env!("ABC_BUILD_DATE"),
+            rustc_version: env!("ABC_BUILD_RUSTC"),
+            host: env!("ABC_BUILD_HOST"),
+            target: env!("ABC_BUILD_TARGET"),
+            profile: env!("ABC_BUILD_PROFILE"),
+        }
+    };
+}
 
-/// Intercepts `--version` and `--verbose` from command-line arguments.
+/// Active build metadata for this crate.
+pub const BUILD_INFO: BuildInfo = build_info_from_env!();
+
+/// Intercepts `--version` and `--verbose` from command-line arguments using
+/// the caller-supplied [`BuildInfo`].
 ///
 /// Returns `Some(ExitCode::SUCCESS)` if version information was requested and
 /// displayed, or `None` if argument parsing should proceed normally.
 #[must_use]
-pub fn check_version_and_exit(binary_name: &str) -> Option<ExitCode> {
+pub fn check_version_and_exit_for(info: &BuildInfo, binary_name: &str) -> Option<ExitCode> {
     let mut version_requested = false;
     let mut verbose_requested = false;
 
@@ -83,24 +97,69 @@ pub fn check_version_and_exit(binary_name: &str) -> Option<ExitCode> {
     }
 
     if version_requested {
-        print_version(binary_name, verbose_requested);
+        print_version_for(info, binary_name, verbose_requested);
         Some(ExitCode::SUCCESS)
     } else {
         None
     }
 }
 
+/// Intercepts `--version` and `--verbose` from command-line arguments.
+///
+/// Returns `Some(ExitCode::SUCCESS)` if version information was requested and
+/// displayed, or `None` if argument parsing should proceed normally.
+#[must_use]
+pub fn check_version_and_exit(binary_name: &str) -> Option<ExitCode> {
+    check_version_and_exit_for(&BUILD_INFO, binary_name)
+}
+
+/// Prints concise or verbose version information to standard output for the
+/// given [`BuildInfo`].
+pub fn print_version_for(info: &BuildInfo, binary_name: &str, verbose: bool) {
+    println!("{binary_name} {}", info.version);
+    if verbose {
+        println!("release: {}", info.base_version);
+        println!("commit-hash: {}", info.commit_hash);
+        println!("commit-date: {}", info.commit_date);
+        println!("build-date: {}", info.build_date);
+        println!("compiler: {}", info.rustc_version);
+        println!("host: {}", info.host);
+        println!("target: {}", info.target);
+        println!("profile: {}", info.profile);
+    }
+}
+
 /// Prints concise or verbose version information to standard output.
 pub fn print_version(binary_name: &str, verbose: bool) {
-    println!("{binary_name} {}", BUILD_INFO.version);
-    if verbose {
-        println!("release: {}", BUILD_INFO.base_version);
-        println!("commit-hash: {}", BUILD_INFO.commit_hash);
-        println!("commit-date: {}", BUILD_INFO.commit_date);
-        println!("build-date: {}", BUILD_INFO.build_date);
-        println!("compiler: {}", BUILD_INFO.rustc_version);
-        println!("host: {}", BUILD_INFO.host);
-        println!("target: {}", BUILD_INFO.target);
-        println!("profile: {}", BUILD_INFO.profile);
+    print_version_for(&BUILD_INFO, binary_name, verbose);
+}
+
+/// Returns a display name for diagnostics concerning one input path.
+///
+/// Maps `-` to `"<stdin>"` and formats any other path with [`Path::display`].
+#[must_use]
+pub fn input_name(path: &Path) -> String {
+    if path.as_os_str() == "-" {
+        "<stdin>".to_owned()
+    } else {
+        path.display().to_string()
+    }
+}
+
+/// Reads the named file, or standard input when `path` is `-`.
+///
+/// # Errors
+///
+/// Returns a diagnostic message if standard input or `path` cannot be read.
+pub fn read_source(path: &Path) -> Result<String, String> {
+    if path.as_os_str() == "-" {
+        let mut source = String::new();
+        io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|error| format!("could not read standard input: {error}"))?;
+        Ok(source)
+    } else {
+        fs::read_to_string(path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))
     }
 }

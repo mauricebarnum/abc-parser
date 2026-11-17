@@ -43,6 +43,7 @@ pub use fields::field_parser;
 pub use music::chord_parser;
 pub use music::music_element_parser;
 pub use music::music_line_parser;
+pub use music::pitch_parser;
 pub use primitives::note_length_parser;
 pub(crate) use primitives::trailing_comment;
 
