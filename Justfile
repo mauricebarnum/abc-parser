@@ -73,6 +73,10 @@ run-lint *args:
 run-transpose *args:
     cargo run -p abc-transpose -- {{ args }}
 
+# Run the `abc-musicxml` binary.
+run-musicxml *args:
+    cargo run -p abc-musicxml -- {{ args }}
+
 # Run the ABC language server over standard input and output.
 run-lsp *args:
     cargo run -p abc-language-server --bin abc-language-server -- {{ args }}
@@ -85,6 +89,10 @@ install-lint *args:
 install-transpose *args:
     cargo install --path abc-transpose --locked --force {{ args }}
 
+# Install `abc-musicxml` into ~/.cargo/bin.
+install-musicxml *args:
+    cargo install --path abc-musicxml --locked --force {{ args }}
+
 # Install `abc-lint` and `abc-transpose` into ~/.cargo/bin.
 install-parser: install-lint install-transpose
 
@@ -93,7 +101,7 @@ install-lsp *args:
     cargo install --path abc-language-server --bins --locked --force {{ args }}
 
 # Install every workspace binary into ~/.cargo/bin.
-install: install-lint install-transpose install-lsp
+install: install-lint install-transpose install-musicxml install-lsp
 
 # Remove build artifacts.
 clean:
