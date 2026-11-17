@@ -12,15 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Core domain modules and XML/MXL writers for `MusicXML` 4.0 generation.
+//! ABC 2.1 to `MusicXML` 4.0 converter with optional source provenance annotations.
 
 use std::error::Error;
 use std::fmt;
 
 use abc_parser::BarDurationPickupPolicy;
+use abc_parser::Document;
+use abc_parser::Line;
+use abc_parser::ParseWarning;
+use abc_parser::SimpleSpan;
+use abc_parser::Spanned;
+use abc_parser::Tune;
+#[cfg(feature = "parallel")]
+use rayon::prelude::IntoParallelRefIterator;
+#[cfg(feature = "parallel")]
+use rayon::prelude::ParallelIterator;
 
 pub mod build_info;
 pub mod harmony;
+pub mod lower;
 pub mod lyrics;
 #[cfg(feature = "mxl")]
 pub mod mxl;
@@ -30,6 +41,8 @@ pub mod source_map;
 pub mod timing;
 pub mod writer;
 
+pub use lower::extract_tune_identity;
+pub use lower::write_tune_musicxml;
 #[cfg(feature = "mxl")]
 pub use mxl::create_mxl;
 #[cfg(feature = "mxl")]
@@ -122,7 +135,11 @@ impl MusicXmlOptions {
         self
     }
 
-    /// Sets whether to attempt best-effort `MusicXML` emission when the input has syntax errors.
+    /// Records whether the caller intends best-effort `MusicXML` emission on a recovered AST.
+    ///
+    /// Note that AST lowering always processes whatever parsed [`Tune`] is provided; callers
+    /// such as the CLI inspect [`Self::recover`] to decide whether to continue when
+    /// `abc_parser::parse` reports syntax errors.
     #[must_use]
     pub const fn with_recover(mut self, recover: bool) -> Self {
         self.recover = recover;
@@ -159,7 +176,7 @@ impl MusicXmlOptions {
         self.pickup_policy
     }
 
-    /// Returns `true` if best-effort error recovery is enabled.
+    /// Returns `true` if best-effort conversion on recovered syntax errors was requested.
     #[must_use]
     pub const fn recover(&self) -> bool {
         self.recover
@@ -219,6 +236,106 @@ impl From<fmt::Error> for MusicXmlError {
     }
 }
 
+/// Output of converting a single ABC [`Tune`] to `MusicXML` 4.0.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MusicXmlOutput {
+    /// Complete `<score-partwise version="4.0">` XML document.
+    pub xml: String,
+    /// Non-fatal advisory warnings emitted during lowering.
+    pub warnings: Vec<ParseWarning<SimpleSpan<usize>>>,
+}
+
+/// Output of converting one tune within a multi-tune [`Document`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MusicXmlTuneOutput {
+    /// The tune's `X:` reference number, if present.
+    pub reference: Option<u32>,
+    /// The tune's primary `T:` title, if present.
+    pub title: Option<String>,
+    /// Complete `<score-partwise version="4.0">` XML document.
+    pub xml: String,
+    /// Non-fatal advisory warnings emitted during lowering.
+    pub warnings: Vec<ParseWarning<SimpleSpan<usize>>>,
+}
+
+/// A source-spanned owned ABC [`Line`].
+pub type SpannedLine = Spanned<Line<SimpleSpan<usize>, String>, SimpleSpan<usize>>;
+
+/// Converts a single parsed ABC [`Tune`] and optional file-header lines to `MusicXML` 4.0.
+///
+/// # Errors
+///
+/// Returns [`MusicXmlError::FormatError`] if formatting the XML string fails.
+pub fn tune_to_musicxml(
+    tune: &Tune<SimpleSpan<usize>, String>,
+    file_header: &[SpannedLine],
+    source: Option<&str>,
+    options: &MusicXmlOptions,
+) -> Result<MusicXmlOutput, MusicXmlError> {
+    let mut xml = String::with_capacity(tune.lines.len().saturating_mul(256).max(1024));
+    let warnings = write_tune_musicxml(&mut xml, tune, file_header, source, options)?;
+    Ok(MusicXmlOutput { xml, warnings })
+}
+
+#[cfg(not(feature = "parallel"))]
+trait SliceParIterFallback<'a, T> {
+    fn par_iter(&'a self) -> std::slice::Iter<'a, T>;
+}
+
+#[cfg(not(feature = "parallel"))]
+impl<'a, T> SliceParIterFallback<'a, T> for [T] {
+    fn par_iter(&'a self) -> std::slice::Iter<'a, T> {
+        self.iter()
+    }
+}
+
+/// Converts all tunes in a parsed [`Document`] to `MusicXML` 4.0 documents in source order.
+///
+/// When compiled with the `parallel` feature (enabled by default), individual tunes
+/// are lowered and serialized in parallel across worker threads while preserving
+/// source order.
+///
+/// # Errors
+///
+/// Returns [`MusicXmlError::EmptyDocument`] if `doc` contains no tunes, or
+/// [`MusicXmlError::FormatError`] if formatting fails.
+pub fn document_to_musicxml(
+    doc: &Document<SimpleSpan<usize>, String>,
+    source: Option<&str>,
+    options: &MusicXmlOptions,
+) -> Result<Vec<MusicXmlTuneOutput>, MusicXmlError> {
+    let tunes: Vec<&Tune<SimpleSpan<usize>, String>> = doc.tunes().collect();
+    if tunes.is_empty() {
+        return Err(MusicXmlError::EmptyDocument);
+    }
+    let source_name = options.source_name().unwrap_or("<input>");
+    let shared_map = (options.annotation_level() != AnnotationLevel::None)
+        .then(|| source.map(|src| SourceMap::new(src, source_name)))
+        .flatten();
+
+    tunes
+        .par_iter()
+        .map(|tune| {
+            let (reference, title) = lower::extract_tune_identity(tune);
+            let mut xml = String::with_capacity(tune.lines.len().saturating_mul(256).max(1024));
+            let warnings = lower::write_tune_musicxml_with_map(
+                &mut xml,
+                tune,
+                &doc.header,
+                source,
+                shared_map.clone(),
+                options,
+            )?;
+            Ok(MusicXmlTuneOutput {
+                reference,
+                title,
+                xml,
+                warnings,
+            })
+        })
+        .collect()
+}
+
 /// Generates an `opus.xml` collection document conforming to `musicxml-4/schema/opus.xsd`.
 ///
 /// # Errors
@@ -250,6 +367,12 @@ pub fn generate_opus_xml(
 
 #[cfg(test)]
 mod tests {
+    use abc_parser::IntoOwnedAst;
+    use abc_parser::parse;
+
+    use super::MusicXmlError;
+    use super::MusicXmlOptions;
+    use super::document_to_musicxml;
     use super::generate_opus_xml;
 
     #[test]
@@ -282,5 +405,52 @@ mod tests {
                 "</opus>\n",
             )
         );
+    }
+
+    #[test]
+    fn rejects_empty_document() {
+        let empty_report = parse("% comment only\n");
+        let empty_doc = empty_report
+            .output
+            .unwrap()
+            .into_owned("% comment only\n")
+            .unwrap();
+        assert_eq!(
+            document_to_musicxml(
+                &empty_doc,
+                Some("% comment only\n"),
+                &MusicXmlOptions::new()
+            ),
+            Err(MusicXmlError::EmptyDocument)
+        );
+    }
+
+    #[test]
+    fn converts_many_tunes_preserving_source_order_and_content() {
+        use std::fmt::Write as _;
+
+        let mut src = String::from("O:Ireland\n\n");
+        for i in 1..=12_u32 {
+            let notes = "C D E F | ".repeat(usize::try_from(i).unwrap());
+            writeln!(src, "X:{i}\nT:Tune {i}\nM:4/4\nL:1/4\nK:C\n{notes}\n").unwrap();
+        }
+        let report = parse(src.as_str());
+        assert!(report.is_valid(), "{:#?}", report.errors);
+        let doc = report.output.unwrap().into_owned(src.as_str()).unwrap();
+        let options = MusicXmlOptions::new()
+            .with_source_name("many.abc")
+            .with_annotation_level(super::AnnotationLevel::Verbose);
+
+        let batch = document_to_musicxml(&doc, Some(&src), &options).unwrap();
+        assert_eq!(batch.len(), 12);
+
+        for (idx, tune) in doc.tunes().enumerate() {
+            let expected =
+                super::tune_to_musicxml(tune, &doc.header, Some(&src), &options).unwrap();
+            assert_eq!(batch[idx].reference, Some(u32::try_from(idx + 1).unwrap()));
+            assert_eq!(batch[idx].title, Some(format!("Tune {}", idx + 1)));
+            assert_eq!(batch[idx].xml, expected.xml);
+            assert_eq!(batch[idx].warnings, expected.warnings);
+        }
     }
 }
