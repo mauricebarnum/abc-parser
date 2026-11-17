@@ -33,12 +33,37 @@ The minimum supported Rust version is 1.95.
 `cargo doc --no-deps --all-features --open` (or `--features doc-mermaid`)
 renders architecture diagrams in the browser using [aquamarine](https://crates.io/crates/aquamarine).
 
-
 Run the complete test suite with:
 
 ```sh
 cargo nextest run --all-features
 ```
+
+A [`Justfile`](Justfile) provides standard workspace recipes:
+
+```sh
+just test       # Run complete test suite with nextest
+just clippy     # Run strict workspace clippy checks
+just fmt-check  # Verify nightly code formatting
+just install    # Install all workspace binaries
+```
+
+## Workspace organization
+
+This repository is organized as a Cargo workspace with five member crates:
+
+- [`abc-parser`](abc-parser/): Core ABC 2.1 parser library, span-backed AST,
+  error-recovering Chumsky grammar, and shared music-theory foundation
+  (`pitch`, `key`, and `chord` modules).
+- [`abc-language-server`](abc-language-server/): Language Server Protocol
+  (LSP 3.18) server providing editor diagnostics, completions, symbols,
+  and semantic tokens.
+- [`abc-transpose`](abc-transpose/): CLI command and engine for transposing
+  ABC tunes by destination key or chromatic interval.
+- [`abc-lint`](abc-lint/): CLI command and engine for validating ABC syntax,
+  detecting anti-patterns, and applying deterministic canonical fixes.
+- [`abc-musicxml`](abc-musicxml/): CLI command and library for converting
+  ABC tunes to MusicXML 4.0 partwise scores and multi-tune opus collections.
 
 ## Language-server support
 
@@ -76,7 +101,7 @@ output. It accepts a destination key, signed semitones, or signed whole-tone
 steps in exact increments of `0.5`:
 
 ```sh
-cargo run -p abc-parser --bin abc-transpose -- test_kitchen_sink.abc --semitones 1
+cargo run -p abc-transpose -- test_kitchen_sink.abc --semitones 1
 abc-transpose tunes.abc --key Dm > tunes-in-d-minor.abc
 abc-transpose tunes.abc --semitones -1 > tunes-down-one-semitone.abc
 abc-transpose tunes.abc --steps 1.5 > tunes-up-three-semitones.abc
@@ -103,6 +128,7 @@ order, on standard error. Every deterministic change available through
 output after a successful check:
 
 ```sh
+cargo run -p abc-lint -- tunes.abc
 abc-lint tunes.abc
 abc-lint - < tunes.abc
 ```
@@ -122,6 +148,39 @@ to a file:
 abc-lint tunes.abc --fix > tunes-fixed.abc
 abc-lint tunes.abc --fix --out tunes-fixed.abc
 ```
+
+## Command-line MusicXML 4.0 conversion
+
+The `abc-musicxml` binary converts ABC 2.1 tunes into W3C MusicXML 4.0
+partwise scores (`<score-partwise>`) or compressed `.mxl` archives, with
+optional source provenance comments:
+
+```sh
+# Convert a single tune to standard output
+abc-musicxml tune.abc
+
+# Select a specific tune by X: reference and write to a file (or compressed .mxl)
+abc-musicxml tunes.abc -x 1 -o tune-1.musicxml
+abc-musicxml tunes.abc -x 1 -o tune-1.mxl
+
+# Convert all tunes in a multi-tune collection to a directory (with opus.xml)
+abc-musicxml tunes.abc --out-dir output/
+abc-musicxml tunes.abc --out-dir output/ --mxl
+
+# Include ABC source annotations as XML comments (line or verbose)
+abc-musicxml tune.abc -a line
+abc-musicxml tune.abc -a verbose
+
+# Attempt best-effort conversion when input contains syntax errors
+abc-musicxml tune.abc --recover
+```
+
+Source annotations are emitted as standard XML comments (`<!-- ... -->`)
+before each corresponding element, guaranteeing 100% W3C schema validation
+compliance against `musicxml.xsd`. Level 1 (`-a line`) emits the originating
+filename, line number, and raw ABC source line. Level 2 (`-a verbose`) adds
+exact 1-based line/column coordinates and 0-based byte offsets for every
+semantic musical element.
 
 ## Data model and recovery
 
