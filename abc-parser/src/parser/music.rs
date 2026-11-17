@@ -563,11 +563,6 @@ where
         grace().map(MusicElement::Grace),
         annotation().map(MusicElement::Annotation),
         just(".-").to(MusicElement::Tie(Tie { dotted: true })),
-        decoration().map(MusicElement::Decoration),
-        tuplet().map(MusicElement::Tuplet),
-        just("(&").to(MusicElement::Overlay(Overlay::Start)),
-        just("&)").to(MusicElement::Overlay(Overlay::End)),
-        just('&').to(MusicElement::Overlay(Overlay::NextVoice)),
         just(".(").to(MusicElement::Slur(Slur {
             opening: true,
             dotted: true,
@@ -576,6 +571,11 @@ where
             opening: false,
             dotted: true,
         })),
+        decoration().map(MusicElement::Decoration),
+        tuplet().map(MusicElement::Tuplet),
+        just("(&").to(MusicElement::Overlay(Overlay::Start)),
+        just("&)").to(MusicElement::Overlay(Overlay::End)),
+        just('&').to(MusicElement::Overlay(Overlay::NextVoice)),
         plain_open_slur,
         just(')').to(MusicElement::Slur(Slur {
             opening: false,
