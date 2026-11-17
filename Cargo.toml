@@ -1,5 +1,10 @@
 [workspace]
-members = ["abc-language-server", "abc-parser"]
+members = [
+    "abc-language-server",
+    "abc-lint",
+    "abc-parser",
+    "abc-transpose",
+]
 resolver = "3"
 
 [profile.dev]

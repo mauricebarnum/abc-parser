@@ -67,26 +67,33 @@ example name *args:
 
 # Run the `abc-lint` binary.
 run-lint *args:
-    cargo run -p abc-parser --bin abc-lint -- {{ args }}
+    cargo run -p abc-lint -- {{ args }}
 
 # Run the `abc-transpose` binary.
 run-transpose *args:
-    cargo run -p abc-parser --bin abc-transpose -- {{ args }}
+    cargo run -p abc-transpose -- {{ args }}
 
 # Run the ABC language server over standard input and output.
 run-lsp *args:
     cargo run -p abc-language-server --bin abc-language-server -- {{ args }}
 
+# Install `abc-lint` into ~/.cargo/bin.
+install-lint *args:
+    cargo install --path abc-lint --locked --force {{ args }}
+
+# Install `abc-transpose` into ~/.cargo/bin.
+install-transpose *args:
+    cargo install --path abc-transpose --locked --force {{ args }}
+
 # Install `abc-lint` and `abc-transpose` into ~/.cargo/bin.
-install-parser *args:
-    cargo install --path abc-parser --bins --locked --force {{ args }}
+install-parser: install-lint install-transpose
 
 # Install `abc-language-server` into ~/.cargo/bin.
 install-lsp *args:
     cargo install --path abc-language-server --bins --locked --force {{ args }}
 
 # Install every workspace binary into ~/.cargo/bin.
-install: install-parser install-lsp
+install: install-lint install-transpose install-lsp
 
 # Remove build artifacts.
 clean:
