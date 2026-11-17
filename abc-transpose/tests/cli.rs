@@ -24,11 +24,11 @@ use abc_parser::IntoOwnedAst;
 use abc_parser::Line;
 use abc_parser::OwnedDocument;
 use abc_parser::ParseReport;
+use abc_parser::SimpleSpan;
 use abc_parser::ToAbc;
 use abc_parser::parse;
-use chumsky::span::SimpleSpan;
 
-const KITCHEN_SINK: &str = include_str!("../../../test_kitchen_sink.abc");
+const KITCHEN_SINK: &str = include_str!("../../test_kitchen_sink.abc");
 const KITCHEN_SINK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_kitchen_sink.abc");
 
 fn parse_owned(source: &str) -> ParseReport<OwnedDocument<SimpleSpan<usize>>, SimpleSpan<usize>> {

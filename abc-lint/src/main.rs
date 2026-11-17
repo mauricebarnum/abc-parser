@@ -17,7 +17,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,13 +38,20 @@ use abc_parser::Line;
 use abc_parser::MusicElement;
 use abc_parser::ParseWarning;
 use abc_parser::ParserOptions;
+use abc_parser::SimpleSpan;
 use abc_parser::Tempo;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
 use abc_parser::bar_duration_warnings;
+use abc_parser::build_info::BuildInfo;
+use abc_parser::build_info::check_version_and_exit_for;
+use abc_parser::build_info::input_name;
+use abc_parser::build_info::read_source;
+use abc_parser::build_info_from_env;
 use abc_parser::parse_with_options;
-use chumsky::span::SimpleSpan;
 use clap::Parser;
+
+const BUILD_INFO: BuildInfo = build_info_from_env!();
 
 /// How free text blocks outside any tune are handled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -117,7 +123,7 @@ impl Default for UnitLengthState {
 
 /// Parses arguments, validates the input, and optionally writes fixed ABC.
 fn main() -> ExitCode {
-    if let Some(exit_code) = abc_parser::build_info::check_version_and_exit("abc-lint") {
+    if let Some(exit_code) = check_version_and_exit_for(&BUILD_INFO, "abc-lint") {
         return exit_code;
     }
     match run(&Arguments::parse()) {
@@ -461,29 +467,6 @@ where
         }
     }
     warnings
-}
-
-/// Returns a display name for diagnostics concerning one input path.
-fn input_name(path: &Path) -> String {
-    if path.as_os_str() == "-" {
-        "<stdin>".to_owned()
-    } else {
-        path.display().to_string()
-    }
-}
-
-/// Reads the named file, or standard input when the path is `-`.
-fn read_source(path: &Path) -> Result<String, String> {
-    if path.as_os_str() == "-" {
-        let mut source = String::new();
-        io::stdin()
-            .read_to_string(&mut source)
-            .map_err(|error| format!("could not read standard input: {error}"))?;
-        Ok(source)
-    } else {
-        fs::read_to_string(path)
-            .map_err(|error| format!("could not read {}: {error}", path.display()))
-    }
 }
 
 /// Writes fixed ABC to the selected file or standard output.

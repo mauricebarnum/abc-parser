@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for `--version` and `--verbose` flags on `abc-parser` binaries.
+//! Integration tests for `--version` and `--verbose` flags on `abc-transpose`.
 
 use std::process::Command;
 
@@ -90,70 +90,4 @@ fn transpose_combined_short_flags() {
     let stdout = String::from_utf8(combined.stdout).expect("stdout is valid utf-8");
     assert!(stdout.starts_with("abc-transpose 0.1.0"));
     assert!(stdout.contains("compiler: "));
-}
-
-#[test]
-fn transpose_version_without_positional_arguments() {
-    // abc-transpose normally requires an input file and transposition mode.
-    // Ensure --version intercepts and succeeds without them.
-    let output = Command::new(env!("CARGO_BIN_EXE_abc-transpose"))
-        .arg("--version")
-        .output()
-        .expect("abc-transpose should execute");
-
-    assert!(output.status.success());
-    assert_eq!(output.stderr, &[] as &[u8]);
-}
-
-#[test]
-fn lint_version_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_abc-lint"))
-        .arg("--version")
-        .output()
-        .expect("abc-lint should execute");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("stdout is valid utf-8");
-    let stderr = String::from_utf8(output.stderr).expect("stderr is valid utf-8");
-
-    assert!(stderr.is_empty(), "stderr should be empty: {stderr}");
-    assert!(
-        stdout.starts_with("abc-lint 0.1.0"),
-        "stdout should start with binary name and version: {stdout}"
-    );
-    assert_eq!(stdout.lines().count(), 1);
-}
-
-#[test]
-fn lint_version_verbose() {
-    let output = Command::new(env!("CARGO_BIN_EXE_abc-lint"))
-        .args(["--version", "--verbose"])
-        .output()
-        .expect("abc-lint should execute");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("stdout is valid utf-8");
-
-    assert!(stdout.starts_with("abc-lint 0.1.0"));
-    assert!(stdout.contains("release: 0.1.0"));
-    assert!(stdout.contains("commit-hash: "));
-    assert!(stdout.contains("commit-date: "));
-    assert!(stdout.contains("build-date: "));
-    assert!(stdout.contains("compiler: "));
-    assert!(stdout.contains("host: "));
-    assert!(stdout.contains("target: "));
-    assert!(stdout.contains("profile: "));
-}
-
-#[test]
-fn lint_version_without_positional_arguments() {
-    // abc-lint normally requires an input file.
-    // Ensure --version intercepts and succeeds without it.
-    let output = Command::new(env!("CARGO_BIN_EXE_abc-lint"))
-        .arg("--version")
-        .output()
-        .expect("abc-lint should execute");
-
-    assert!(output.status.success());
-    assert_eq!(output.stderr, &[] as &[u8]);
 }

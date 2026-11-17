@@ -1,0 +1,19 @@
+[package]
+name = "abc-transpose"
+version = "0.1.0"
+publish = false
+description = "Transposes every tune in an ABC file"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+
+[[bin]]
+name = "abc-transpose"
+path = "src/main.rs"
+
+[dependencies]
+abc-parser = { path = "../abc-parser", version = "0.1.0" }
+clap = { version = "4.6.4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+
+[lints]
+workspace = true

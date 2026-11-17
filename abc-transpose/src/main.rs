@@ -23,12 +23,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use abc_parser::Accidental;
 use abc_parser::AnnotationPlacement;
 use abc_parser::BarLine;
 use abc_parser::ChordMember;
@@ -37,24 +35,47 @@ use abc_parser::Document;
 use abc_parser::EmitOptions;
 use abc_parser::Field;
 use abc_parser::FieldValue;
-use abc_parser::Fraction;
 use abc_parser::IntoOwnedAst;
-use abc_parser::KeyAccidental;
 use abc_parser::KeySignature;
 use abc_parser::KeyTonic;
 use abc_parser::Line;
+use abc_parser::MeasureAccidentals;
 use abc_parser::MusicElement;
 use abc_parser::NoteLengthStyle;
+use abc_parser::Offset;
 use abc_parser::Pitch;
 use abc_parser::PitchClass;
 use abc_parser::ToAbc;
 use abc_parser::Tune;
+use abc_parser::accidental_offset;
+use abc_parser::build_info::BuildInfo;
+use abc_parser::build_info::check_version_and_exit_for;
+use abc_parser::build_info::input_name;
+use abc_parser::build_info::read_source;
+use abc_parser::build_info_from_env;
+use abc_parser::chromatic_spelling;
+use abc_parser::chromatic_tonic;
+use abc_parser::class_index;
+use abc_parser::conventional_key_fifths;
+use abc_parser::is_chord_boundary;
+use abc_parser::is_valid_chord_type;
+use abc_parser::key_prefers_flats;
+use abc_parser::natural_semitone;
+use abc_parser::normalize_key_mode;
 use abc_parser::parse;
+use abc_parser::parse_accidental;
+use abc_parser::parse_bass_note;
 use abc_parser::parse_field;
-use abc_parser::parse_music_line;
+use abc_parser::signature_offsets;
+use abc_parser::signed_tonic_interval;
+use abc_parser::spell_absolute_pitch;
+use abc_parser::starts_with_chord_root;
+use abc_parser::tonic_semitone;
 use clap::ArgGroup;
 use clap::Parser;
 use clap::ValueEnum;
+
+const BUILD_INFO: BuildInfo = build_info_from_env!();
 
 /// A requested transposition operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,70 +178,6 @@ impl Arguments {
     }
 }
 
-/// A rational accidental displacement measured in semitones.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Offset {
-    numerator: i128,
-    denominator: i128,
-}
-
-impl Offset {
-    const ZERO: Self = Self {
-        numerator: 0,
-        denominator: 1,
-    };
-
-    /// Creates an integral semitone displacement.
-    const fn integer(value: i16) -> Self {
-        Self {
-            numerator: value as i128,
-            denominator: 1,
-        }
-    }
-
-    /// Adds two rational semitone displacements without losing precision.
-    const fn add(self, other: Self) -> Self {
-        Self {
-            numerator: self.numerator * other.denominator + other.numerator * self.denominator,
-            denominator: self.denominator * other.denominator,
-        }
-    }
-
-    /// Returns the same displacement relative to another displacement.
-    const fn subtract(self, other: Self) -> Self {
-        Self {
-            numerator: self.numerator * other.denominator - other.numerator * self.denominator,
-            denominator: self.denominator * other.denominator,
-        }
-    }
-
-    /// Returns whether this displacement is exactly zero.
-    const fn is_zero(self) -> bool {
-        self.numerator == 0
-    }
-}
-
-/// Accidental state for each written pitch class within the current bar.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct MeasureAccidentals([Option<Offset>; 7]);
-
-impl MeasureAccidentals {
-    /// Returns the active accidental for one written pitch class.
-    const fn get(self, class: PitchClass) -> Option<Offset> {
-        self.0[class_index(class)]
-    }
-
-    /// Records an accidental for one written pitch class.
-    const fn set(&mut self, class: PitchClass, offset: Offset) {
-        self.0[class_index(class)] = Some(offset);
-    }
-
-    /// Clears accidental propagation at a measure boundary.
-    fn clear(&mut self) {
-        self.0.fill(None);
-    }
-}
-
 #[derive(Clone, Copy)]
 struct VoiceState {
     source_signature: [Offset; 7],
@@ -236,6 +193,7 @@ struct TranspositionState {
     pitch_interval: i16,
     spelling: SpellingPreference,
     defaults: VoiceState,
+    active_voice: VoiceState,
     current_voice: String,
     voices: BTreeMap<String, VoiceState>,
     body_started: bool,
@@ -280,6 +238,7 @@ impl TranspositionState {
             pitch_interval,
             spelling,
             defaults,
+            active_voice: defaults,
             current_voice: String::new(),
             voices: BTreeMap::new(),
             body_started: false,
@@ -288,26 +247,23 @@ impl TranspositionState {
         })
     }
 
-    fn active_voice_mut(&mut self) -> &mut VoiceState {
-        let defaults = self.defaults;
-        self.voices
-            .entry(self.current_voice.clone())
-            .or_insert(defaults)
+    const fn active_voice_mut(&mut self) -> &mut VoiceState {
+        &mut self.active_voice
     }
 
-    fn active_prefer_flats(&self) -> bool {
-        self.voices
-            .get(&self.current_voice)
-            .map_or(self.defaults.prefer_flats, |voice| voice.prefer_flats)
+    const fn active_prefer_flats(&self) -> bool {
+        self.active_voice.prefer_flats
     }
 
     fn switch_voice(&mut self, id: &str) {
+        if self.current_voice == id {
+            return;
+        }
+        self.voices
+            .insert(self.current_voice.clone(), self.active_voice);
         self.current_voice.clear();
         self.current_voice.push_str(id);
-        let defaults = self.defaults;
-        self.voices
-            .entry(self.current_voice.clone())
-            .or_insert(defaults);
+        self.active_voice = self.voices.get(id).copied().unwrap_or(self.defaults);
     }
 
     fn clear_active_measure_accidentals(&mut self) {
@@ -385,9 +341,10 @@ impl TranspositionState {
             prefer_flats,
         };
         if self.body_started {
-            *self.active_voice_mut() = next_state;
+            self.active_voice = next_state;
         } else {
             self.defaults = next_state;
+            self.active_voice = next_state;
             for voice in self.voices.values_mut() {
                 *voice = next_state;
             }
@@ -399,7 +356,7 @@ impl TranspositionState {
 
 /// Parses arguments, transforms the input, and writes the resulting ABC.
 fn main() -> ExitCode {
-    if let Some(exit_code) = abc_parser::build_info::check_version_and_exit("abc-transpose") {
+    if let Some(exit_code) = check_version_and_exit_for(&BUILD_INFO, "abc-transpose") {
         return exit_code;
     }
     match run(&Arguments::parse()) {
@@ -416,11 +373,7 @@ fn run(arguments: &Arguments) -> Result<(), String> {
     let request = arguments.request();
     let source = read_source(&arguments.input)?;
     let parsed = parse(source.as_str());
-    let input_name = if arguments.input.as_os_str() == "-" {
-        "<stdin>".to_owned()
-    } else {
-        arguments.input.display().to_string()
-    };
+    let input_name = input_name(&arguments.input);
     let mut diagnostic_renderer = DiagnosticRenderer::new(source.as_str());
     for warning in &parsed.warnings {
         eprintln!(
@@ -520,20 +473,6 @@ fn parse_key(value: &str) -> Result<KeySignature<String>, String> {
     }
     signature_offsets(&key)?;
     Ok(key)
-}
-
-/// Reads the named file, or standard input when the path is `-`.
-fn read_source(path: &PathBuf) -> Result<String, String> {
-    if path.as_os_str() == "-" {
-        let mut source = String::new();
-        io::stdin()
-            .read_to_string(&mut source)
-            .map_err(|error| format!("could not read standard input: {error}"))?;
-        Ok(source)
-    } else {
-        fs::read_to_string(path)
-            .map_err(|error| format!("could not read {}: {error}", path.display()))
-    }
 }
 
 /// Writes all output bytes to the selected file or standard output.
@@ -708,119 +647,6 @@ fn transpose_music_element(
     }
 }
 
-/// Converts a parsed accidental to its signed rational semitone offset.
-fn accidental_offset(accidental: Accidental) -> Offset {
-    match accidental {
-        Accidental::Natural => Offset::ZERO,
-        Accidental::Sharp(value) => Offset {
-            numerator: i128::from(value.numerator),
-            denominator: i128::from(value.denominator),
-        },
-        Accidental::Flat(value) => Offset {
-            numerator: -i128::from(value.numerator),
-            denominator: i128::from(value.denominator),
-        },
-    }
-}
-
-/// Produces an explicit accidental from a rational semitone offset.
-fn offset_accidental(offset: Offset) -> Result<Accidental, String> {
-    if offset.is_zero() {
-        return Ok(Accidental::Natural);
-    }
-    let divisor = Fraction::gcd(
-        offset.numerator.unsigned_abs(),
-        offset.denominator.cast_unsigned(),
-    );
-    let numerator = u32::try_from(offset.numerator.unsigned_abs() / divisor)
-        .map_err(|_| "transposed accidental numerator exceeds u32".to_owned())?;
-    let denominator = u32::try_from(offset.denominator.cast_unsigned() / divisor)
-        .map_err(|_| "transposed accidental denominator exceeds u32".to_owned())?;
-    let fraction = Fraction {
-        numerator,
-        denominator,
-    };
-    Ok(if offset.numerator > 0 {
-        Accidental::Sharp(fraction)
-    } else {
-        Accidental::Flat(fraction)
-    })
-}
-
-/// Spells an absolute transposed pitch, including an explicit accidental.
-fn spell_absolute_pitch(
-    source: Pitch,
-    source_offset: Offset,
-    interval: i16,
-    prefer_flats: bool,
-) -> Result<Pitch, String> {
-    let natural = i16::from(source.octave) * 12 + natural_semitone(source.class);
-    let absolute = Offset::integer(natural)
-        .add(source_offset)
-        .add(Offset::integer(interval));
-    let anchor = if prefer_flats {
-        ceiling_fraction(absolute)
-    } else {
-        absolute.numerator.div_euclid(absolute.denominator)
-    };
-    let chromatic =
-        u8::try_from(anchor.rem_euclid(12)).expect("a value modulo twelve always fits in u8");
-    let (class, integral_accidental) = chromatic_spelling(chromatic, prefer_flats);
-    let octave = i8::try_from(anchor.div_euclid(12))
-        .map_err(|_| "transposed pitch exceeds the supported octave range".to_owned())?;
-    let class_absolute = i16::from(octave) * 12 + natural_semitone(class);
-    let accidental = absolute.subtract(Offset::integer(class_absolute));
-    debug_assert_eq!(
-        accidental.numerator.signum(),
-        i128::from(integral_accidental).signum()
-    );
-    Ok(Pitch {
-        class,
-        octave,
-        accidental: Some(offset_accidental(accidental)?),
-    })
-}
-
-/// Returns the mathematical ceiling of a rational value.
-const fn ceiling_fraction(value: Offset) -> i128 {
-    -(-value.numerator).div_euclid(value.denominator)
-}
-
-/// Selects a conventional sharp- or flat-oriented chromatic spelling.
-const fn chromatic_spelling(chromatic: u8, prefer_flats: bool) -> (PitchClass, i16) {
-    if prefer_flats {
-        match chromatic {
-            0 => (PitchClass::C, 0),
-            1 => (PitchClass::D, -1),
-            2 => (PitchClass::D, 0),
-            3 => (PitchClass::E, -1),
-            4 => (PitchClass::E, 0),
-            5 => (PitchClass::F, 0),
-            6 => (PitchClass::G, -1),
-            7 => (PitchClass::G, 0),
-            8 => (PitchClass::A, -1),
-            9 => (PitchClass::A, 0),
-            10 => (PitchClass::B, -1),
-            _ => (PitchClass::B, 0),
-        }
-    } else {
-        match chromatic {
-            0 => (PitchClass::C, 0),
-            1 => (PitchClass::C, 1),
-            2 => (PitchClass::D, 0),
-            3 => (PitchClass::D, 1),
-            4 => (PitchClass::E, 0),
-            5 => (PitchClass::F, 0),
-            6 => (PitchClass::F, 1),
-            7 => (PitchClass::G, 0),
-            8 => (PitchClass::G, 1),
-            9 => (PitchClass::A, 0),
-            10 => (PitchClass::A, 1),
-            _ => (PitchClass::B, 0),
-        }
-    }
-}
-
 /// Moves a key tonic chromatically and returns its conventional spelling orientation.
 fn transpose_key_tonic(
     key: &mut KeySignature<String>,
@@ -897,260 +723,6 @@ fn select_automatic_spelling(
         (Some(sharp_count), Some(_) | None) => Some((sharp, sharp_count)),
         (None, Some(flat_count)) => Some((flat, flat_count)),
         (None, None) => None,
-    }
-}
-
-/// Creates a key tonic from one sharp- or flat-oriented chromatic spelling.
-const fn chromatic_tonic(chromatic: u8, prefer_flats: bool) -> KeyTonic {
-    let (class, accidental) = chromatic_spelling(chromatic, prefer_flats);
-    KeyTonic {
-        class,
-        accidental: match accidental {
-            -1 => Some(KeyAccidental::Flat),
-            1 => Some(KeyAccidental::Sharp),
-            _ => None,
-        },
-    }
-}
-
-/// Finds the shortest signed tonic interval, preferring upward tritones.
-const fn signed_tonic_interval(source: KeyTonic, destination: KeyTonic) -> i16 {
-    let upward = (tonic_semitone(destination) - tonic_semitone(source)).rem_euclid(12);
-    if upward > 6 { upward - 12 } else { upward }
-}
-
-/// Returns the chromatic semitone number of a key tonic.
-const fn tonic_semitone(tonic: KeyTonic) -> i16 {
-    natural_semitone(tonic.class)
-        + match tonic.accidental {
-            Some(KeyAccidental::Sharp) => 1,
-            Some(KeyAccidental::Flat) => -1,
-            None => 0,
-        }
-}
-
-/// Builds the seven implicit accidental offsets of a conventional key.
-fn signature_offsets(key: &KeySignature<String>) -> Result<[Offset; 7], String> {
-    let tonic = key
-        .tonic
-        .ok_or_else(|| "cannot resolve a key signature without a pitched tonic".to_owned())?;
-    let fifths = conventional_key_fifths(tonic, &key.mode).ok_or_else(|| {
-        format!(
-            "key {} has no conventional seven-accidental signature",
-            key.to_abc()
-        )
-    })?;
-    let mut offsets = [Offset::ZERO; 7];
-    let sharps = [
-        PitchClass::F,
-        PitchClass::C,
-        PitchClass::G,
-        PitchClass::D,
-        PitchClass::A,
-        PitchClass::E,
-        PitchClass::B,
-    ];
-    let flats = [
-        PitchClass::B,
-        PitchClass::E,
-        PitchClass::A,
-        PitchClass::D,
-        PitchClass::G,
-        PitchClass::C,
-        PitchClass::F,
-    ];
-    if fifths > 0 {
-        for class in sharps.iter().take(fifths.unsigned_abs() as usize) {
-            offsets[class_index(*class)] = Offset::integer(1);
-        }
-    } else {
-        for class in flats.iter().take(fifths.unsigned_abs() as usize) {
-            offsets[class_index(*class)] = Offset::integer(-1);
-        }
-    }
-    for parameter in &key.parameters {
-        if parameter.name.is_none()
-            && let Some((class, offset)) = explicit_key_accidental(&parameter.value)
-        {
-            offsets[class_index(class)] = offset;
-        }
-    }
-    Ok(offsets)
-}
-
-/// Returns whether a key's signature or explicit tonic spelling favors flats.
-fn key_prefers_flats(key: &KeySignature<String>) -> bool {
-    key.tonic.is_some_and(|tonic| {
-        conventional_key_fifths(tonic, &key.mode).map_or_else(
-            || tonic.accidental == Some(KeyAccidental::Flat),
-            |fifths| fifths < 0,
-        )
-    })
-}
-
-/// Finds a modal key's relative-major position on the conventional circle of fifths.
-fn conventional_key_fifths(tonic: KeyTonic, mode: &str) -> Option<i8> {
-    let degree = mode_degree(mode);
-    let major_class = shift_class(tonic.class, -degree);
-    let major_pitch = (tonic_semitone(tonic) - mode_semitones(degree)).rem_euclid(12);
-    let accidental = normalize_accidental(major_pitch - natural_semitone(major_class));
-    major_key_fifths(major_class, accidental)
-}
-
-/// Parses a positional key parameter such as `^F`, `_B`, or `^1/2c`.
-fn explicit_key_accidental(value: &str) -> Option<(PitchClass, Offset)> {
-    if !matches!(value.as_bytes().first(), Some(b'^' | b'_' | b'=')) {
-        return None;
-    }
-    let report = parse_music_line(value);
-    let output = report.output.as_ref()?;
-    if !report.is_valid() || output.len() != 1 {
-        return None;
-    }
-    let MusicElement::Note(note) = &output[0].value else {
-        return None;
-    };
-    if note.length.numerator != 1 || note.length.denominator != 1 {
-        return None;
-    }
-    note.pitch
-        .accidental
-        .map(|accidental| (note.pitch.class, accidental_offset(accidental)))
-}
-
-/// Maps common ABC mode spellings to their scale degree above relative major.
-fn mode_degree(mode: &str) -> i8 {
-    let mode = mode.trim().to_ascii_lowercase();
-    if mode == "m" || mode.starts_with("min") || mode.starts_with("aeo") {
-        5
-    } else if mode.starts_with("dor") {
-        1
-    } else if mode.starts_with("phr") {
-        2
-    } else if mode.starts_with("lyd") {
-        3
-    } else if mode.starts_with("mix") {
-        4
-    } else if mode.starts_with("loc") {
-        6
-    } else {
-        0
-    }
-}
-
-/// Replaces a recognized ABC mode alias with its canonical short spelling.
-fn normalize_key_mode(key: &mut KeySignature<String>) {
-    let mode = key.mode.trim().to_ascii_lowercase();
-    key.mode = if mode.is_empty() || mode.starts_with("maj") || mode.starts_with("ion") {
-        String::new()
-    } else if mode == "m" || mode.starts_with("min") || mode.starts_with("aeo") {
-        "m".to_owned()
-    } else if mode.starts_with("dor") {
-        "dor".to_owned()
-    } else if mode.starts_with("phr") {
-        "phr".to_owned()
-    } else if mode.starts_with("lyd") {
-        "lyd".to_owned()
-    } else if mode.starts_with("mix") {
-        "mix".to_owned()
-    } else if mode.starts_with("loc") {
-        "loc".to_owned()
-    } else {
-        key.mode.clone()
-    };
-}
-
-/// Returns the major-scale semitone distance for a diatonic degree.
-const fn mode_semitones(degree: i8) -> i16 {
-    match degree {
-        1 => 2,
-        2 => 4,
-        3 => 5,
-        4 => 7,
-        5 => 9,
-        6 => 11,
-        _ => 0,
-    }
-}
-
-/// Normalizes a chromatic difference to the nearest written accidental.
-const fn normalize_accidental(value: i16) -> i16 {
-    let value = value.rem_euclid(12);
-    if value > 6 { value - 12 } else { value }
-}
-
-/// Maps a conventional written major tonic to its circle-of-fifths count.
-const fn major_key_fifths(class: PitchClass, accidental: i16) -> Option<i8> {
-    match (class, accidental) {
-        (PitchClass::C, -1) => Some(-7),
-        (PitchClass::G, -1) => Some(-6),
-        (PitchClass::D, -1) => Some(-5),
-        (PitchClass::A, -1) => Some(-4),
-        (PitchClass::E, -1) => Some(-3),
-        (PitchClass::B, -1) => Some(-2),
-        (PitchClass::F, 0) => Some(-1),
-        (PitchClass::C, 0) => Some(0),
-        (PitchClass::G, 0) => Some(1),
-        (PitchClass::D, 0) => Some(2),
-        (PitchClass::A, 0) => Some(3),
-        (PitchClass::E, 0) => Some(4),
-        (PitchClass::B, 0) => Some(5),
-        (PitchClass::F, 1) => Some(6),
-        (PitchClass::C, 1) => Some(7),
-        _ => None,
-    }
-}
-
-/// Returns a pitch class at a signed diatonic distance from another class.
-const fn shift_class(class: PitchClass, steps: i8) -> PitchClass {
-    let index = (class_number(class) + steps).rem_euclid(7);
-    match index {
-        0 => PitchClass::C,
-        1 => PitchClass::D,
-        2 => PitchClass::E,
-        3 => PitchClass::F,
-        4 => PitchClass::G,
-        5 => PitchClass::A,
-        _ => PitchClass::B,
-    }
-}
-
-/// Returns the small signed diatonic number for a pitch class.
-const fn class_number(class: PitchClass) -> i8 {
-    match class {
-        PitchClass::C => 0,
-        PitchClass::D => 1,
-        PitchClass::E => 2,
-        PitchClass::F => 3,
-        PitchClass::G => 4,
-        PitchClass::A => 5,
-        PitchClass::B => 6,
-    }
-}
-
-/// Returns the diatonic array index for a pitch class.
-const fn class_index(class: PitchClass) -> usize {
-    match class {
-        PitchClass::C => 0,
-        PitchClass::D => 1,
-        PitchClass::E => 2,
-        PitchClass::F => 3,
-        PitchClass::G => 4,
-        PitchClass::A => 5,
-        PitchClass::B => 6,
-    }
-}
-
-/// Returns the natural chromatic semitone for a pitch class.
-const fn natural_semitone(class: PitchClass) -> i16 {
-    match class {
-        PitchClass::C => 0,
-        PitchClass::D => 2,
-        PitchClass::E => 4,
-        PitchClass::F => 5,
-        PitchClass::G => 7,
-        PitchClass::A => 9,
-        PitchClass::B => 11,
     }
 }
 
@@ -1252,62 +824,6 @@ fn match_chord(s: &str, interval: i16, prefer_flats: bool) -> Option<(usize, Str
     Some((total_chord_len + slash_len, out))
 }
 
-/// Returns whether the inner text begins with a valid chord symbol.
-fn starts_with_chord_root(s: &str) -> bool {
-    let s = s.trim_start();
-    let Some(first) = s.chars().next() else {
-        return false;
-    };
-    if !matches!(first, 'A'..='G') {
-        return false;
-    }
-    let after_root = &s[first.len_utf8()..];
-    let (acc_len, _) = parse_accidental(after_root);
-    let after_acc = &after_root[acc_len..];
-    let type_candidate = if let Some(slash_idx) = after_acc.find('/') {
-        &after_acc[..slash_idx]
-    } else {
-        after_acc
-    };
-    is_valid_chord_type(type_candidate)
-}
-
-/// Parses an accidental prefix from a note or bass-note string.
-fn parse_accidental(s: &str) -> (usize, Option<&str>) {
-    if s.starts_with("##") {
-        (2, Some("##"))
-    } else if s.starts_with('#') {
-        (1, Some("#"))
-    } else if s.starts_with("bb") {
-        (2, Some("bb"))
-    } else if s.starts_with('b') {
-        (1, Some("b"))
-    } else if s.starts_with('♯') {
-        ('♯'.len_utf8(), Some("♯"))
-    } else if s.starts_with('♭') {
-        ('♭'.len_utf8(), Some("♭"))
-    } else if s.starts_with('♮') {
-        ('♮'.len_utf8(), Some("♮"))
-    } else {
-        (0, None)
-    }
-}
-
-/// Parses a bass note and optional accidental, verifying it ends at a boundary.
-fn parse_bass_note(s: &str) -> Option<(usize, (char, Option<&str>))> {
-    let bass_char = s.chars().next()?;
-    if !matches!(bass_char, 'A'..='G' | 'a'..='g') {
-        return None;
-    }
-    let after_bass_char = &s[bass_char.len_utf8()..];
-    let (acc_len, acc) = parse_accidental(after_bass_char);
-    let after_bass = &after_bass_char[acc_len..];
-    if !is_chord_boundary(after_bass) {
-        return None;
-    }
-    Some((bass_char.len_utf8() + acc_len, (bass_char, acc)))
-}
-
 /// Transposes a single note letter and accidental by a signed chromatic interval.
 fn transpose_note(
     letter: char,
@@ -1373,189 +889,16 @@ fn transpose_note(
     (new_letter, new_acc_str)
 }
 
-/// Returns whether a slice starts at a valid boundary between chord tokens.
-fn is_chord_boundary(s: &str) -> bool {
-    if s.is_empty() {
-        return true;
-    }
-    let first = s.chars().next().expect("slice is not empty");
-    first.is_ascii_whitespace()
-        || matches!(
-            first,
-            ')' | '(' | '[' | ']' | '{' | '}' | ',' | ';' | '|' | ':' | '"' | '<' | '>'
-        )
-        || (first == '-' && s.len() > 1 && matches!(s.as_bytes()[1], b'A'..=b'G'))
-}
-
-/// Returns whether the string is composed entirely of valid chord-type descriptors.
-fn is_valid_chord_type(mut s: &str) -> bool {
-    if s.is_empty() {
-        return true;
-    }
-    while !s.is_empty() {
-        if let Some(rest) = s.strip_prefix('(') {
-            let Some(close_idx) = rest.find(')') else {
-                return false;
-            };
-            let inside = &rest[..close_idx];
-            if !is_valid_chord_extension_list(inside) {
-                return false;
-            }
-            s = &rest[close_idx + 1..];
-            continue;
-        }
-
-        let Some(len) = match_chord_type_token(s) else {
-            return false;
-        };
-        s = &s[len..];
-    }
-    true
-}
-
-/// Returns whether a parenthesized list contains only valid chord extensions.
-fn is_valid_chord_extension_list(mut s: &str) -> bool {
-    s = s.trim();
-    if s.is_empty() {
-        return false;
-    }
-    while !s.is_empty() {
-        s = s.trim_start();
-        if let Some(rest) = s.strip_prefix([',', '/', ' ']) {
-            s = rest;
-            continue;
-        }
-        let Some(len) = match_chord_type_token(s) else {
-            return false;
-        };
-        s = &s[len..];
-    }
-    true
-}
-
-const CHORD_TYPE_TOKENS: &[&str] = &[
-    "diminished",
-    "augmented",
-    "minor",
-    "major",
-    "m/maj7",
-    "m/maj9",
-    "m(maj7)",
-    "m(maj9)",
-    "add11",
-    "add13",
-    "omit3",
-    "omit5",
-    "sus4",
-    "sus2",
-    "add2",
-    "add4",
-    "add9",
-    "maj7",
-    "maj9",
-    "maj11",
-    "maj13",
-    "min7",
-    "min9",
-    "min11",
-    "min13",
-    "dim7",
-    "aug7",
-    "sus",
-    "min",
-    "maj",
-    "dim",
-    "aug",
-    "add",
-    "alt",
-    "no3",
-    "no5",
-    "6/9",
-    "69",
-    "11",
-    "13",
-    "#11",
-    "b11",
-    "+11",
-    "♯11",
-    "♭11",
-    "#13",
-    "b13",
-    "-13",
-    "♯13",
-    "♭13",
-    "#5",
-    "b5",
-    "+5",
-    "-5",
-    "♯5",
-    "♭5",
-    "#9",
-    "b9",
-    "+9",
-    "-9",
-    "♯9",
-    "♭9",
-    "o7",
-    "°7",
-    "ø7",
-    "Δ7",
-    "^7",
-    "Δ9",
-    "^9",
-    "M7",
-    "M9",
-    "M11",
-    "M13",
-    "m7",
-    "m9",
-    "m11",
-    "m13",
-    "m6",
-    "m2",
-    "m4",
-    "m5",
-    "m8",
-    "m",
-    "M",
-    "2",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-    "9",
-    "+",
-    "-",
-    "°",
-    "ø",
-    "0",
-    "Δ",
-    "^",
-    "#",
-    "b",
-];
-
-/// Matches the longest recognized chord-type token at the start of a slice.
-fn match_chord_type_token(s: &str) -> Option<usize> {
-    for &token in CHORD_TYPE_TOKENS {
-        if s.starts_with(token) {
-            return Some(token.len());
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use abc_parser::IntoOwnedAst;
+    use abc_parser::MeasureAccidentals;
+    use abc_parser::Offset;
     use abc_parser::ToAbc;
     use abc_parser::parse;
     use clap::Parser;
 
     use super::Arguments;
-    use super::MeasureAccidentals;
-    use super::Offset;
     use super::Request;
     use super::SpellingPreference;
     use super::parse_key;
