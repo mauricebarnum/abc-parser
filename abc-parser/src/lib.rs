@@ -37,9 +37,12 @@ use chumsky::span::Span as ChumskySpan;
 mod ast;
 mod bar_duration;
 pub mod build_info;
+pub mod chord;
 mod diagnostics;
 mod emit;
+pub mod key;
 mod parser;
+pub mod pitch;
 mod source;
 
 include!(concat!(env!("OUT_DIR"), "/architecture.rs"));
@@ -102,6 +105,14 @@ use ast::field_kind;
 pub use bar_duration::BarDurationOptions;
 pub use bar_duration::BarDurationPickupPolicy;
 pub use bar_duration::bar_duration_warnings;
+pub use chord::CHORD_TYPE_TOKENS;
+pub use chord::is_chord_boundary;
+pub use chord::is_valid_chord_extension_list;
+pub use chord::is_valid_chord_type;
+pub use chord::match_chord_type_token;
+pub use chord::parse_accidental;
+pub use chord::parse_bass_note;
+pub use chord::starts_with_chord_root;
 pub use chumsky::span::SimpleSpan;
 pub use diagnostics::DiagnosticRenderer;
 pub use diagnostics::ErrorKind;
@@ -117,6 +128,17 @@ pub use emit::AbcEmitter;
 pub use emit::EmitOptions;
 pub use emit::NoteLengthStyle;
 pub use emit::ToAbc;
+pub use key::chromatic_tonic;
+pub use key::conventional_key_fifths;
+pub use key::explicit_key_accidental;
+pub use key::key_prefers_flats;
+pub use key::major_key_fifths;
+pub use key::mode_degree;
+pub use key::mode_semitones;
+pub use key::normalize_key_mode;
+pub use key::signature_offsets;
+pub use key::signed_tonic_interval;
+pub use key::tonic_semitone;
 pub use parser::Block;
 pub use parser::BlocksContext;
 pub use parser::chord_parser;
@@ -127,7 +149,21 @@ pub use parser::music_element_parser;
 pub use parser::music_line_parser;
 pub use parser::note_length_parser;
 pub use parser::parse_blocks;
+pub use parser::pitch_parser;
 pub use parser::version_marker;
+pub use pitch::MeasureAccidentals;
+pub use pitch::Offset;
+pub use pitch::accidental_offset;
+pub use pitch::ceiling_fraction;
+pub use pitch::chromatic_spelling;
+pub use pitch::class_index;
+pub use pitch::class_number;
+pub use pitch::natural_semitone;
+pub use pitch::normalize_accidental;
+pub use pitch::offset_accidental;
+pub use pitch::parse_single_pitch;
+pub use pitch::shift_class;
+pub use pitch::spell_absolute_pitch;
 pub use source::IntoOwnedAst;
 pub use source::PlaceholderResolver;
 pub use source::ResolveError;
@@ -280,6 +316,36 @@ pub fn parse_chord(source: &str) -> Result<Chord, ParseError> {
                 &errors,
                 ErrorKind::InvalidMusic,
                 "invalid chord",
+                source.len(),
+            )
+        })
+}
+
+/// Parses a standalone ABC pitch token (optional accidental, pitch letter, and
+/// octave modifiers) into a [`Pitch`].
+///
+/// ```
+/// use abc_parser::PitchClass;
+/// use abc_parser::parse_pitch;
+///
+/// let pitch = parse_pitch("^F,").unwrap();
+/// assert_eq!(pitch.class, PitchClass::F);
+/// assert_eq!(pitch.octave, -1);
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if the string is not a single valid pitch token.
+pub fn parse_pitch(source: &str) -> Result<Pitch, ParseError> {
+    pitch_parser()
+        .then_ignore(chumsky::primitive::end())
+        .parse(source)
+        .into_result()
+        .map_err(|errors| {
+            first_parser_error(
+                &errors,
+                ErrorKind::InvalidMusic,
+                "invalid pitch",
                 source.len(),
             )
         })

@@ -78,7 +78,11 @@ where
         .then(unsigned().or_not())
         .then(just('/').ignore_then(unsigned().or_not()).or_not())
         .try_map(|((markers, numerator), denominator), span| {
-            let denominator = denominator.flatten().unwrap_or(1);
+            let denominator = match denominator {
+                None => 1,
+                Some(None) => 2,
+                Some(Some(value)) => value,
+            };
             if denominator == 0 {
                 return Err(Rich::custom(
                     span,
@@ -124,8 +128,8 @@ where
         })
 }
 
-/// Parses a pitched note directly into semantic pitch and duration values.
-pub(crate) fn note<'src, I>() -> impl Parser<'src, I, Note, Extra<'src, I>> + Clone
+/// Parses a pitch with its optional accidental and octave modifiers.
+pub fn pitch_parser<'src, I>() -> impl Parser<'src, I, Pitch, Extra<'src, I>> + Clone
 where
     I: ValueInput<'src, Token = char>,
     I::Span: Clone,
@@ -134,15 +138,24 @@ where
         .or_not()
         .then(pitch_letter())
         .then(octave_modifier())
-        .then(note_length_parser())
-        .map(|(((accidental, letter), octave_modifier), length)| Note {
-            pitch: Pitch {
-                class: letter.class,
-                octave: letter.octave_offset.saturating_add(octave_modifier),
-                accidental,
-            },
-            length,
+        .map(|((accidental, letter), octave_modifier)| Pitch {
+            class: letter.class,
+            octave: letter.octave_offset.saturating_add(octave_modifier),
+            accidental,
         })
+        .labelled("pitch")
+        .as_context()
+}
+
+/// Parses a pitched note directly into semantic pitch and duration values.
+pub(crate) fn note<'src, I>() -> impl Parser<'src, I, Note, Extra<'src, I>> + Clone
+where
+    I: ValueInput<'src, Token = char>,
+    I::Span: Clone,
+{
+    pitch_parser()
+        .then(note_length_parser())
+        .map(|(pitch, length)| Note { pitch, length })
         .labelled("note")
         .as_context()
 }
