@@ -16,7 +16,7 @@ name = "abc-language-server"
 path = "src/main.rs"
 
 [dependencies]
-abc-parser = { path = "../abc-parser" }
+abc-parser = { path = "../abc-parser", version = "0.1.0" }
 clap = { version = "4.6.4", default-features = false, features = ["derive", "help", "std", "usage"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
