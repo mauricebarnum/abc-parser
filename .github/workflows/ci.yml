@@ -31,7 +31,7 @@ jobs:
         uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
 
       - name: Install nextest
-        uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
+        uses: taiki-e/install-action@d75f3433052800716ea4e9618494c31d16de4188 # nextest
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@6dcf3e7c59964861939e872c6af69b6613533a4a # cargo-deny
