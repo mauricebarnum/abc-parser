@@ -1,0 +1,76 @@
+# Configuration for cargo-deny: https://embarkstudios.github.io/cargo-deny/
+#
+# Run `cargo deny check` to enforce all sections; pre-commit and CI do this.
+
+[graph]
+all-features = true
+
+# Lint levels used by every section:
+# * deny  - produce an error and fail the check
+# * warn  - produce a warning but pass the check
+# * allow - produce nothing
+
+# Security advisories from the RustSec advisory database.
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2026-0173: `proc-macro-error2` is unmaintained (not vulnerable);
+    # only reachable through the optional `doc-mermaid` rustdoc feature via
+    # `aquamarine`. No fix is available: `aquamarine` 0.6.0 is its latest
+    # release and has no drop-in mermaid alternative, so this is ignored until
+    # one exists. Drop when the `doc-mermaid` feature is removed or
+    # `aquamarine` stops needing it.
+    { id = "RUSTSEC-2026-0173", reason = "unmaintained, doc-only optional dependency" },
+]
+
+# Software licenses of every crate in the graph.
+# Seeded from the licenses actually in use (see `cargo deny list`).
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+registries = []
+
+# Banned crates and duplicate versions.
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+# Duplicates forced by upstream crates that require different major versions;
+# `cargo update` cannot converge them. Remove the entry (and keep the check
+# failing meanwhile) once upstream releases make the version obsolete.
+skip = [
+    # dashmap 6.x (tower-lsp-server) requires 0.14; chumsky 0.13 requires 0.15.
+    "hashbrown@0.14.5",
+    # tracing-attributes 0.1 and aquamarine 0.6 require syn 2; clap, serde,
+    # futures, and tokio derive macros use syn 3.
+    "syn@2.0.119",
+]
+skip-tree = []
+
+# Where crates may be fetched from: crates.io only.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

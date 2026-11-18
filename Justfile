@@ -50,8 +50,12 @@ fmt *args:
 clippy *args:
     cargo clippy --workspace --all-targets --all-features {{ args }}
 
+# Run all cargo-deny checks: advisories, bans, licenses, and sources.
+deny *args:
+    cargo deny check {{ args }}
+
 # Run every check CI performs.
-check: fmt-check clippy test-all
+check: fmt-check clippy test-all deny
 
 # Build documentation and open it in the default browser.
 doc *args:
