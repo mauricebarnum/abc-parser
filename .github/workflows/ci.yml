@@ -31,10 +31,10 @@ jobs:
         uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
 
       - name: Install nextest
-        uses: taiki-e/install-action@d75f3433052800716ea4e9618494c31d16de4188 # nextest
+        uses: taiki-e/install-action@11535f61e49cc8fdbdbb5aacee608b494b699f42 # nextest
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@6dcf3e7c59964861939e872c6af69b6613533a4a # cargo-deny
+        uses: taiki-e/install-action@8386a06952ce337fef6f33e6cfdefc01d77b8701 # cargo-deny
 
       - name: Cache dependencies and build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
