@@ -20,7 +20,7 @@ abc-parser = { path = "../abc-parser", version = "0.1.0" }
 clap = { version = "4.6.4", default-features = false, features = ["derive", "help", "std", "usage"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", default-features = false, features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", default-features = false, features = ["io-std", "macros", "rt", "sync"] }
 tower-lsp-server = { version = "0.23", default-features = false, features = ["runtime-tokio"] }
 
 [dev-dependencies]
