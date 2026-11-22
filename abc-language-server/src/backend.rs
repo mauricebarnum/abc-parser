@@ -326,20 +326,27 @@ impl Backend {
             return Some(Vec::new());
         }
         let style = self.state.read().await.config.format.note_length;
-        let scope = range
-            .and_then(|range| document.index().byte_range(range, &encoding))
-            .unwrap_or_else(|| 0..document.index().source().len());
-        let mut edits = analysis::duration_edits(
-            &document.model.blocks,
-            document.index(),
-            &encoding,
-            style,
-            scope,
-        );
-        if range.is_none() {
-            edits.extend(whitespace_edits(document.index(), &encoding, options));
-        }
-        Some(edits)
+        let options = options.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let scope = range
+                    .and_then(|range| document.index().byte_range(range, &encoding))
+                    .unwrap_or_else(|| 0..document.index().source().len());
+                let mut edits = analysis::duration_edits(
+                    &document.model.blocks,
+                    document.index(),
+                    &encoding,
+                    style,
+                    scope,
+                );
+                if range.is_none() {
+                    edits.extend(whitespace_edits(document.index(), &encoding, &options));
+                }
+                edits
+            })
+            .await
+            .expect("ABC formatting task should not panic"),
+        )
     }
 }
 
@@ -612,16 +619,18 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let Some((document, encoding)) = self.document(&params.text_document.uri).await else {
+        let uri = params.text_document.uri;
+        let Some((document, encoding)) = self.document(&uri).await else {
             return Ok(None);
         };
-        let symbols =
-            analysis::document_symbols(&document.model.blocks, document.index(), &encoding);
-        if self.state.read().await.supports_hierarchical_symbols {
-            return Ok(Some(DocumentSymbolResponse::Nested(symbols)));
-        }
-        let flat =
-            symbols
+        let hierarchical = self.state.read().await.supports_hierarchical_symbols;
+        let response = tokio::task::spawn_blocking(move || {
+            let symbols =
+                analysis::document_symbols(&document.model.blocks, document.index(), &encoding);
+            if hierarchical {
+                return DocumentSymbolResponse::Nested(symbols);
+            }
+            let flat = symbols
                 .into_iter()
                 .flat_map(|symbol| {
                     let tune_name = symbol.name.clone();
@@ -629,7 +638,7 @@ impl LanguageServer for Backend {
                         symbol.name,
                         symbol.kind,
                         symbol.selection_range,
-                        params.text_document.uri.clone(),
+                        uri.clone(),
                         None,
                     )];
                     flattened.extend(symbol.children.unwrap_or_default().into_iter().map(
@@ -638,7 +647,7 @@ impl LanguageServer for Backend {
                                 child.name,
                                 child.kind,
                                 child.selection_range,
-                                params.text_document.uri.clone(),
+                                uri.clone(),
                                 Some(tune_name.clone()),
                             )
                         },
@@ -646,14 +655,22 @@ impl LanguageServer for Backend {
                     flattened
                 })
                 .collect();
-        Ok(Some(DocumentSymbolResponse::Flat(flat)))
+            DocumentSymbolResponse::Flat(flat)
+        })
+        .await
+        .expect("ABC document symbol task should not panic");
+        Ok(Some(response))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let Some((document, _)) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        Ok(Some(analysis::folding_ranges(document.index())))
+        let ranges =
+            tokio::task::spawn_blocking(move || analysis::folding_ranges(document.index()))
+                .await
+                .expect("ABC folding range task should not panic");
+        Ok(Some(ranges))
     }
 
     async fn selection_range(
@@ -685,10 +702,13 @@ impl LanguageServer for Backend {
         let Some((document, encoding)) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        Ok(Some(
+        let tokens = tokio::task::spawn_blocking(move || {
             analysis::semantic_tokens(&document.model.blocks, document.index(), &encoding, None)
-                .into(),
-        ))
+                .into()
+        })
+        .await
+        .expect("ABC semantic tokens task should not panic");
+        Ok(Some(tokens))
     }
 
     async fn semantic_tokens_range(
@@ -698,15 +718,19 @@ impl LanguageServer for Backend {
         let Some((document, encoding)) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        Ok(Some(
+        let range = params.range;
+        let tokens = tokio::task::spawn_blocking(move || {
             analysis::semantic_tokens(
                 &document.model.blocks,
                 document.index(),
                 &encoding,
-                Some(params.range),
+                Some(range),
             )
-            .into(),
-        ))
+            .into()
+        })
+        .await
+        .expect("ABC semantic tokens task should not panic");
+        Ok(Some(tokens))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -736,50 +760,55 @@ impl LanguageServer for Backend {
         if document.model.has_errors {
             return Ok(Some(Vec::new()));
         }
-        let Some(scope) = document.index().byte_range(params.range, &encoding) else {
-            return Ok(Some(Vec::new()));
-        };
-        let scope = if scope.is_empty() {
-            document.index().line_bounds(scope.start).unwrap_or(scope)
-        } else {
-            scope
-        };
-        let actions = [
-            (
-                "Use shorthand note lengths",
-                "refactor.rewrite.abc.noteLength.shorthand",
-                NoteLengthStyle::Shorthand,
-            ),
-            (
-                "Use explicit note-length denominators",
-                "refactor.rewrite.abc.noteLength.explicit",
-                NoteLengthStyle::Explicit,
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(title, kind, style)| {
-            let edits = analysis::duration_edits(
-                &document.model.blocks,
-                document.index(),
-                &encoding,
-                style,
-                scope.clone(),
-            );
-            (!edits.is_empty()).then(|| {
-                let mut changes = HashMap::new();
-                changes.insert(uri.clone(), edits);
-                CodeActionOrCommand::CodeAction(CodeAction {
-                    title: title.to_owned(),
-                    kind: Some(CodeActionKind::new(kind)),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..WorkspaceEdit::default()
-                    }),
-                    ..CodeAction::default()
+        let range = params.range;
+        let actions = tokio::task::spawn_blocking(move || {
+            let Some(scope) = document.index().byte_range(range, &encoding) else {
+                return Vec::new();
+            };
+            let scope = if scope.is_empty() {
+                document.index().line_bounds(scope.start).unwrap_or(scope)
+            } else {
+                scope
+            };
+            [
+                (
+                    "Use shorthand note lengths",
+                    "refactor.rewrite.abc.noteLength.shorthand",
+                    NoteLengthStyle::Shorthand,
+                ),
+                (
+                    "Use explicit note-length denominators",
+                    "refactor.rewrite.abc.noteLength.explicit",
+                    NoteLengthStyle::Explicit,
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(title, kind, style)| {
+                let edits = analysis::duration_edits(
+                    &document.model.blocks,
+                    document.index(),
+                    &encoding,
+                    style,
+                    scope.clone(),
+                );
+                (!edits.is_empty()).then(|| {
+                    let mut changes = HashMap::new();
+                    changes.insert(uri.clone(), edits);
+                    CodeActionOrCommand::CodeAction(CodeAction {
+                        title: title.to_owned(),
+                        kind: Some(CodeActionKind::new(kind)),
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(changes),
+                            ..WorkspaceEdit::default()
+                        }),
+                        ..CodeAction::default()
+                    })
                 })
             })
+            .collect()
         })
-        .collect();
+        .await
+        .expect("ABC code action task should not panic");
         Ok(Some(actions))
     }
 }
