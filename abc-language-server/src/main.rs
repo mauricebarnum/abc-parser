@@ -38,7 +38,7 @@ struct Arguments {
     verbose: bool,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     if let Some(exit_code) = build_info::check_version_and_exit("abc-language-server") {
         return exit_code;
